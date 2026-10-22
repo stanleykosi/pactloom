@@ -315,7 +315,7 @@ class SyntheticStartupFixture(F.S.F.Fixture):
             path=pathlib.Path(self._data[key]);path.write_bytes(b'{}');path.chmod(0o600)
         for index in (1,2):
             self._data['sources'].append({'role':'signer'+str(index),'original_capture':{'scope':{
-                'proposal':{'agreement_id':'synthetic-agreement'},
+                'proposal':{'manifest':{'agreement':{'agreement_id':'synthetic-agreement'}}},
                 'constructor':{'principal_id':'synthetic-roster-host'},
                 'prover':{'principal_id':'synthetic-roster-host'}}}})
     def check(self):pass
@@ -404,10 +404,98 @@ class HostStartupContractTests(unittest.TestCase):
                     with self.assertRaises((F.C.Rejected,F.S.F.C.Rejected)):flow.expected_host_line(self.PROMPTS[0])
                     self.assertIsNone(flow.startup_issued);flow.controller.click.assert_not_called()
             self.fixture._data=copy.deepcopy(original)
-            self.fixture._data['sources'][source]['original_capture']['scope']['proposal']['agreement_id']='other'
+            self.fixture._data['sources'][source]['original_capture']['scope']['proposal']['manifest']['agreement']['agreement_id']='other'
             with self.assertRaises((F.C.Rejected,F.S.F.C.Rejected)):self.fixture.validate_host_startup()
         self.fixture._data=original;self.fixture._data['purpose']='unrecognized'
         with self.assertRaises((F.C.Rejected,F.S.F.C.Rejected)):self.fixture.validate_host_startup()
+    def test_native_nested_proposal_schema_is_bound_to_rust_sources(self):
+        root=pathlib.Path(__file__).resolve().parents[2]
+        def body(path,name):
+            text=(root/path).read_text()
+            return text.split('pub struct '+name+' {',1)[1].split('}',1)[0]
+        self.assertIn('pub manifest: ProposalManifest,',body('crates/wholepact-core/src/proposal.rs','ProposalInput'))
+        self.assertNotIn('pub agreement_id:',body('crates/wholepact-core/src/proposal.rs','ProposalInput'))
+        self.assertIn('pub agreement: AgreementDraft,',body('crates/wholepact-core/src/proposal.rs','ProposalManifest'))
+        self.assertIn('pub agreement_id: String,',body('crates/wholepact-core/src/agreement.rs','AgreementDraft'))
+        self.assertIn('pub proposal: ProposalInput,',body('crates/wholepact-wallet/src/durable_construction_v1.rs','DurableConstructionScopeV1'))
+        creator=next(root.rglob('coordinated_full_fixture_v1.rs')).read_text()
+        capture=next(root.rglob('private_fixed_v2.rs')).read_text()
+        self.assertIn('"request": captured.history, "scope": captured.scope,',creator)
+        self.assertIn('scope: DurableConstructionScopeV1 {',capture)
+        self.assertIn('proposal: session.proposal().clone(),',capture)
+        flow=self.flow()
+        self.assertEqual(flow.expected_host_line(self.PROMPTS[0]),('public',self.fixture._data['profile']))
+        self.assertEqual(flow.startup_issued,0)
+        self.assertEqual(flow.host_occurrences.attempts,0)
+        flow.controller.click.assert_not_called()
+
+    def test_other_startup_and_reviewer_field_paths_match_native_serialized_types(self):
+        # Source-bound schema witness, not execution of serde or a product fixture.
+        # Every new consumed path is traced to a declared serialized Rust field.
+        root=pathlib.Path(__file__).resolve().parents[2]
+        def fields(path,name,expected):
+            text=(root/path).read_text();head,tail=text.split('struct '+name+' {',1)
+            self.assertIn('Serialize',head[-250:])
+            body=tail.split('}',1)[0]
+            for field,kind in expected.items():self.assertIn('pub '+field+': '+kind+',',body)
+            self.assertNotIn('serde(flatten)',body)
+        fields('crates/wholepact-protocol/src/durable_proposal_v1.rs','FixedProposalIdentityV1',
+               {'agreement_id':'String'})
+        fields('crates/wholepact-wallet/src/durable_construction_v1.rs','DurableConstructionScopeV1',
+               {'proposal':'ProposalInput','account_id':'String','participant_id':'String',
+                'constructor':'ConstructionRecipientV1','prover':'ConstructionRecipientV1'})
+        fields('crates/wholepact-wallet/src/durable_construction_v1.rs','ConstructionRecipientV1',
+               {'principal_id':'String','authenticated_local_grant_digest':'String'})
+        fields('crates/wholepact-signer/src/authority_bridge/durable_construction_v1.rs','DurableConstructionHistoryRequestV1',
+               {'operation_id':'String','expected_request_digest':'String'})
+        fields('crates/wholepact-signer/src/native_ui/qualification/durable_proposal_v1.rs','DurableDeliveryReopenSelectorV2',
+               {'account_id':'String','owner_setup_json':'String'})
+        fields('crates/wholepact-native-host/src/host/financial/durable_delivery_admission_v2.rs','DeliveryChoicesV2',
+               {'submission_operation_id':'String','provider':'wholepact_core::manual_construction::PreconstructionProvider',
+                'route':'DurableDeliveryRouteV2','minimum_expiry_margin_blocks':'u32',
+                'maximum_fresh_admission_lifetime_ms':'u64','maximum_explicitly_approved_attempts':'u32'})
+        fields('crates/wholepact-core/src/manual_construction.rs','PreconstructionProvider',
+               {'source_id':'String','endpoint':'String','trust_profile':'String'})
+        route=(root/'crates/wholepact-authority/src/durable_delivery_scope_v2.rs').read_text()
+        self.assertIn('#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]',route)
+        self.assertIn('Direct {},',route);self.assertIn('ExistingHttpConnect { origin: String },',route)
+        creator=next(root.rglob('coordinated_full_fixture_v1.rs')).read_text()
+        for field,value in (('profile','profile'),('workspace','workspace'),('financial','financial'),
+                            ('fixed_identity','fixed_identity'),('delivery_choices','choices'),
+                            ('reopen_selector','selector'),('account_id','account.account_id'),
+                            ('request','captured.history'),('scope','captured.scope')):
+            self.assertIn('"'+field+'": '+value,creator)
+        self.assertIn('"role": if index == 1 { "signer1" } else { "signer2" }',creator)
+        for basename in F.S.F._HANDOFF_NAMES.values():self.assertIn('"'+basename+'"',creator)
+        self.assertIn('"'+F.S.F.FIXTURE_FILE+'"',creator)
+        self.assertIn('create_new(true).mode(0o600)',creator)
+        self.assertIn('libc::O_NOFOLLOW | libc::O_CLOEXEC',creator)
+        self.assertIn('Permissions::from_mode(0o700)',creator)
+        self.assertIn('child.temporary_root().join(READY_FILE)',creator)
+
+    def test_native_nested_agreement_has_no_flattened_fallback(self):
+        import copy
+        original=copy.deepcopy(self.fixture._data)
+        invalid=({'agreement_id':'synthetic-agreement'},
+                 {'manifest':{'agreement_id':'synthetic-agreement'}},
+                 {'manifest':{'agreement':{}}},
+                 {'manifest':{'agreement':{'agreement_id':'other'}},'agreement_id':'synthetic-agreement'},
+                 {'manifest':{'agreement':{'agreement_id':None}}},
+                 {'manifest':{'agreement':{'agreement_id':[]}}})
+        for source in range(2):
+            for proposal in invalid:
+                with self.subTest(source=source,proposal=proposal):
+                    self.fixture._data=copy.deepcopy(original)
+                    self.fixture._data['sources'][source]['original_capture']['scope']['proposal']=proposal
+                    flow=self.flow()
+                    with self.assertRaises((F.C.Rejected,F.S.F.C.Rejected)) as error:
+                        flow.expected_host_line(self.PROMPTS[0])
+                    self.assertEqual(error.exception.code,'fixture')
+                    self.assertIsNone(flow.startup_issued)
+                    self.assertEqual(flow.host_occurrences.attempts,0)
+                    self.assertEqual(flow.controller.mock_calls,[])
+        self.fixture._data=original
+
     def test_native_only_credential_destination_is_absent_outside_profile_and_uncreated(self):
         path=pathlib.Path(self.fixture.host_credential_destination())
         self.assertEqual(path.parent,self.root);self.assertFalse(path.exists())

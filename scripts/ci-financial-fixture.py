@@ -155,7 +155,7 @@ class Fixture:
             for index,source in enumerate(self._data['sources'],1):
                 C.require(source['role']=='signer'+str(index),'fixture')
                 scope=source['original_capture']['scope']
-                C.require(scope['proposal']['agreement_id']==agreement,'fixture')
+                C.require(scope['proposal']['manifest']['agreement']['agreement_id']==agreement,'fixture')
                 for role in ('constructor','prover'):
                     C.require(scope[role]['principal_id']=='synthetic-roster-host','fixture')
         except (KeyError,TypeError,AttributeError):
