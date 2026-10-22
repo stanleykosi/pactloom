@@ -1514,3 +1514,117 @@ class SemanticStartupCeilingTests(unittest.TestCase):
         old=F.FullFlow(mock.Mock(),mock.Mock(),mock.Mock(expected_profile=F.C.EXTERNAL_PROFILE),None)
         self.assertIsNone(old.startup_wait_ceiling())
         self.assertNotIn('_wait_ceiling_installed',old.controller.__dict__)
+
+class HostReadOnlyTransitionTests(unittest.TestCase):
+    def test_actual_run_configure_then_pretail_snapshot_does_not_fail_host_capture(self):
+        from unittest import mock
+        state=dict(clicked=False,pretail=0,generation=0,views=0)
+        text='Native source opening pending.';n=F.H.count(text)
+        class Observer:
+            expected_profile=F.C.SEMANTIC_PROFILE
+            def read(self):return []
+            def host_view(self,s):state['views']+=1;return text
+            def next_snapshot(self,deadline):
+                state['generation']+=1
+                if state['clicked'] and state['pretail']:
+                    state['pretail']-=1;phase='Selecting'
+                else:phase='V3Configuring' if state['clicked'] else 'Selecting'
+                owner='Signer1' if phase=='V3Configuring' else None
+                widgets=[dict(tag='HostOutput',owner=None,enabled=True,rect=[10,10,600,230]),dict(tag='BeginHostLine',owner=None,enabled=True,rect=[10,250,200,280])]
+                if phase=='Selecting':widgets.append(dict(tag='ConfigureV3',owner='Signer1',enabled=True,rect=[10,300,200,330]))
+                return dict(phase=phase,subphase='None',owner=owner,view_generation=state['generation'],focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=widgets,host_view_id=1,host_observation=dict(revision=14,nonws_end=n,context_valid=True,entry='Idle',editor=None,view=dict(rect=[10,10,600,230],nonws=n,rows=1)))
+        fixture=mock.Mock(deadline_ns=time.monotonic_ns()+F.C.ORIGINAL_NS)
+        temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup)
+        fixture.source_path.return_value=str(pathlib.Path(temp.name)/'not-created')
+        controller=mock.Mock()
+        def click(x,y):
+            self.assertEqual((x,y),(105,315));state.update(clicked=True,pretail=1)
+        controller.click.side_effect=click
+        flow=F.FullFlow(controller,fixture,Observer(),mock.Mock())
+        flow.startup_index=13;flow.startup_waiting=True;flow.startup_focus_seen=True
+        flow.host_lines=13;flow.host_stage='Commands'
+        class SourceReached(Exception):pass
+        fixture.form.side_effect=SourceReached()
+        with self.assertRaises(SourceReached):flow.run()
+        controller.click.assert_called_once();controller.type_ascii.assert_not_called();controller._command.assert_not_called()
+        controller.observe.assert_not_called();flow.ocr.read.assert_not_called()
+        fixture.form.assert_called_once_with('Signer1','v3')
+        self.assertEqual(flow.host_lines,13);self.assertIsNone(flow.pending_host)
+        self.assertEqual(flow.location,dict(phase='V3Configuring',subphase='None',owner='Signer1'))
+        self.assertEqual(flow.actions,1)
+
+    def capture_fixture(self,change_at=None,mutate=None,profile=None):
+        import copy
+        from unittest import mock
+        profile=profile or F.C.SEMANTIC_PROFILE
+        text='Native source opening pending.';n=F.H.count(text)
+        frames=[]
+        for i in range(1,7):
+            s=dict(phase='Selecting',subphase='None',owner=None,view_generation=i,focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=[dict(tag='HostOutput',owner=None,enabled=True,rect=[10,10,600,230])],host_observation=dict(revision=14,nonws_end=n,context_valid=True,entry='Idle',editor=None,view=dict(rect=[10,10,600,230],nonws=n,rows=1)))
+            if profile==F.C.SEMANTIC_PROFILE:s['host_view_id']=1
+            if change_at is not None and i>=change_at:s.update(phase='V3Configuring',owner='Signer1')
+            if mutate is not None:mutate(s,i)
+            frames.append(s)
+        fixture=mock.Mock(deadline_ns=time.monotonic_ns()+F.C.ORIGINAL_NS)
+        controller=mock.Mock();view=mock.Mock(return_value=text)
+        native=F.S.NativeScenario(controller,fixture,mock.Mock(side_effect=copy.deepcopy(frames)),expected_profile=profile,host_view=view if profile==F.C.SEMANTIC_PROFILE else None)
+        return native,controller,view
+    def test_each_readonly_bracket_position_defers_without_effect_or_admitted_text(self):
+        for position in range(1,7):
+            with self.subTest(position=position):
+                native,controller,view=self.capture_fixture(position)
+                with self.assertRaises(F.S.HostObservationChanged):native.capture_host('Selecting',None,None)
+                self.assertLessEqual(view.call_count,1)
+                self.assertEqual(set(c[0] for c in controller.mock_calls),{'wait_render_progress'})
+                self.assertEqual(native._used,set())
+    def test_unsafe_later_frame_wins_over_earlier_transition(self):
+        for unsafe in ('focus','host','secret','Revoked','Finished'):
+            with self.subTest(unsafe=unsafe):
+                def mutate(s,i):
+                    if i!=2:return
+                    s['host_view_id']=None;s['host_observation']['view']=None
+                    if unsafe=='focus':s['focused']=False
+                    elif unsafe=='host':s['host_input']=True;s['host_observation']['entry']='Writing'
+                    elif unsafe=='secret':s['secret_input']=True
+                    else:s.update(phase=unsafe,owner=None)
+                native,controller,view=self.capture_fixture(1,mutate)
+                with self.assertRaises(F.S.C.Rejected) as error:native.capture_host('Selecting',None,None)
+                self.assertEqual(str(error.exception),'sensitive_capture' if unsafe in ('host','secret') else 'input_phase')
+                view.assert_not_called();controller.click.assert_not_called();controller.observe.assert_not_called()
+    def test_same_phase_unstable_layout_still_rejects(self):
+        def mutate(s,i):
+            if i==3:s['host_observation']['view']['rows']=2
+        native,controller,view=self.capture_fixture(mutate=mutate)
+        with self.assertRaises(F.S.C.Rejected) as error:native.capture_host('Selecting',None,None)
+        self.assertEqual(str(error.exception),'snapshot');view.assert_not_called()
+    def test_effectful_stable_and_legacy_capture_keep_strict_phase_guards(self):
+        native,controller,view=self.capture_fixture(1)
+        with self.assertRaises(F.S.C.Rejected) as error:native.stable('Selecting',None)
+        self.assertEqual(str(error.exception),'input_phase');view.assert_not_called()
+        native,controller,view=self.capture_fixture(1,profile=F.C.EXTERNAL_PROFILE)
+        with self.assertRaises(F.S.C.Rejected) as error:native.capture_host('Selecting',None,None)
+        self.assertEqual(str(error.exception),'input_phase');controller.observe.assert_not_called()
+    def test_expired_capture_deadline_is_not_transition_deferral(self):
+        native,controller,view=self.capture_fixture(1)
+        native.wait_ceiling=lambda:time.monotonic_ns()-1
+        with self.assertRaises(F.S.C.Rejected) as error:native.capture_host('Selecting',None,None)
+        self.assertEqual(str(error.exception),'deadline')
+        native.next_snapshot.assert_not_called();controller.assert_not_called();view.assert_not_called()
+
+    def test_owner_only_readonly_transition_defers(self):
+        def mutate(s,i):s.update(phase='Waiting',owner='Signer1' if i==1 else 'Signer2')
+        native,controller,view=self.capture_fixture(mutate=mutate)
+        with self.assertRaises(F.S.HostObservationChanged):native.capture_host('Waiting','Signer1',None)
+        view.assert_not_called();controller.click.assert_not_called()
+    def test_pending_host_context_mismatch_never_enters_readonly_deferral(self):
+        from unittest import mock
+        fixture=mock.Mock(deadline_ns=time.monotonic_ns()+F.C.ORIGINAL_NS)
+        observer=mock.Mock(expected_profile=F.C.SEMANTIC_PROFILE)
+        controller=mock.Mock();flow=F.FullFlow(controller,fixture,observer,None)
+        flow.startup_index=13;flow.pending_host=('public','synthetic')
+        flow.pending_occurrence=(0,8,1)
+        s=dict(phase='Waiting',owner='Signer1',host_observation=dict(revision=2,nonws_end=9,context_valid=True,entry='Editing'))
+        with mock.patch.object(flow.native,'capture_host') as capture:
+            with self.assertRaises(F.C.Rejected) as error:flow.pump_host(s)
+            self.assertEqual(str(error.exception),'input_phase');capture.assert_not_called()
+        self.assertEqual(controller.mock_calls,[]);observer.host_view.assert_not_called()
