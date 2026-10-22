@@ -233,6 +233,37 @@ class FullFlow:
         if line is None:return False
         self.host_lines+=1;C.require(self.host_lines<=128,'input_budget')
         self.pending_host=line;self.press(s,'BeginHostLine',None,ordinal=self.host_lines);return True
+    def initial_selection_probe(self):
+        """PRIVATE failure-only probe; never pumps Host or claims full completion.
+
+        Eight upward then 56 downward native wheel events search actual tags.
+        Identical clipped geometry is NOT a scroll-boundary observation. Every
+        input remains under the original fixture deadline and existing budgets.
+        A discovered control is clicked once through the ordinary stable/latch
+        path. Only a later actual exact transition establishes probe progress;
+        even that deliberately fails missing_evidence, never normal completion.
+        """
+        clicked=False
+        for attempt in range(64):
+            s=self.snapshot()
+            if s['phase'] not in ('Revoked','Finished'):
+                self.location={k:s[k] for k in ('phase','subphase','owner')}
+            C.require(s['focused'] and not(s['secret_input'] or s['host_input']),'input_phase')
+            if clicked and s['phase']=='V3Configuring':
+                C.require(s['owner']=='Signer1' and s['subphase']=='None','input_phase')
+                raise C.Rejected('missing_evidence')
+            C.require(s['phase']=='Selecting' and s['owner'] is None and s['subphase']=='None','input_phase')
+            if clicked:
+                self.controller.wait_render_progress()
+                continue
+            w=self.find(s,'ConfigureV3','Signer1')
+            if w is not None and w['enabled']:
+                self.press(s,'ConfigureV3','Signer1')
+                clicked=True
+            else:
+                C.require(self.scroll(s,'ScrollRegion',None,'up' if attempt<8 else 'down'),'input_widget')
+        raise C.Rejected('input_budget')
+
     def run(self):
         while True:
             s=self.snapshot();phase=s['phase'];owner=s['owner'];target=self.current_owner()
