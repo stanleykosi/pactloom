@@ -257,6 +257,16 @@ def emit_cached_host_failure(flow):
     except Exception:return # best effort; preserve original failure and cleanup
 
 
+def emit_cached_native_failure(flow):
+    # No new read/clock/input here; unavailable cached evidence stays unavailable.
+    if flow is None or flow.expected_profile!=C.SEMANTIC_PROFILE:return
+    try:
+        value=C.cached_native_failure_diagnostic(flow.records,flow.expected_profile)
+        encoded=json.dumps(C.validate_native_failure_diagnostic(value),separators=(',',':'))
+        print('CI_FINANCIAL_NATIVE_FAILURE_DIAGNOSTIC '+encoded,flush=True)
+    except Exception:return # never replace the original failure or cleanup
+
+
 def main():
     if sys.argv[1:]==['fixture-child']:fixture_child();return
     C.require(not sys.argv[1:],'contract')
@@ -289,6 +299,7 @@ def main():
             print('CI_FINANCIAL_LOCATION '+json.dumps(flow.location,separators=(',',':')),flush=True)
         emit_cached_progress_failure(flow)
         emit_cached_host_failure(flow)
+        emit_cached_native_failure(flow)
         # No raw exception/path/Host output escapes. Outer owner destroys whole
         # isolated namespace on failure; never report rescue cleanup as normal.
         print('CI_FINANCIAL_RESULT '+json.dumps(OUT.failure(code,expected_profile),separators=(',',':')),flush=True)

@@ -247,11 +247,73 @@ def validate_record(record, expected_profile=PROFILE):
     elif kind == 'HostRenderedView':
         require(expected_profile==SEMANTIC_PROFILE and role=='Coordinator','role')
         validate_host_rendered_view(facts)
+    elif kind == 'NativeFailureBoundary':
+        require(expected_profile==SEMANTIC_PROFILE and role=='Coordinator','role')
+        validate_native_failure_facts(facts)
     elif kind == 'Failure':
         exact(facts, ('code',)); require(facts['code'] in ERRORS,'record_shape')
     else:
         raise Rejected('record_shape')
     return record
+
+# CI-only, Coordinator-local failure boundaries. These are neither milestones
+# nor a cross-process ordering/root-cause claim. The native emission gate is
+# an actual Ui/Driver failure; Core/Transport observations alone cannot emit.
+NATIVE_FAILURE_COMPONENTS=('ui','driver','transport','core')
+NATIVE_FAILURE_CODES={
+    'ui':frozenset(('Unobserved', 'ViewportMissing', 'FocusLost', 'Blur', 'Escape', 'CloseRequested', 'InputGuardRejected', 'ObserverRejected', 'DriverRestrictionObserved', 'NativeCheckRejected', 'FinishedObserved', 'HostTransportRejected', 'HostOutputRejected', 'HostContextChanged', 'PublicInputRejected', 'NormalProofRejected', 'OtherUiRestriction')),
+    'driver':frozenset(('Unobserved', 'OriginalTreeCheckError', 'SessionExpired', 'EndpointRestrictionObserved', 'CommandChannelDisconnected', 'CommandOperationError', 'CancelSendError', 'SourceReceiveError', 'HistoryReceiveError', 'SigningReceiveError', 'PairReceiveError', 'OutcomeChannelFull', 'OutcomeChannelDisconnected', 'WorkErrorUnclassified')),
+    'transport':frozenset(('Unobserved', 'RestrictedObserved', 'InputChannelDisconnected', 'QueueInputRejected', 'StatusFull', 'StatusDisconnected', 'OutputChannelDisconnected', 'CoreCheckRejected', 'PtyOutputEof', 'PtyReadError', 'PtyWriteError', 'PtyOwnerMismatch', 'PtyHostLifetimeLost', 'PtyModeRejected')),
+    'core':frozenset(('Unobserved', 'CustodyMismatch', 'AlreadyClosedObserved', 'PeerProcessExit', 'PeerProcessPollError', 'PeerEdgeClosed', 'PeerEdgePollError', 'RootProcessExit', 'RootProcessPollError', 'SessionExpired')),
+}
+
+def validate_native_failure_facts(facts):
+    exact(facts,('version',)+NATIVE_FAILURE_COMPONENTS)
+    require(type(facts['version']) is int and facts['version']==1,'record_shape')
+    for name in NATIVE_FAILURE_COMPONENTS:
+        require(type(facts[name]) is str and facts[name] in NATIVE_FAILURE_CODES[name],'record_shape')
+    require(facts['ui']!='Unobserved' or facts['driver']!='Unobserved','record_shape')
+    return facts
+
+def native_failure_sequence(records,expected_profile):
+    """Validate cached per-process aggregates; return latest or None, never IO."""
+    require(expected_profile in (PROFILE,EXTERNAL_PROFILE,SEMANTIC_PROFILE),'record_shape')
+    require(type(records) is list and len(records)<=MAX_RECORDS,'record_limit')
+    for record in records:validate_record(record,expected_profile)
+    rows=[r for r in records if r['role']=='Coordinator']
+    boundaries=[r for r in rows if r['kind']=='NativeFailureBoundary']
+    if not boundaries:return None
+    require(len(boundaries)<=4,'record_limit')
+    rows.sort(key=lambda r:r['sequence'])
+    require([r['sequence'] for r in rows]==list(range(1,len(rows)+1)),'order')
+    require(rows[0]['kind']=='Birth' and sum(r['kind']=='Birth' for r in rows)==1,'lineage')
+    require(all(a['elapsed_ns']<=b['elapsed_ns'] for a,b in zip(rows,rows[1:])),'order')
+    prior={name:'Unobserved' for name in NATIVE_FAILURE_COMPONENTS};latest=None
+    for record in rows:
+        if record['kind']!='NativeFailureBoundary':continue
+        facts=record['facts']
+        require(any(facts[name]!=prior[name] for name in NATIVE_FAILURE_COMPONENTS),'replay')
+        require(all(prior[name]=='Unobserved' or facts[name]==prior[name] for name in NATIVE_FAILURE_COMPONENTS),'replay')
+        prior={name:facts[name] for name in NATIVE_FAILURE_COMPONENTS};latest=dict(facts)
+    return latest
+
+def validate_native_failure_diagnostic(value):
+    exact(value,('version','availability')+NATIVE_FAILURE_COMPONENTS)
+    require(type(value['version']) is int and value['version']==1,'record_shape')
+    require(value['availability'] in ('Observed','Unavailable'),'record_shape')
+    for name in NATIVE_FAILURE_COMPONENTS:
+        require(type(value[name]) is str and value[name] in NATIVE_FAILURE_CODES[name],'record_shape')
+    if value['availability']=='Observed':
+        validate_native_failure_facts({k:v for k,v in value.items() if k!='availability'})
+    else:require(all(value[name]=='Unobserved' for name in NATIVE_FAILURE_COMPONENTS),'record_shape')
+    return value
+
+def cached_native_failure_diagnostic(records,expected_profile):
+    require(expected_profile==SEMANTIC_PROFILE,'record_shape')
+    facts=native_failure_sequence(records,expected_profile)
+    value=dict(version=1,availability='Unavailable',**{name:'Unobserved' for name in NATIVE_FAILURE_COMPONENTS})
+    if facts is not None:value.update(facts,availability='Observed')
+    return validate_native_failure_diagnostic(value)
 
 # Failure-only diagnostic, not oracle evidence. Array order is fixed by these
 # tuples; 2 means at least two observations, never two successful operations.

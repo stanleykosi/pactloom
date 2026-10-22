@@ -3,6 +3,16 @@
 //! publishes restriction through the original Core; this supplies no native
 //! consent, action admission, shell, or descriptor/path importer.
 //! Bootstrap must drop the inherited pair in every S/W branch before role work.
+// Observation only. Production/legacy compilation removes every latch call.
+macro_rules! boundary {
+    ($component:ident, $code:ident) => {{
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)] {
+            use crate::financial_ci_failure_boundary as diagnostic;
+            diagnostic::latch(diagnostic::Boundary::$component(diagnostic::$component::$code));
+        }
+    }};
+}
+
 use crate::{
     bootstrap::PhaseDeadlinesV1,
     channel::require_time,
@@ -201,6 +211,7 @@ impl CoordinatorHostTerminalEndpointV1 {
     pub fn queue_user_line(&mut self, line: Zeroizing<String>) -> Result<()> {
         self.check_or_close()?;
         if self.input.is_some() || !valid_line(&line) {
+            boundary!(Transport, QueueInputRejected);
             return self.close_with(rejected("invalid or already pending Host input"));
         }
         let mut bytes = Zeroizing::new(Vec::with_capacity(line.len() + 1));
@@ -218,14 +229,14 @@ impl CoordinatorHostTerminalEndpointV1 {
         let Some(input) = self.input.as_mut() else { return Ok(true); };
         let io = self.io.as_mut().ok_or_else(|| rejected("Host terminal closed"))?;
         match io.master.write(&input.bytes[input.offset..]) {
-            Ok(0) => return self.close_with(rejected("Host terminal input ended")),
+            Ok(0) => { boundary!(Transport, PtyWriteError); return self.close_with(rejected("Host terminal input ended")); },
             Ok(count) => {
                 let end = input.offset + count;
                 input.bytes[input.offset..end].zeroize();
                 input.offset = end;
             }
             Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {}
-            Err(error) => return self.close_with(error),
+            Err(error) => { boundary!(Transport, PtyWriteError); return self.close_with(error); },
         }
         self.check_or_close()?;
         let complete = self.input.as_ref().is_some_and(|input| input.offset == input.bytes.len());
@@ -243,10 +254,10 @@ impl CoordinatorHostTerminalEndpointV1 {
         let mut bytes = Zeroizing::new(vec![0u8; OUTPUT_CHUNK]);
         let io = self.io.as_mut().ok_or_else(|| rejected("Host terminal closed"))?;
         let count = match io.master.read(&mut bytes) {
-            Ok(0) => return self.close_with(rejected("Host terminal output ended")),
+            Ok(0) => { boundary!(Transport, PtyOutputEof); return self.close_with(rejected("Host terminal output ended")); },
             Ok(count) => count,
             Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => 0,
-            Err(error) => return self.close_with(error),
+            Err(error) => { boundary!(Transport, PtyReadError); return self.close_with(error); },
         };
         self.check_or_close()?;
         if count == 0 {
@@ -271,9 +282,9 @@ impl CoordinatorHostTerminalEndpointV1 {
     fn check_or_close(&mut self) -> Result<()> {
         let checked = (|| {
             let core = self.workflow.as_ref().ok_or_else(|| rejected("Host terminal workflow unbound"))?;
-            core.check()?;
-            require_time(core.session)?;
-            if core.phase.revoked() { return Err(rejected("Host terminal workflow restricted")); }
+            core.check().inspect_err(|_| { boundary!(Transport, CoreCheckRejected); })?;
+            require_time(core.session).inspect_err(|_| { boundary!(Core, SessionExpired); })?;
+            if core.phase.revoked() { boundary!(Transport, RestrictedObserved); return Err(rejected("Host terminal workflow restricted")); }
             self.check_transport()
         })();
         if let Err(error) = checked {
@@ -286,8 +297,8 @@ impl CoordinatorHostTerminalEndpointV1 {
     fn check_transport(&self) -> Result<()> {
         require_local(self.owner_pid, self.owner_uid, self.deadline)?;
         let io = self.io.as_ref().ok_or_else(|| rejected("Host terminal closed"))?;
-        check_pidfd(&io.host_lifetime)?;
-        check_raw_no_echo(&io.master)
+        check_pidfd(&io.host_lifetime).inspect_err(|_| { boundary!(Transport, PtyHostLifetimeLost); })?;
+        check_raw_no_echo(&io.master).inspect_err(|_| { boundary!(Transport, PtyModeRejected); })
     }
 }
 impl Drop for CoordinatorHostTerminalEndpointV1 {
@@ -340,6 +351,7 @@ impl HostControllingTerminalV1 {
 
 fn require_local(pid: libc::pid_t, uid: libc::uid_t, deadline: Instant) -> Result<()> {
     if unsafe { libc::getpid() } != pid || unsafe { libc::geteuid() } != uid {
+        boundary!(Transport, PtyOwnerMismatch);
         return Err(rejected("Host terminal used outside original actor"));
     }
     require_time(deadline)

@@ -8,6 +8,16 @@
 //! C is a trusted transient password surface. Its owned storage is zeroized;
 //! stock GUI undo/input/backend/OS/IME temporaries are dropped, not guaranteed
 //! overwritten. Neither this controller nor its input leaf clears OS clipboard.
+// Observation only. Production/legacy compilation removes every latch call.
+macro_rules! boundary {
+    ($component:ident, $code:ident) => {{
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)] {
+            use wholepact_financial_coordinator_origin::financial_ci_failure_boundary as diagnostic;
+            diagnostic::latch(diagnostic::Boundary::$component(diagnostic::$component::$code));
+        }
+    }};
+}
+
 use crate::{
     financial_completed_pair_ui::{PairFlow, PairStage, PairOutbound},
     financial_source_driver::{Driver, HostStatus, Outcome},
@@ -681,13 +691,14 @@ pub(super) fn run(
         options,
         Box::new(move |_cc| Ok(Box::new(app))),
     );
-    if !normal_observed.get() { driver.borrow().revoke(); }
+    if !normal_observed.get() { boundary!(Ui, OtherUiRestriction); driver.borrow().revoke(); }
     let cleanup = driver.borrow_mut().join();
     if window.is_err() {
         return Err(rejected("source-entry native window unavailable"));
     }
     let completed = cleanup?;
     if completed != normal_observed.get() {
+        boundary!(Ui, NormalProofRejected);
         return Err(rejected("normal completion proof and owned join disagree"));
     }
     Ok(completed)
@@ -3162,6 +3173,7 @@ impl Window {
         if self.phase == Phase::Finished {
             return;
         }
+        boundary!(Ui, OtherUiRestriction);
         self.native.revoke();
         self.driver.borrow().revoke();
         if let Some(input) = &mut self.host_input {
@@ -3432,11 +3444,13 @@ impl Window {
                 .continue_deadline
                 .is_some_and(|end| Instant::now() >= end)
         {
+            if driver_revoked { boundary!(Ui, DriverRestrictionObserved); } else { boundary!(Ui, NativeCheckRejected); }
             self.revoke("An original actor, source or review is no longer current. No new approval is possible; disposal is pending.");
         }
     }
     fn interrupt(&mut self, facts: Option<RawFacts>, ctx: &egui::Context) {
         let Some(facts) = facts else {
+            if self.phase != Phase::Finished { boundary!(Ui, ViewportMissing); }
             self.revoke("The original root viewport is unavailable. Disposal is pending.");
             return;
         };
@@ -3447,6 +3461,9 @@ impl Window {
             facts.blur,
             facts.escape,
         ) {
+            if self.phase != Phase::Finished {
+                if facts.escape { boundary!(Ui, Escape); } else if facts.blur { boundary!(Ui, Blur); } else { boundary!(Ui, FocusLost); }
+            }
             self.revoke("Native interruption permanently restricted this workflow. Returning focus cannot restore it.");
         }
         self.focus_seen |= facts.focused;
@@ -3454,6 +3471,7 @@ impl Window {
         if facts.close && (self.phase != Phase::Finished || !self.host_output_ended) {
             self.close_when_done = true;
             if self.phase != Phase::Finished {
+                boundary!(Ui, CloseRequested);
                 self.revoke(
                     "Close requested. Waiting for actual source disposal and owned cleanup.",
                 );
@@ -3475,6 +3493,7 @@ impl Window {
                     if self.phase != Phase::NormalClosing || !self.normal_finish_attempted
                         || self.normal_observed.get() || completion.check_completed().is_err()
                         || self.normal_notice.as_ref().is_none_or(|n| &n.summary != completion.summary()) {
+                        boundary!(Ui, NormalProofRejected);
                         self.native.revoke(); self.driver.borrow().revoke();
                         self.normal_observed.set(false);
                         self.phase = Phase::Revoked;
@@ -3518,6 +3537,7 @@ impl Window {
                     disposal_confirmed,
                     clean,
                 }) => {
+                    boundary!(Ui, FinishedObserved);
                     self.native.revoke();
                     if let Some(input) = &mut self.host_input {
                         input.cancel(&mut || self.native.revoke());
@@ -3913,6 +3933,7 @@ impl Window {
                     Ok(chunk) => {
                         if self.host_output.state() == OutputState::Open {
                             if self.host_output.push_chunk(chunk).is_err() {
+                                if self.phase != Phase::Finished { boundary!(Ui, HostOutputRejected); }
                                 self.revoke("Host output exceeded its fixed safe bounds. The retained prefix is incomplete; no Host effect is established.");
                                 self.host_incomplete = true;
                             }
@@ -3929,6 +3950,7 @@ impl Window {
                             self.host_incomplete = true;
                         }
                         if !self.terminal() {
+                            if self.phase != Phase::Finished { boundary!(Ui, HostTransportRejected); }
                             self.revoke("Host transport ended. Its output is incomplete observation, not an action result; original security cleanup remains separate.");
                         }
                         break;
@@ -3946,12 +3968,14 @@ impl Window {
                         self.host_entry = HostEntry::Idle;
                         self.host_input.take(); // Already submitted/empty; no live editor.
                     } else if !self.terminal() {
+                        if self.phase != Phase::Finished { boundary!(Ui, HostTransportRejected); }
                         self.revoke("Unexpected Host write observation. No new input or approval is possible.");
                     }
                 }
                 Ok(Some(HostStatus::Closed)) => {
                     self.host_incomplete = true;
                     if !self.terminal() {
+                        if self.phase != Phase::Finished { boundary!(Ui, HostTransportRejected); }
                         self.revoke("Host terminal closed or failed. The security driver is still responsible for admitted outcomes and bounded disposal.");
                     }
                     self.host_entry = HostEntry::Closed;
@@ -3960,6 +3984,7 @@ impl Window {
                 Ok(None) => break,
                 Err(_) => {
                     if !self.terminal() {
+                        if self.phase != Phase::Finished { boundary!(Ui, HostTransportRejected); }
                         self.revoke("Host transport status ended. Do not infer success, rollback or retry from its retained output.");
                     }
                     self.host_entry = HostEntry::Closed;
@@ -3973,6 +3998,7 @@ impl Window {
             && (self.host_edit_revision != Some(self.host_output.revision())
                 || !self.host_output.decode_complete()
                 || self.host_output.state() != OutputState::Open) {
+            if self.phase != Phase::Finished { boundary!(Ui, HostContextChanged); }
             self.revoke("Host output changed during protected entry. The one-use line is discarded, never retried.");
         }
     }
@@ -4041,7 +4067,7 @@ impl Window {
             HostEntry::Editing(ordinal) => {
                 ui.label("The coordinator briefly sees this line. Owned input is zeroized; complete GUI/OS/IME/clipboard erasure is not guaranteed. Source controls are unavailable until this line ends.");
                 if let Some(input) = &mut self.host_input {
-                    input.show(ui, ordinal, &mut || self.native.revoke());
+                    input.show(ui, ordinal, &mut || { boundary!(Ui, InputGuardRejected); self.native.revoke(); });
                 }
                 if self.host_input.as_ref().is_none_or(|input| {
                     !matches!(
@@ -5434,6 +5460,7 @@ impl Window {
         if crate::financial_ci::finish(&ctx, visible,
             self.password.is_some() || matches!(self.intent, Some(Intent::PasswordV3 | Intent::EnterPassword)),
             host_entry_blocks_source(self.host_entry) || matches!(self.intent, Some(Intent::BeginHostLine))).is_err() {
+            if self.phase != Phase::Finished { boundary!(Ui, ObserverRejected); }
             self.revoke("Financial qualification observation failed; no action admitted.");
             return;
         }
@@ -5443,7 +5470,7 @@ impl Window {
         self.check_host_edit_context();
         let host_line = match (&mut self.host_input, self.host_entry) {
             (Some(input), HostEntry::Editing(ordinal)) => {
-                input.finish_frame(ordinal, &mut || self.native.revoke())
+                input.finish_frame(ordinal, &mut || { boundary!(Ui, InputGuardRejected); self.native.revoke(); })
             }
             _ => None,
         };
@@ -5556,7 +5583,7 @@ impl Window {
                     return;
                 }
             };
-            if let Some(line) = submitted.into_line_for(ordinal, &mut || self.native.revoke()) {
+            if let Some(line) = submitted.into_line_for(ordinal, &mut || { boundary!(Ui, InputGuardRejected); self.native.revoke(); }) {
                 self.host_entry = HostEntry::Writing(ordinal);
                 self.host_edit_revision = None;
                 let queued = self.driver.borrow_mut().send_host_line(ordinal, line);
@@ -6995,10 +7022,11 @@ impl eframe::App for Window {
         self.poll_driver(ctx);
         self.check_host_edit_context();
         if self.host_input.is_some() && self.password.is_some() {
+            if self.phase != Phase::Finished { boundary!(Ui, InputGuardRejected); }
             self.revoke("Protected Host and Signer input cannot share an event batch.");
         }
         if let Some(input) = &mut self.host_input {
-            input.raw_input_hook(raw, &mut || self.native.revoke());
+            input.raw_input_hook(raw, &mut || { boundary!(Ui, InputGuardRejected); self.native.revoke(); });
         } else if let Some(input) = &mut self.password {
             input.raw_input_hook(raw);
         } else if self.phase == Phase::FinancialSetupConfiguring
@@ -7006,6 +7034,7 @@ impl eframe::App for Window {
             && !self.native.is_revoked()
         {
             if !v3_events_bounded(&raw.events) {
+                if self.phase != Phase::Finished { boundary!(Ui, PublicInputRejected); }
                 self.revoke("Financial configuration public event exceeded exact bounds.");
                 scrub_unrequested_payloads(&mut raw.events);
             }
@@ -7014,6 +7043,7 @@ impl eframe::App for Window {
             && !self.native.is_revoked()
         {
             if !v3_owner_events_bounded(&raw.events) {
+                if self.phase != Phase::Finished { boundary!(Ui, PublicInputRejected); }
                 self.revoke("Owner setup public event exceeded exact bounds.");
                 scrub_unrequested_payloads(&mut raw.events);
             }
@@ -7022,12 +7052,14 @@ impl eframe::App for Window {
             && !self.native.is_revoked()
         {
             if !v3_events_bounded(&raw.events) {
+                if self.phase != Phase::Finished { boundary!(Ui, PublicInputRejected); }
                 self.revoke("V3 public selection event exceeded fixed bounds.");
                 scrub_unrequested_payloads(&mut raw.events);
             }
         } else if self.phase == Phase::Configuring && self.focused_last && !self.native.is_revoked()
         {
             if !selector_events_bounded(&raw.events) {
+                if self.phase != Phase::Finished { boundary!(Ui, PublicInputRejected); }
                 self.revoke("Ordinary selector input contained invalid or oversized text. No altered line is accepted.");
                 scrub_unrequested_payloads(&mut raw.events);
             }

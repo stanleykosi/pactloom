@@ -28,7 +28,10 @@ pub(super) fn run_before_runtime() -> Result<Completion> {
             #[cfg(feature = "coordinated-financial-runtime")]
             {
                 let (native, endpoint) = origin.into_financial_workflow()?;
-                crate::financial_source_ui::run(native, endpoint)
+                let result = crate::financial_source_ui::run(native, endpoint);
+                #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+                wholepact_financial_coordinator_origin::financial_ci_flush_failure_boundaries();
+                result
             }
             #[cfg(not(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-financial-runtime")))]
             { origin.finish_inert() }

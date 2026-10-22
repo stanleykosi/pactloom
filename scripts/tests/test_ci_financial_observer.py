@@ -1712,3 +1712,162 @@ class FormNavigationTests(unittest.TestCase):
         self.assertEqual(state['generation'],65);self.assertEqual(flow.actions,0)
         self.assertIsNone(flow._startup_ceiling);self.assertEqual(fixture.deadline_ns,original_deadline)
         controller.click.assert_not_called();controller.type_ascii.assert_not_called();controller.clear_field.assert_not_called();controller.observe.assert_not_called();observer.host_view.assert_not_called()
+
+class NativeFailureBoundaryTests(unittest.TestCase):
+    def facts(self,**changes):
+        value=dict(version=1,ui='FocusLost',driver='Unobserved',transport='Unobserved',core='Unobserved');value.update(changes);return value
+    def record(self,facts=None,sequence=2,**changes):
+        value=dict(schema=1,profile=F.C.SEMANTIC_PROFILE,role='Coordinator',sequence=sequence,elapsed_ns=sequence,kind='NativeFailureBoundary',facts=self.facts() if facts is None else facts);value.update(changes);return value
+    def birth(self):return self.record(dict(pid=100,parent_pid=99,parent_role=None),sequence=1,kind='Birth')
+    def chain(self):
+        rows=[self.birth()];facts=self.facts()
+        for name,code in [('ui','FocusLost'),('driver','WorkErrorUnclassified'),('transport','RestrictedObserved'),('core','AlreadyClosedObserved')]:
+            facts=dict(facts,**{name:code});rows.append(self.record(facts,len(rows)+1))
+        return rows
+    def test_exact_codes_and_ui_or_driver_gate(self):
+        for component,codes in F.C.NATIVE_FAILURE_CODES.items():
+            for code in codes:
+                facts=self.facts(**{component:code})
+                if component=='ui' and code=='Unobserved':facts['driver']='WorkErrorUnclassified'
+                F.C.validate_record(self.record(facts),F.C.SEMANTIC_PROFILE)
+        for extra in ({},{'core':'SessionExpired'},{'transport':'PtyOutputEof'},{'core':'PeerProcessExit','transport':'RestrictedObserved'}):
+            with self.assertRaises(F.C.Rejected):F.C.validate_record(self.record(self.facts(ui='Unobserved',**extra)),F.C.SEMANTIC_PROFILE)
+    def test_strict_keys_types_roles_profiles_and_no_arbitrary_strings(self):
+        import copy
+        cases=[]
+        for key,value in [('version',True),('version',2),('ui','/synthetic/private/path'),('driver','FocusLost'),('driver',None),('transport',[]),('core',1)]:
+            f=self.facts();f[key]=value;cases.append(self.record(f))
+        for key in self.facts():
+            f=self.facts();del f[key];cases.append(self.record(f))
+        f=self.facts();f['error']='private detail';cases.append(self.record(f))
+        cases.extend(self.record(role=role) for role in F.C.ROLES if role!='Coordinator')
+        for record in cases:
+            with self.assertRaises(F.C.Rejected):F.C.validate_record(record,F.C.SEMANTIC_PROFILE)
+        for profile in (F.C.PROFILE,F.C.EXTERNAL_PROFILE):
+            with self.assertRaises(F.C.Rejected):F.C.validate_record(self.record(profile=profile),profile)
+    def test_monotone_four_aggregates_and_unavailable_absence(self):
+        rows=self.chain();latest=F.C.native_failure_sequence(rows,F.C.SEMANTIC_PROFILE)
+        self.assertEqual(latest,rows[-1]['facts'])
+        self.assertEqual(F.C.cached_native_failure_diagnostic(rows,F.C.SEMANTIC_PROFILE)['availability'],'Observed')
+        for rows in ([],[self.birth()]):
+            value=F.C.cached_native_failure_diagnostic(rows,F.C.SEMANTIC_PROFILE)
+            self.assertEqual(value['availability'],'Unavailable')
+            self.assertTrue(all(value[k]=='Unobserved' for k in F.C.NATIVE_FAILURE_COMPONENTS))
+    def test_duplicate_rewrite_reset_order_and_fifth_record_rejected(self):
+        import copy
+        cases=[]
+        r=self.chain();r[2]['facts']=dict(r[1]['facts']);cases.append(r)
+        r=self.chain();r[2]['facts']['ui']='Escape';cases.append(r)
+        r=self.chain();r[2]['facts']['ui']='Unobserved';cases.append(r)
+        r=self.chain();r[2]['sequence']=1;cases.append(r)
+        r=self.chain();r[2]['elapsed_ns']=0;cases.append(r)
+        r=self.chain();r[0]=self.record(sequence=1);cases.append(r)
+        r=self.chain();r.append(self.record(dict(r[-1]['facts']),6));cases.append(r)
+        for rows in cases:
+            with self.assertRaises(F.C.Rejected):F.C.native_failure_sequence(rows,F.C.SEMANTIC_PROFILE)
+    def test_private_observer_lineage_partial_flush_and_immutable_history(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=pathlib.Path(temp);p=root/'100.jsonl'
+            encode=lambda r:json.dumps(r).encode()+b'\n'
+            first=encode(self.birth());boundary=encode(self.record())
+            p.write_bytes(first+boundary[:-3]);p.chmod(0o600)
+            observer=O.ObserverFiles(root,time.monotonic_ns()+10_000_000_000,expected_profile=F.C.SEMANTIC_PROFILE)
+            rows=observer.read();self.assertEqual(len(rows),1)
+            self.assertEqual(O.C.cached_native_failure_diagnostic(rows,F.C.SEMANTIC_PROFILE)['availability'],'Unavailable')
+            with p.open('ab') as stream:stream.write(boundary[-3:])
+            self.assertEqual(O.C.cached_native_failure_diagnostic(observer.read(),F.C.SEMANTIC_PROFILE)['availability'],'Observed')
+            self.assertEqual(observer.read(),observer.read()) # rereading unchanged bytes is not a new native record.
+            with p.open('ab') as stream:stream.write(encode(self.record(sequence=3)))
+            with self.assertRaises(O.C.Rejected):observer.read()
+    def test_projection_strict_unavailable_and_no_private_values(self):
+        value=F.C.cached_native_failure_diagnostic([],F.C.SEMANTIC_PROFILE)
+        for change in ({'availability':'Observed'},{'availability':'unknown'},{'ui':'FocusLost'},{'version':True},{'path':'private'}):
+            bad=dict(value,**change)
+            with self.assertRaises(F.C.Rejected):F.C.validate_native_failure_diagnostic(bad)
+        for key in value:
+            bad=dict(value);del bad[key]
+            with self.assertRaises(F.C.Rejected):F.C.validate_native_failure_diagnostic(bad)
+    def test_failure_emitter_cached_only_legacy_silent_and_print_failure_safe(self):
+        import io,contextlib
+        from unittest import mock
+        container=F.load('ci-financial-container')
+        flow=mock.Mock(expected_profile=F.C.SEMANTIC_PROFILE,records=self.chain())
+        flow.snapshot.side_effect=AssertionError('no fresh observation');flow.observer.read.side_effect=AssertionError('no private read')
+        output=io.StringIO()
+        with contextlib.redirect_stdout(output):container.emit_cached_native_failure(flow)
+        line=output.getvalue();self.assertTrue(line.startswith('CI_FINANCIAL_NATIVE_FAILURE_DIAGNOSTIC '))
+        self.assertNotIn('pid',line);self.assertNotIn('elapsed',line);self.assertNotIn('sequence',line)
+        flow.snapshot.assert_not_called();flow.observer.read.assert_not_called()
+        with mock.patch('builtins.print',side_effect=BrokenPipeError):container.emit_cached_native_failure(flow)
+        for profile in (F.C.PROFILE,F.C.EXTERNAL_PROFILE):
+            flow.expected_profile=profile
+            with mock.patch('builtins.print') as emit:container.emit_cached_native_failure(flow)
+            emit.assert_not_called()
+    def test_supervisor_failure_only_duplicate_late_and_legacy_rejection(self):
+        import io,contextlib
+        supervisor=F.load('ci-financial-supervisor');profile=F.C.SEMANTIC_PROFILE
+        value=F.C.cached_native_failure_diagnostic(self.chain(),profile)
+        line=b'CI_FINANCIAL_NATIVE_FAILURE_DIAGNOSTIC '+json.dumps(value).encode()
+        records=supervisor.RuntimeRecords('external',profile);output=io.StringIO()
+        with contextlib.redirect_stdout(output):records(line)
+        self.assertEqual(output.getvalue(),'')
+        with self.assertRaises(supervisor.Failure):records(line)
+        with contextlib.redirect_stdout(output):records(b'CI_FINANCIAL_RESULT '+json.dumps(supervisor.P.failure('normal_finish',profile)).encode())
+        self.assertIn('NATIVE_FAILURE_DIAGNOSTIC',output.getvalue())
+        with self.assertRaises(supervisor.Failure):records(line)
+        records=supervisor.RuntimeRecords('external',profile);records(line)
+        candidate=dict(schema=1,profile=profile,native_oracle_verified=True,fixture_cleaned=True,display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)
+        with self.assertRaises(supervisor.Failure):records(b'CI_FINANCIAL_CANDIDATE '+json.dumps(candidate).encode())
+        with self.assertRaises(supervisor.Failure):supervisor.RuntimeRecords('external')(line)
+    def test_native_failure_forbids_close_even_with_all_normal_milestones(self):
+        from unittest import mock
+        controller=mock.Mock();fixture=mock.Mock(deadline_ns=time.monotonic_ns()+F.C.ORIGINAL_NS)
+        native=F.S.NativeScenario(controller,fixture,mock.Mock(),expected_profile=F.C.SEMANTIC_PROFILE,host_view=mock.Mock())
+        records=[self.record({},i+1,kind=k) for i,k in enumerate(F.C.NORMAL_DIAGNOSTIC_STEPS)]+[self.record(sequence=5)]
+        with self.assertRaises(F.S.C.Rejected) as error:native.close_after_normal_proof(records,None,F.C.SEMANTIC_PROFILE)
+        self.assertEqual(str(error.exception),'observer_failure');controller.terminal_click.assert_not_called();native.next_snapshot.assert_not_called()
+    def test_complete_semantic_oracle_still_requires_normal_proof_and_rejects_boundary(self):
+        from test_ci_financial_semantic_routing import semantic_case,O as oracle
+        records,external=semantic_case();oracle.validate_completed(records,100,0,external,oracle.C.SEMANTIC_PROFILE)
+        sequence=max(r['sequence'] for r in records if r['role']=='Coordinator')+1
+        elapsed=max(r['elapsed_ns'] for r in records)+1
+        records.append(self.record(sequence=sequence,elapsed_ns=elapsed))
+        with self.assertRaises(oracle.C.Rejected) as error:oracle.validate_completed(records,100,0,external,oracle.C.SEMANTIC_PROFILE)
+        self.assertEqual(str(error.exception),'observer_failure')
+    def test_actual_terminal_snapshot_retains_boundary_for_cached_failure_reporting(self):
+        import io,contextlib
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as temp:
+            root=pathlib.Path(temp);p=root/'100.jsonl'
+            snapshot=dict(phase='Finished',subphase='None',owner=None,view_generation=1,focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=[],host_view_id=None,host_observation=dict(revision=1,nonws_end=0,context_valid=False,entry='Closed',editor=None,view=None))
+            rows=[self.birth(),self.record(),self.record(snapshot,sequence=3,kind='UiSnapshot')]
+            p.write_bytes(b''.join(json.dumps(r).encode()+b'\n' for r in rows));p.chmod(0o600)
+            deadline=time.monotonic_ns()+10_000_000_000
+            observer=O.ObserverFiles(root,deadline,expected_profile=F.C.SEMANTIC_PROFILE)
+            fixture=mock.Mock(deadline_ns=deadline);controller=mock.Mock()
+            flow=F.FullFlow(controller,fixture,observer,None)
+            with self.assertRaises(F.C.Rejected) as error:flow.run()
+            self.assertEqual(str(error.exception),'observer_failure');self.assertEqual(flow.records,rows)
+            container=F.load('ci-financial-container');output=io.StringIO()
+            with mock.patch.object(observer,'read',side_effect=AssertionError('fresh IO during failure')):
+                with contextlib.redirect_stdout(output):container.emit_cached_native_failure(flow)
+            self.assertIn('"availability":"Observed"',output.getvalue())
+            controller.terminal_click.assert_not_called();controller.click.assert_not_called();controller.observe.assert_not_called()
+    def test_prior_outer_cleanup_success_does_not_suppress_runtime_failure_diagnostic(self):
+        import io,contextlib
+        supervisor=F.load('ci-financial-supervisor');profile=F.C.SEMANTIC_PROFILE
+        value=F.C.cached_native_failure_diagnostic([],profile)
+        output=io.StringIO()
+        with contextlib.redirect_stdout(output):
+            # The supervisor's earlier independent cleanup/preflight result is
+            # an outer marker, never an input to the later container parser.
+            supervisor.emit('RESULT',dict(passed=True,cleanup_only=True))
+            runtime=supervisor.RuntimeRecords('external',profile)
+            runtime(b'CI_FINANCIAL_NATIVE_FAILURE_DIAGNOSTIC '+json.dumps(value).encode())
+            runtime(b'CI_FINANCIAL_RESULT '+json.dumps(supervisor.P.failure('normal_finish',profile)).encode())
+        self.assertEqual(runtime.finish(1)['code'],'normal_finish')
+        lines=output.getvalue().splitlines()
+        self.assertEqual(len(lines),3)
+        self.assertIn('"passed":true',lines[0])
+        self.assertTrue(lines[1].startswith('CI_FINANCIAL_NATIVE_FAILURE_DIAGNOSTIC '))
+        self.assertTrue(lines[2].startswith('CI_FINANCIAL_FAILURE '))

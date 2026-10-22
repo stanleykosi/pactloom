@@ -6,6 +6,16 @@
 //! The same owned driver alone pumps the genuine same-Core Host terminal. Its
 //! separately bounded byte/status channels can never consume security slots.
 //! Terminal failure restricts/closes transport, NOT the security drain loop.
+// Observation only. Production/legacy compilation removes every latch call.
+macro_rules! boundary {
+    ($component:ident, $code:ident) => {{
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)] {
+            use wholepact_financial_coordinator_origin::financial_ci_failure_boundary as diagnostic;
+            diagnostic::latch(diagnostic::Boundary::$component(diagnostic::$component::$code));
+        }
+    }};
+}
+
 use crate::{rejected, Result};
 use std::{
     sync::{
@@ -1292,23 +1302,30 @@ fn drive(
         pending_output: None,
         closed_reported: false,
     };
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    let mut work_stage=wholepact_financial_coordinator_origin::financial_ci_failure_boundary::Driver::WorkErrorUnclassified;
     let work = (|| -> Result<Option<FinancialNormalFinishOutboundV1>> {
         loop {
-            endpoint.check_original_tree_alive()?;
+            endpoint.check_original_tree_alive().inspect_err(|_| { boundary!(Driver, OriginalTreeCheckError); })?;
             if Instant::now() >= session {
+                boundary!(Driver, SessionExpired);
                 revoked.store(true, Ordering::Release);
             }
             if cleanup.is_none() && !cancel_sent && endpoint.observe_restrictions().is_err() {
+                boundary!(Driver, EndpointRestrictionObserved);
                 revoked.store(true, Ordering::Release);
             }
             // Drain finite commands first, preserving ONLY an actually
             // admitted Continue Final. An empty queue is not abandonment: A
             // may have won just before R while its owner is still enqueueing.
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            { work_stage = wholepact_financial_coordinator_origin::financial_ci_failure_boundary::Driver::CommandOperationError; }
             for _ in 0..COMMAND_SLOTS {
                 let command = match input.try_recv() {
                     Ok(command) => command,
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        boundary!(Driver, CommandChannelDisconnected);
                         revoked.store(true, Ordering::Release);
                         break;
                     }
@@ -1420,7 +1437,7 @@ fn drive(
                         {
                             output
                                 .try_send(Outcome::HistorySetup(role, ticket))
-                                .map_err(|_| rejected("History Setup receiver unavailable"))?;
+                                .map_err(|error| { match &error { mpsc::TrySendError::Full(_)=>boundary!(Driver, OutcomeChannelFull), mpsc::TrySendError::Disconnected(_)=>boundary!(Driver, OutcomeChannelDisconnected) }; rejected("History Setup receiver unavailable") })?;
                         } else {
                             revoked.store(true, Ordering::Release);
                         }
@@ -1447,7 +1464,7 @@ fn drive(
                         {
                             output
                                 .try_send(Outcome::WitnessSetup(role, ticket))
-                                .map_err(|_| rejected("Witness Setup receiver unavailable"))?;
+                                .map_err(|error| { match &error { mpsc::TrySendError::Full(_)=>boundary!(Driver, OutcomeChannelFull), mpsc::TrySendError::Disconnected(_)=>boundary!(Driver, OutcomeChannelDisconnected) }; rejected("Witness Setup receiver unavailable") })?;
                         } else {
                             revoked.store(true, Ordering::Release);
                         }
@@ -1472,7 +1489,7 @@ fn drive(
                     Command::PrepareCompletedPair(inputs, deadline) => {
                         let ticket = endpoint.prepare_completed_pair_setup(inputs, deadline)?;
                         output.try_send(Outcome::CompletedPairSetup(ticket))
-                            .map_err(|_| rejected("CompletedPair Setup receiver unavailable"))?;
+                            .map_err(|error| { match &error { mpsc::TrySendError::Full(_)=>boundary!(Driver, OutcomeChannelFull), mpsc::TrySendError::Disconnected(_)=>boundary!(Driver, OutcomeChannelDisconnected) }; rejected("CompletedPair Setup receiver unavailable") })?;
                     }
                     Command::SetupCompletedPair(outbound) => {
                         record_send_progress(endpoint.try_send_completed_pair_setup(outbound)?, &revoked);
@@ -1495,7 +1512,7 @@ fn drive(
                         {
                             output
                                 .try_send(Outcome::SigningSetup(role, ticket))
-                                .map_err(|_| rejected("Signing Setup receiver unavailable"))?;
+                                .map_err(|error| { match &error { mpsc::TrySendError::Full(_)=>boundary!(Driver, OutcomeChannelFull), mpsc::TrySendError::Disconnected(_)=>boundary!(Driver, OutcomeChannelDisconnected) }; rejected("Signing Setup receiver unavailable") })?;
                         } else {
                             revoked.store(true, Ordering::Release);
                         }
@@ -1521,20 +1538,22 @@ fn drive(
                     }
                 }
             }
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            { work_stage = wholepact_financial_coordinator_origin::financial_ci_failure_boundary::Driver::WorkErrorUnclassified; }
             if revoked.load(Ordering::Acquire) && !cancel_sent {
                 if cleanup.is_none() {
                     cleanup = Some(first_cleanup_ceiling(session, Instant::now()));
                     let _ = output.try_send(Outcome::DisposalStarted);
                 }
                 let (sent, deadline) = record_cancel_progress(
-                    endpoint.try_send_cancel()?,
+                    endpoint.try_send_cancel().inspect_err(|_| { boundary!(Driver, CancelSendError); })?,
                     cleanup.expect("first cleanup captured"),
                 );
                 cancel_sent = sent;
                 cleanup = Some(deadline);
             }
             for _ in 0..16 {
-                let Some(event) = endpoint.try_receive()? else {
+                let Some(event) = endpoint.try_receive().inspect_err(|_| { boundary!(Driver, SourceReceiveError); })? else {
                     break;
                 };
                 // The endpoint's authenticated receive has privately latched
@@ -1555,13 +1574,13 @@ fn drive(
                 }
                 output
                     .try_send(Outcome::Event(event))
-                    .map_err(|_| rejected("source-entry native receiver unavailable"))?;
+                    .map_err(|error| { match &error { mpsc::TrySendError::Full(_)=>boundary!(Driver, OutcomeChannelFull), mpsc::TrySendError::Disconnected(_)=>boundary!(Driver, OutcomeChannelDisconnected) }; rejected("source-entry native receiver unavailable") })?;
             }
             // History service observations remain observable after R. Finish
             // means the actual S retained its complete history/preparation; it
             // never grants retirement or authorizes a later W purpose.
             for _ in 0..16 {
-                let Some(event) = endpoint.try_receive_history()? else {
+                let Some(event) = endpoint.try_receive_history().inspect_err(|_| { boundary!(Driver, HistoryReceiveError); })? else {
                     break;
                 };
                 match &event {
@@ -1587,7 +1606,7 @@ fn drive(
                 };
                 output
                     .try_send(Outcome::History(event))
-                    .map_err(|_| rejected("History native receiver unavailable"))?;
+                    .map_err(|error| { match &error { mpsc::TrySendError::Full(_)=>boundary!(Driver, OutcomeChannelFull), mpsc::TrySendError::Disconnected(_)=>boundary!(Driver, OutcomeChannelDisconnected) }; rejected("History native receiver unavailable") })?;
                 if let Some(role) = normal_retirement {
                     let ticket = endpoint.prepare_history_retirement(role)?;
                     retire_history_exclusively(&mut endpoint, &input, &output, &revoked, ticket)?;
@@ -1615,7 +1634,7 @@ fn drive(
                 }
                 output
                     .try_send(Outcome::Witness(event))
-                    .map_err(|_| rejected("Witness native receiver unavailable"))?;
+                    .map_err(|error| { match &error { mpsc::TrySendError::Full(_)=>boundary!(Driver, OutcomeChannelFull), mpsc::TrySendError::Disconnected(_)=>boundary!(Driver, OutcomeChannelDisconnected) }; rejected("Witness native receiver unavailable") })?;
             }
             // Both authenticated S completion and actual W disposal are necessary.
             // Origin additionally verifies exact matching committed heads and the
@@ -1644,7 +1663,7 @@ fn drive(
             // Genuine Signing tickets/Serving remain opaque through this driver.
             // The UI alone admits them; cleanup grammar remains observable after R.
             for _ in 0..16 {
-                let Some(event) = endpoint.try_receive_signing()? else {
+                let Some(event) = endpoint.try_receive_signing().inspect_err(|_| { boundary!(Driver, SigningReceiveError); })? else {
                     break;
                 };
                 let observation = match event {
@@ -1666,7 +1685,7 @@ fn drive(
                 };
                 output
                     .try_send(observation)
-                    .map_err(|_| rejected("Signing cleanup receiver unavailable"))?;
+                    .map_err(|error| { match &error { mpsc::TrySendError::Full(_)=>boundary!(Driver, OutcomeChannelFull), mpsc::TrySendError::Disconnected(_)=>boundary!(Driver, OutcomeChannelDisconnected) }; rejected("Signing cleanup receiver unavailable") })?;
             }
             for role in [Role::Signer1, Role::Signer2] {
                 let i = index(role);
@@ -1684,7 +1703,7 @@ fn drive(
                 }
             }
             for _ in 0..16 {
-                let Some(event) = endpoint.try_receive_completed_pair()? else { break; };
+                let Some(event) = endpoint.try_receive_completed_pair().inspect_err(|_| { boundary!(Driver, PairReceiveError); })? else { break; };
                 match &event {
                     CoordinatorCompletedPairEventV1::Disposed => completed_pair_disposed = true,
                     CoordinatorCompletedPairEventV1::PreparationFailed
@@ -1693,7 +1712,7 @@ fn drive(
                     _ => {}
                 }
                 output.try_send(Outcome::CompletedPair(event))
-                    .map_err(|_| rejected("CompletedPair outcome receiver unavailable"))?;
+                    .map_err(|error| { match &error { mpsc::TrySendError::Full(_)=>boundary!(Driver, OutcomeChannelFull), mpsc::TrySendError::Disconnected(_)=>boundary!(Driver, OutcomeChannelDisconnected) }; rejected("CompletedPair outcome receiver unavailable") })?;
             }
             if cancel_sent && completed_pair_disposed && !completed_pair_close_sent {
                 endpoint.close_completed_pair_purpose()?;
@@ -1715,6 +1734,12 @@ fn drive(
         }
         Ok(None)
     })();
+    if work.is_err() {
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)] {
+            use wholepact_financial_coordinator_origin::financial_ci_failure_boundary as diagnostic;
+            diagnostic::latch(diagnostic::Boundary::Driver(work_stage));
+        }
+    }
     let work = match work {
         Ok(Some(outbound)) => {
             // No queued positive command or unconsumed one-use outbound may
@@ -1731,7 +1756,7 @@ fn drive(
             completion.check_completed()?;
             normal_finished.store(true, Ordering::Release);
             output.try_send(Outcome::NormalFinished(completion))
-                .map_err(|_| rejected("normal completion proof receiver unavailable"))?;
+                .map_err(|error| { match &error { mpsc::TrySendError::Full(_)=>boundary!(Driver, OutcomeChannelFull), mpsc::TrySendError::Disconnected(_)=>boundary!(Driver, OutcomeChannelDisconnected) }; rejected("normal completion proof receiver unavailable") })?;
             on_exit.normal_proven = true;
             // Any remaining transcript was privately drained by Origin. Channel
             // EOF is not used as evidence; only the proof above is success.
@@ -2015,6 +2040,7 @@ impl HostTransport {
         revoked: &AtomicBool,
     ) {
         if revoked.load(Ordering::Acquire) {
+            boundary!(Transport, RestrictedObserved);
             self.close(revoked);
         }
         if self.terminal.is_some() && self.pending_line.is_none() {
@@ -2027,20 +2053,22 @@ impl HostTransport {
                         .queue_user_line(line)
                         .is_err()
                     {
+                        boundary!(Transport, QueueInputRejected);
                         self.close(revoked);
                     } else {
                         self.pending_line = Some(ordinal);
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => self.close(revoked),
+                Err(mpsc::TryRecvError::Disconnected) => { boundary!(Transport, InputChannelDisconnected); self.close(revoked); },
             }
         }
         if self.terminal.is_some() && self.pending_line.is_some() {
             match self.terminal.as_mut().expect("checked").pump_user_input() {
                 Ok(true) => {
                     let ordinal = self.pending_line.take().expect("checked");
-                    if status.try_send(HostStatus::LineWritten(ordinal)).is_err() {
+                    if let Err(error) = status.try_send(HostStatus::LineWritten(ordinal)) {
+                        match error { mpsc::TrySendError::Full(_)=>boundary!(Transport, StatusFull), mpsc::TrySendError::Disconnected(_)=>boundary!(Transport, StatusDisconnected) };
                         self.close(revoked);
                     }
                 }
@@ -2059,6 +2087,7 @@ impl HostTransport {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Full(chunk)) => self.pending_output = Some(chunk),
                 Err(mpsc::TrySendError::Disconnected(chunk)) => {
+                    boundary!(Transport, OutputChannelDisconnected);
                     self.close(revoked);
                     drop(chunk); // Receiver is gone; never claim a complete transcript.
                 }

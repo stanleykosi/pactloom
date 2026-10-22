@@ -94,3 +94,13 @@ required for this profile; older binaries without the semantic channel cannot
 qualify it. Compilation and unit tests are not full-workflow proof. This
 checkpoint records implementation and test obligations, not a successful full
 semantic-assisted financial run or a passing legacy pixel-only gate.
+
+## Native failure-boundary diagnostics
+
+Semantic CI can retain fixed-enum, first-local failure boundaries from the
+Coordinator's UI, driver, transport and core components. Emission requires an
+existing UI/driver failure; these records forbid a successful qualification.
+They do not identify a globally first cause or a remote process's cause. Failure
+reporting uses only cached observations, with missing evidence marked unavailable.
+The original normal-completion proof remains required; absence of a boundary
+record is not evidence of success.

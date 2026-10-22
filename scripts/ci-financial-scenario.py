@@ -75,7 +75,9 @@ class NativeScenario:
         # Finished alone also covers cancellation. Require actual normal proof
         # observations before the sole final native Close; full oracle follows
         # actual root wait0 and cannot be replaced by these preconditions.
-        for record in records:C.validate_record(record,expected_profile)
+        for record in records:
+            C.validate_record(record,expected_profile)
+            C.require(record['kind']!='NativeFailureBoundary','observer_failure')
         for kind in ('NormalFinishAdmitted','PtyHeld','PtyReleased','NormalFinished'):
             C.require(sum(r['role']=='Coordinator' and r['kind']==kind for r in records)==1,'normal_finish')
         key=('Finished',None,'Close',0);C.require(key not in self._used,'replay')

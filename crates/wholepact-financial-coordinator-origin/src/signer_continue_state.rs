@@ -1,4 +1,13 @@
 //! Private lock-free two-slot restriction state and check-only actual lifetimes.
+macro_rules! boundary {
+    ($component:ident, $code:ident) => {{
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)] {
+            use crate::financial_ci_failure_boundary as diagnostic;
+            diagnostic::latch(diagnostic::Boundary::$component(diagnostic::$component::$code));
+        }
+    }};
+}
+
 use crate::{process::PeerLifetime, rejected, Result};
 use std::{os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
@@ -306,11 +315,15 @@ impl CheckedPeer {
         Ok(result)
     }
     pub(super) fn check(&self) -> Result<()> {
-        check_pidfd(&self.pidfd)?;
+        check_pidfd_at(&self.pidfd, true)?;
         let mut poll = libc::pollfd { fd: self.socket.as_raw_fd(), events: libc::POLLIN | libc::POLLRDHUP, revents: 0 };
-        if unsafe { libc::poll(&mut poll, 1, 0) } < 0
+        let polled = unsafe { libc::poll(&mut poll, 1, 0) };
+        if polled < 0
             || poll.revents & (libc::POLLHUP | libc::POLLRDHUP | libc::POLLERR | libc::POLLNVAL) != 0
-        { return Err(rejected("original Continue edge lost")); }
+        {
+            if polled < 0 || poll.revents & (libc::POLLERR | libc::POLLNVAL) != 0 { boundary!(Core, PeerEdgePollError); } else { boundary!(Core, PeerEdgeClosed); }
+            return Err(rejected("original Continue edge lost"));
+        }
         Ok(())
     }
     pub(super) fn shutdown(&self) { unsafe { libc::shutdown(self.socket.as_raw_fd(), libc::SHUT_RDWR); } }
@@ -320,9 +333,15 @@ fn duplicate(fd: RawFd) -> Result<OwnedFd> {
     if raw < 0 { return Err(std::io::Error::last_os_error()); }
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
-fn check_pidfd(fd: &OwnedFd) -> Result<()> {
+fn check_pidfd(fd: &OwnedFd) -> Result<()> { check_pidfd_at(fd, false) }
+fn check_pidfd_at(fd: &OwnedFd, _peer: bool) -> Result<()> {
     let mut poll = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-    if unsafe { libc::poll(&mut poll, 1, 0) } != 0 || poll.revents != 0 {
+    let polled = unsafe { libc::poll(&mut poll, 1, 0) };
+    if polled != 0 || poll.revents != 0 {
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)] {
+            use crate::financial_ci_failure_boundary as diagnostic;
+            diagnostic::latch(diagnostic::Boundary::Core(diagnostic::process_poll_code(_peer,polled,poll.revents)));
+        }
         return Err(rejected("original Continue process lost"));
     }
     Ok(())
@@ -348,9 +367,13 @@ pub(super) struct Core {
 impl Core {
     pub(super) fn check(&self) -> Result<()> {
         let result = (|| {
-            if !self.alive.load(Ordering::Acquire) || unsafe { libc::getpid() } != self.owner_pid
+            let alive = self.alive.load(Ordering::Acquire);
+            if !alive || unsafe { libc::getpid() } != self.owner_pid
                 || unsafe { libc::geteuid() } != self.owner_uid
-            { return Err(rejected("original Continue actor custody lost")); }
+            {
+                if !alive { boundary!(Core, AlreadyClosedObserved); } else { boundary!(Core, CustodyMismatch); }
+                return Err(rejected("original Continue actor custody lost"));
+            }
             self.peer.check()?;
             for (i,fd) in self.roots.iter().enumerate() {
                 if self.retired_roots.load(Ordering::Acquire)&(1<<i)==0{check_pidfd(fd)?;}
@@ -367,7 +390,7 @@ impl Core {
     pub(super) fn check_action_restrictions(&self) -> Result<()> {
         let result = (|| {
             self.check()?;
-            crate::channel::require_time(self.session)?;
+            crate::channel::require_time(self.session).inspect_err(|_| { boundary!(Core, SessionExpired); })?;
             if self.phase.revoked()||self.phase.quiescent()||self.phase.normal_phase()>=2 { return Err(rejected("original workflow restricted, quiescent or closing")); }
             // Last sample uses the original shared cell, not a queued Cancel.
             if let Some(reader) = &self.signer_restriction { reader.check_current()?; }

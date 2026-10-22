@@ -36,11 +36,11 @@ jobs:
         run: |
           set -euo pipefail
           mode="$(cat scripts/qualification-gate-mode)"
-          [[ "$mode" == origin || "$mode" == full || "$mode" == financial || "$mode" == bootstrap || "$mode" == ui || "$mode" == financial-ui || "$mode" == financial-semantic || "$mode" == financial-semantic-reuse ]]
+          [[ "$mode" == origin || "$mode" == full || "$mode" == financial || "$mode" == bootstrap || "$mode" == ui || "$mode" == financial-ui || "$mode" == financial-semantic || "$mode" == financial-reuse ]]
           [[ "$(wc -l < scripts/qualification-gate-mode)" -eq 1 ]]
           printf 'gate=%s\n' "$mode" >> "$GITHUB_OUTPUT"
       - name: Minimal real production origin integration (not full qualification)
-        if: steps.mode.outputs.gate != 'bootstrap' && steps.mode.outputs.gate != 'ui' && steps.mode.outputs.gate != 'financial-ui' && steps.mode.outputs.gate != 'financial-semantic' && steps.mode.outputs.gate != 'financial-semantic-reuse'
+        if: steps.mode.outputs.gate != 'bootstrap' && steps.mode.outputs.gate != 'ui' && steps.mode.outputs.gate != 'financial-ui' && steps.mode.outputs.gate != 'financial-semantic' && steps.mode.outputs.gate != 'financial-reuse'
         shell: bash
         working-directory: source
         run: bash scripts/ci-origin-integration-linux.sh
@@ -154,7 +154,7 @@ jobs:
         run: |
           echo 'Fresh coordinated-financial-rendered-host-semantic-v1 synthetic two-signer qualification passed using read-only same-rendered-Host-text observation. All native authority, full proof, retirements, Returns, normal close and cleanup checks remain required. This is NOT pixel-only UI qualification; the original financial-ui gate remains separately callable and is not upgraded. No dispatch, public-chain settlement, deployment or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
       - name: Fetch exact independent producer P and reviewed harness H without credentials
-        if: steps.mode.outputs.gate == 'financial-semantic-reuse'
+        if: steps.mode.outputs.gate == 'financial-reuse'
         shell: bash
         env:
           GIT_TERMINAL_PROMPT: '0'
@@ -172,15 +172,15 @@ jobs:
             test "$(git -C "$destination" rev-parse HEAD)" = "$commit"
             test -z "$(git -C "$destination" status --porcelain --untracked-files=all)"
           }
-          fetch_exact P a3b40f43db0f4fefbd7755e434708584351cbe46
-          fetch_exact H 99f26c7490186f0e8034c2d32c24754799a96d7a
+          fetch_exact P f98de7fd79389ce340343292086c852825f59b60
+          fetch_exact H ecda810b7167a54bdb3f6d587fb60956b56c6b6d
       - name: Run launcher negative and protocol tests without credentials
-        if: steps.mode.outputs.gate == 'financial-semantic-reuse'
+        if: steps.mode.outputs.gate == 'financial-reuse'
         timeout-minutes: 5
         shell: bash
         run: python3 -I -B -m unittest discover -s source/scripts/financial-runtime-reuse -p 'test_*.py'
       - name: Acquire exact producer bundle with isolated read token
-        if: steps.mode.outputs.gate == 'financial-semantic-reuse'
+        if: steps.mode.outputs.gate == 'financial-reuse'
         timeout-minutes: 6
         shell: bash
         env:
@@ -191,7 +191,7 @@ jobs:
             "$GITHUB_WORKSPACE/source/scripts/financial-runtime-reuse/plan.json" \
             "$RUNNER_TEMP/wholepact-financial-reuse-download-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "${GITHUB_WORKSPACE}/source"
       - name: Pre-runtime trusted cleanup smoke after exact archive acquisition (no native execution)
-        if: steps.mode.outputs.gate == 'financial-semantic-reuse'
+        if: steps.mode.outputs.gate == 'financial-reuse'
         timeout-minutes: 5
         shell: bash
         run: |
@@ -203,7 +203,7 @@ jobs:
             GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" GITHUB_JOB="$GITHUB_JOB" \
             python3 -I -B "${GITHUB_WORKSPACE}/source/scripts/financial-runtime-reuse/launch_adapter.py" cleanup "${GITHUB_WORKSPACE}/source"
       - name: Actual synthetic financial runtime using verified producer binaries (not a fresh build)
-        if: steps.mode.outputs.gate == 'financial-semantic-reuse'
+        if: steps.mode.outputs.gate == 'financial-reuse'
         timeout-minutes: 200
         shell: bash
         run: |
@@ -217,7 +217,7 @@ jobs:
             "$GITHUB_WORKSPACE/source/scripts/financial-runtime-reuse/plan.json" "$GITHUB_WORKSPACE/P" "$GITHUB_WORKSPACE/H" \
             "$RUNNER_TEMP/wholepact-financial-reuse-download-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "${GITHUB_WORKSPACE}/source"
       - name: Always reconcile exact job-owned resources from trusted L only
-        if: always() && steps.mode.outputs.gate == 'financial-semantic-reuse'
+        if: always() && steps.mode.outputs.gate == 'financial-reuse'
         timeout-minutes: 5
         shell: bash
         run: |
@@ -229,7 +229,7 @@ jobs:
             GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" GITHUB_JOB="$GITHUB_JOB" \
             python3 -I -B "$GITHUB_WORKSPACE/source/scripts/financial-runtime-reuse/launch_adapter.py" cleanup "${GITHUB_WORKSPACE}/source"
       - name: Remove exact job acquisition directory (no fixture output upload)
-        if: always() && steps.mode.outputs.gate == 'financial-semantic-reuse'
+        if: always() && steps.mode.outputs.gate == 'financial-reuse'
         shell: bash
         run: |
           set -euo pipefail

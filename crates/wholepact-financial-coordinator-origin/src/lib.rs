@@ -282,3 +282,8 @@ compile_error!("external financial CI profile requires the financial CI observer
 compile_error!("rendered Host semantic CI requires the Linux external full-financial observer");
 #[cfg(wholepact_financial_rendered_host_semantic_ci)]
 pub use financial_observer::financial_ci_clear_host_view;
+
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+pub mod financial_ci_failure_boundary;
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+pub use financial_observer::financial_ci_flush_failure_boundaries;

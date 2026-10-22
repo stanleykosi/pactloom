@@ -67,6 +67,7 @@ class ObserverFiles:
                 C.require(self._roles.get(role,name)==name,'lineage');self._roles[role]=name
             self._files[name]=(identity,complete);records.extend(entries)
         C.require(not final or len(self._roles)==17,'observer_missing')
+        C.native_failure_sequence(records,self.expected_profile)
         if self.expected_profile==C.SEMANTIC_PROFILE:self._join_host_views(records)
         return records
     def _clear_host_view(self):

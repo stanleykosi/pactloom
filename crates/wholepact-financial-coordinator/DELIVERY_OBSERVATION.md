@@ -95,3 +95,24 @@ path plus actual region change, not exact displayed text or physical human
 consent. Raw records and pixels are never published; only strict finite projected
 results leave the disposable gate. All native/runtime qualification remains
 isolated approved CI only; local source work executes none of it.
+
+### Semantic qualification: native failure boundaries
+
+Only the separately compiled rendered-Host semantic CI profile may append
+`NativeFailureBoundary` to the existing private Coordinator observer. Four
+immutable finite-code slots report the first **locally observed** UI, driver,
+transport and Core boundaries. They do not identify a globally first restriction
+publisher or remote Host/Signer cause. An absent or failed flush means unavailable
+observation, not success.
+
+Latching performs no file IO and cannot change input, native approval, custody,
+original restrictions, deadlines, cleanup or the normal-completion proof. Failed
+Core/transport checks alone cannot emit a record: an existing actual UI failure
+or driver failure must first enable the failure-only record. Generic Drop and
+normal teardown do not enable it. Changed aggregates are attempted at most four
+times, at a safe snapshot boundary before any linked Host view/snapshot pair, or
+after the original Coordinator runner and owned join return. Any diagnostic
+append failure permanently disables further diagnostic attempts; original error
+and cleanup behavior continues. The semantic qualification consumer rejects a
+failure-boundary record as incompatible with success. Legacy pixel and production
+profiles expose neither this diagnostic API nor its output.
