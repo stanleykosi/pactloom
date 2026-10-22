@@ -23,7 +23,7 @@ jobs:
           GIT_CONFIG_GLOBAL: /dev/null
         run: |
           set -euo pipefail
-          umask 077
+          umask 022 # Public source modes must match tracked Git modes.
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           git init source
           git -C source -c credential.helper= -c http.extraheader= fetch --no-tags --depth=1 https://github.com/stanleykosi/pactloom.git "$SOURCE_COMMIT"
@@ -36,11 +36,11 @@ jobs:
         run: |
           set -euo pipefail
           mode="$(cat scripts/qualification-gate-mode)"
-          [[ "$mode" == origin || "$mode" == full || "$mode" == financial || "$mode" == bootstrap || "$mode" == ui || "$mode" == financial-ui ]]
+          [[ "$mode" == origin || "$mode" == full || "$mode" == financial || "$mode" == bootstrap || "$mode" == ui || "$mode" == financial-ui || "$mode" == financial-reuse ]]
           [[ "$(wc -l < scripts/qualification-gate-mode)" -eq 1 ]]
           printf 'gate=%s\n' "$mode" >> "$GITHUB_OUTPUT"
       - name: Minimal real production origin integration (not full qualification)
-        if: steps.mode.outputs.gate != 'bootstrap' && steps.mode.outputs.gate != 'ui' && steps.mode.outputs.gate != 'financial-ui'
+        if: steps.mode.outputs.gate != 'bootstrap' && steps.mode.outputs.gate != 'ui' && steps.mode.outputs.gate != 'financial-ui' && steps.mode.outputs.gate != 'financial-reuse'
         shell: bash
         working-directory: source
         run: bash scripts/ci-origin-integration-linux.sh
@@ -148,3 +148,87 @@ jobs:
         shell: bash
         run: |
           echo 'Fresh exact-source synthetic two-signer financial UI passed the external-pre-V3-native-Witness profile, including seven integrated financial Witness services, six retained-inert Witness roots and actual owned reaps. Early history, admission and audit used the actual external native Witness operator, not thirteen integrated service purposes. Both signing retirements, CompletedPair, separate Returns, normal close and container/image/cache cleanup were verified. No dispatch, public-chain settlement, deployment or full-product acceptance is claimed. Existing narrow CI evidence was not rerun or upgraded.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Fetch exact independent producer P and reviewed harness H without credentials
+        if: steps.mode.outputs.gate == 'financial-reuse'
+        shell: bash
+        env:
+          GIT_TERMINAL_PROMPT: '0'
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_CONFIG_GLOBAL: /dev/null
+        run: |
+          set -euo pipefail
+          umask 022
+          fetch_exact() {
+            local destination="$1" commit="$2"
+            mkdir "$destination"
+            git -C "$destination" init --quiet
+            git -C "$destination" -c credential.helper= -c http.extraheader= fetch --no-tags --depth=1 https://github.com/stanleykosi/pactloom.git "$commit"
+            git -C "$destination" checkout --quiet --detach FETCH_HEAD
+            test "$(git -C "$destination" rev-parse HEAD)" = "$commit"
+            test -z "$(git -C "$destination" status --porcelain --untracked-files=all)"
+          }
+          fetch_exact P f98de7fd79389ce340343292086c852825f59b60
+          fetch_exact H 14244f763caaaa32c93f4883107987899d9d2008
+      - name: Run launcher negative and protocol tests without credentials
+        if: steps.mode.outputs.gate == 'financial-reuse'
+        timeout-minutes: 5
+        shell: bash
+        run: python3 -I -B -m unittest discover -s source/scripts/financial-runtime-reuse -p 'test_*.py'
+      - name: Acquire exact producer bundle with isolated read token
+        if: steps.mode.outputs.gate == 'financial-reuse'
+        timeout-minutes: 6
+        shell: bash
+        env:
+          FINANCIAL_ARTIFACT_READ_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -I -B "$GITHUB_WORKSPACE/source/scripts/financial-runtime-reuse/launch_adapter.py" acquire \
+            "$GITHUB_WORKSPACE/source/scripts/financial-runtime-reuse/plan.json" \
+            "$RUNNER_TEMP/wholepact-financial-reuse-download-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "${GITHUB_WORKSPACE}/source"
+      - name: Pre-runtime trusted cleanup smoke after exact archive acquisition (no native execution)
+        if: steps.mode.outputs.gate == 'financial-reuse'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            RUNNER_OS="$RUNNER_OS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_SHA="$GITHUB_SHA" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" GITHUB_JOB="$GITHUB_JOB" \
+            python3 -I -B "${GITHUB_WORKSPACE}/source/scripts/financial-runtime-reuse/launch_adapter.py" cleanup "${GITHUB_WORKSPACE}/source"
+      - name: Actual synthetic financial runtime using verified producer binaries (not a fresh build)
+        if: steps.mode.outputs.gate == 'financial-reuse'
+        timeout-minutes: 200
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            RUNNER_OS="$RUNNER_OS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_SHA="$GITHUB_SHA" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" GITHUB_JOB="$GITHUB_JOB" \
+            python3 -I -B "$GITHUB_WORKSPACE/source/scripts/financial-runtime-reuse/launch_adapter.py" run \
+            "$GITHUB_WORKSPACE/source/scripts/financial-runtime-reuse/plan.json" "$GITHUB_WORKSPACE/P" "$GITHUB_WORKSPACE/H" \
+            "$RUNNER_TEMP/wholepact-financial-reuse-download-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "${GITHUB_WORKSPACE}/source"
+      - name: Always reconcile exact job-owned resources from trusted L only
+        if: always() && steps.mode.outputs.gate == 'financial-reuse'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            RUNNER_OS="$RUNNER_OS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_SHA="$GITHUB_SHA" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" GITHUB_JOB="$GITHUB_JOB" \
+            python3 -I -B "$GITHUB_WORKSPACE/source/scripts/financial-runtime-reuse/launch_adapter.py" cleanup "${GITHUB_WORKSPACE}/source"
+      - name: Remove exact job acquisition directory (no fixture output upload)
+        if: always() && steps.mode.outputs.gate == 'financial-reuse'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,5}$ ]]
+          directory="$RUNNER_TEMP/wholepact-financial-reuse-download-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test ! -L "$directory"
+          rm -rf -- "$directory"
