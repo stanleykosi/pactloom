@@ -297,16 +297,20 @@ class FailureCheckpointTests(unittest.TestCase):
 
 class PrivateInitialSelectionProbeTests(unittest.TestCase):
     def flow(self, *, reveal_after=12, enabled=True, transition='V3Configuring',
-             owner='Signer1', protected=False):
+             owner='Signer1', protected=False, unfocused_until=0, lose_focus_after=None):
         from unittest import mock
         controller=mock.Mock()
-        state={'down':0,'clicked':False,'generation':0}
-        def down(*point):state['down']+=1
+        state={'down':0,'clicked':False,'generation':0,'focused':False}
+        def up(*point):self.assertTrue(state['focused'])
+        def down(*point):
+            self.assertTrue(state['focused']);state['down']+=1
         def click(*point):
+            self.assertTrue(state['focused'])
             self.assertGreaterEqual(state['down'],reveal_after)
             self.assertTrue(enabled)
             self.assertFalse(state['clicked'])
             state['clicked']=True
+        controller.scroll_up.side_effect=up
         controller.scroll_down.side_effect=down
         controller.click.side_effect=click
         class Observer:
@@ -314,6 +318,7 @@ class PrivateInitialSelectionProbeTests(unittest.TestCase):
             def read(self):return []
             def next_snapshot(self,deadline):
                 state['generation']+=1
+                state['focused']=state['generation']>unfocused_until and (lose_focus_after is None or state['generation']<=lose_focus_after)
                 widgets=[dict(tag='ScrollRegion',owner=None,rect=[0,0,1280,800],enabled=True)]
                 if state['down']>=reveal_after:
                     widgets.append(dict(tag='ConfigureV3',owner='Signer1',rect=[20,600,200,630],enabled=enabled))
@@ -321,7 +326,7 @@ class PrivateInitialSelectionProbeTests(unittest.TestCase):
                 # geometry, as with untagged/clipped content crossing a viewport.
                 return dict(phase=transition if state['clicked'] else 'Selecting',
                     subphase='None',owner=owner if state['clicked'] and transition=='V3Configuring' else None,
-                    view_generation=state['generation'],focused=True,secret_input=False,
+                    view_generation=state['generation'],focused=state['focused'],secret_input=False,
                     host_input=protected,pixels_per_point=1,viewport=[1280,800],widgets=widgets)
         fixture=mock.Mock();fixture.deadline_ns=123
         fixture.secret.side_effect=AssertionError('probe must not access credentials')
@@ -368,6 +373,44 @@ class PrivateInitialSelectionProbeTests(unittest.TestCase):
         flow,controller,state=self.flow(reveal_after=0,protected=True)
         self.run_rejected(flow,'input_phase')
         self.assertEqual(controller.mock_calls,[])
+    def test_delayed_initial_focus_waits_without_input_then_uses_one_click(self):
+        flow,controller,state=self.flow(reveal_after=0,unfocused_until=3)
+        self.run_rejected(flow,'missing_evidence')
+        self.assertEqual([c[0] for c in controller.mock_calls[:3]],['wait_render_progress']*3)
+        controller.click.assert_called_once_with(110,615)
+        controller.scroll_up.assert_not_called();controller.scroll_down.assert_not_called()
+    def test_never_focused_is_bounded_with_no_input(self):
+        flow,controller,state=self.flow(reveal_after=0,unfocused_until=1000)
+        self.run_rejected(flow,'input_budget')
+        self.assertEqual(state['generation'],64)
+        self.assertEqual([c[0] for c in controller.mock_calls],['wait_render_progress']*64)
+    def test_focus_loss_after_first_observed_focus_is_not_tolerated(self):
+        flow,controller,state=self.flow(lose_focus_after=1)
+        self.run_rejected(flow,'input_phase')
+        self.assertEqual(controller.scroll_up.call_count,1)
+        self.assertEqual(controller.wait_render_progress.call_count,1)
+        controller.click.assert_not_called()
+    def test_unfocused_protected_state_still_rejected_without_wait(self):
+        flow,controller,state=self.flow(protected=True,unfocused_until=3)
+        self.run_rejected(flow,'input_phase')
+        self.assertEqual(controller.mock_calls,[])
+    def test_unfocused_wrong_startup_state_never_waits(self):
+        for change in ({'phase':'Finished'},{'phase':'Revoked'},{'phase':'V3Configuring'},
+                       {'owner':'Signer1'},{'subphase':'Idle'}):
+            with self.subTest(change=change):
+                flow,controller,state=self.flow(unfocused_until=3)
+                original=flow.native.next_snapshot
+                def snapshot(deadline):
+                    value=original(deadline);value.update(change);return value
+                flow.native.next_snapshot=snapshot
+                self.run_rejected(flow,'input_phase')
+                self.assertEqual(controller.mock_calls,[])
+
+    def test_native_startup_focus_and_loss_rules_are_distinct(self):
+        source=(ROOT.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
+        self.assertIn('focus_seen: false, focused_last: false',source)
+        self.assertIn('blur || escape || (seen && previous && !focused)',source)
+
     def test_container_uses_failure_only_probe_not_full_success_path(self):
         source=(ROOT/'ci-financial-container.py').read_text()
         self.assertIn('self.flow.initial_selection_probe()',source)

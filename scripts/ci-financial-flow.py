@@ -236,19 +236,28 @@ class FullFlow:
     def initial_selection_probe(self):
         """PRIVATE failure-only probe; never pumps Host or claims full completion.
 
-        Eight upward then 56 downward native wheel events search actual tags.
+        At most 64 observations, including startup focus waits; search uses
+        eight upward then at most 56 downward native wheel events for real tags.
         Identical clipped geometry is NOT a scroll-boundary observation. Every
         input remains under the original fixture deadline and existing budgets.
         A discovered control is clicked once through the ordinary stable/latch
         path. Only a later actual exact transition establishes probe progress;
         even that deliberately fails missing_evidence, never normal completion.
         """
-        clicked=False
+        clicked=False;focus_seen=False;search_attempts=0
         for attempt in range(64):
             s=self.snapshot()
             if s['phase'] not in ('Revoked','Finished'):
                 self.location={k:s[k] for k in ('phase','subphase','owner')}
-            C.require(s['focused'] and not(s['secret_input'] or s['host_input']),'input_phase')
+            C.require(not(s['secret_input'] or s['host_input']),'input_phase')
+            if not s['focused']:
+                # The first cached app snapshot may precede the already-sent
+                # compositor focus receipt. Observe only; never refocus/retry.
+                C.require(not focus_seen and s['phase']=='Selecting' and
+                          s['owner'] is None and s['subphase']=='None','input_phase')
+                self.controller.wait_render_progress()
+                continue
+            focus_seen=True
             if clicked and s['phase']=='V3Configuring':
                 C.require(s['owner']=='Signer1' and s['subphase']=='None','input_phase')
                 raise C.Rejected('missing_evidence')
@@ -261,7 +270,8 @@ class FullFlow:
                 self.press(s,'ConfigureV3','Signer1')
                 clicked=True
             else:
-                C.require(self.scroll(s,'ScrollRegion',None,'up' if attempt<8 else 'down'),'input_widget')
+                C.require(self.scroll(s,'ScrollRegion',None,'up' if search_attempts<8 else 'down'),'input_widget')
+                search_attempts+=1
         raise C.Rejected('input_budget')
 
     def run(self):
