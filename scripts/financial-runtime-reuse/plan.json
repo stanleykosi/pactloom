@@ -9,8 +9,8 @@
   },
   "harness": {
     "repository": "stanleykosi/pactloom",
-    "source": "c01437504e501e3b3d4f5a1125a1e95cc0ae6b4a",
-    "source_tree": "980de2702ef04948d2058d500c9489f69d5914af"
+    "source": "41f939d280602a432bdc91f59f5a7c7371b9f6f7",
+    "source_tree": "efe1ef72c06acfe645a34581229d497b4ec71061"
   },
   "artifact_pins": {
     "archive_sha256": "5bb6a74c41cff83a06c3cba0310bae312d7f315e0bb021e1b45947e6f81b98c9",
@@ -23,7 +23,9 @@
     "run": "21555a19c9722c26f095523dd86c427a8840a65df8860ec0194b6a99655d2c65"
   },
   "reviewed_runtime_changes": {
+    "scripts/ci-financial-controller.py": "32366e4ada7bb7934c7f1f33edce6cbeac3c6f8c69ac1b39bba5607a47f2bd15",
     "scripts/ci-financial-fixture.py": "09487d7db5fef5bdad47ed542a8b154afe208b19235e3452b139662a3ebc71f5",
-    "scripts/tests/test_ci_financial_observer.py": "7c39f16a49840f23c101b2061b2369eb0c705ca8a6703d946e0af892ee9c2480"
+    "scripts/ci-financial-flow.py": "e5a1606244df2e8676223c01a9132593f158ca50b42969eb070f94e4c6c49564",
+    "scripts/tests/test_ci_financial_observer.py": "b0011830c991c1cbf1444a0ea7ebd0592e65e5758e19fcb6d4a5fbdc9a9b700a"
   }
 }

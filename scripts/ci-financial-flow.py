@@ -67,6 +67,8 @@ HOST_STARTUP_MARKERS=(
 
 class FullFlow:
     def __init__(self,controller,fixture,observer,ocr,operator=None):
+        # Mandatory local safety configuration, not an overridable input action.
+        S.K.Controller.enable_rendered_clicks(controller)
         self.operator=operator
         self.expected_profile=observer.expected_profile
         self.controller=controller;self.fixture=fixture;self.observer=observer;self.ocr=ocr
@@ -440,6 +442,11 @@ class FullFlow:
             phase_key=(phase,s['subphase'],owner)
             if phase_key!=self.last_phase:
                 self.scrolls={};self.search_geometry=None;self.search_direction='up';self.last_phase=phase_key
+            if phase=='Revoked' and self.pending_host is not None:
+                # Boundary diagnostic only: Begin was latched, but typing and
+                # guarded Submit have not both returned. No cause/acceptance claim.
+                # The pump has no outer-loop yield between typing and Submit.
+                self.host_rejection='host_entry_changed'
             C.require(phase not in ('Revoked',),'source_failure')
             if phase=='Finished':
                 self.native.close_after_normal_proof(self.records,owner,self.expected_profile);return
