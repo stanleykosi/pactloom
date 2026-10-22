@@ -23,6 +23,7 @@ pub(super) enum OutputFailure {
     RawLimit,
     TextLimit,
     InvalidCarry,
+    CounterOverflow,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OutputState {
@@ -35,6 +36,8 @@ pub(super) struct HostOutputText {
     text: Zeroizing<String>,
     carry: Zeroizing<Vec<u8>>,
     raw_bytes: usize,
+    revision: u64,
+    non_whitespace_end: u64,
     raw_limit: usize,
     text_limit: usize,
     state: OutputState,
@@ -45,6 +48,8 @@ impl HostOutputText {
             text: Zeroizing::new(String::new()),
             carry: Zeroizing::new(Vec::with_capacity(3)),
             raw_bytes: 0,
+            revision: 0,
+            non_whitespace_end: 0,
             raw_limit: MAX_RAW,
             text_limit: MAX_TEXT,
             state: OutputState::Open,
@@ -55,6 +60,21 @@ impl HostOutputText {
     }
     pub(super) fn state(&self) -> OutputState {
         self.state
+    }
+    /// Accepted nonempty raw appends, including incomplete UTF-8 suffixes.
+    pub(super) fn revision(&self) -> u64 {
+        self.revision
+    }
+    /// Global end of escaped display scalars, excluding ASCII whitespace only.
+    /// The retained transcript never rotates. Closing clears storage, not IDs.
+    /// A visible contiguous suffix can subtract its own count from this end.
+    pub(super) fn non_whitespace_end(&self) -> u64 {
+        self.non_whitespace_end
+    }
+    /// Decoder readiness is not stream liveness or proof of a complete prompt.
+    /// Callers must independently require `state() == OutputState::Open`.
+    pub(super) fn decode_complete(&self) -> bool {
+        self.carry.is_empty()
     }
 
     /// Consume one real bounded output chunk. Never log or interpret its text.
@@ -74,6 +94,9 @@ impl HostOutputText {
         if self.carry.len() > 3 {
             return self.fail(OutputFailure::InvalidCarry);
         }
+        let Some(revision) = self.revision.checked_add(u64::from(!chunk.is_empty())) else {
+            return self.fail(OutputFailure::CounterOverflow);
+        };
         // Both the bounded joined bytes and incoming original have zeroizing
         // owners. No unbounded retained raw transcript or lossy decoder exists.
         let mut bytes = std::mem::take(&mut self.carry);
@@ -90,9 +113,15 @@ impl HostOutputText {
         {
             return self.fail(OutputFailure::TextLimit);
         }
+        let Some(non_whitespace_end) = advance_non_whitespace(self.non_whitespace_end, &escaped)
+        else {
+            return self.fail(OutputFailure::CounterOverflow);
+        };
         self.text.push_str(&escaped);
         self.carry = carry;
         self.raw_bytes = total;
+        self.revision = revision;
+        self.non_whitespace_end = non_whitespace_end;
         Ok(())
     }
 
@@ -112,7 +141,12 @@ impl HostOutputText {
         {
             return self.fail(OutputFailure::TextLimit);
         }
+        let Some(non_whitespace_end) = advance_non_whitespace(self.non_whitespace_end, &escaped)
+        else {
+            return self.fail(OutputFailure::CounterOverflow);
+        };
         self.text.push_str(&escaped);
+        self.non_whitespace_end = non_whitespace_end;
         self.carry.zeroize();
         self.state = OutputState::Eof;
         Ok(())
@@ -137,6 +171,12 @@ impl HostOutputText {
         // display. There is no successful truncation, rotation or auto-retry.
         Err(error)
     }
+}
+
+fn advance_non_whitespace(start: u64, text: &str) -> Option<u64> {
+    text.chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .try_fold(start, |end, _| end.checked_add(1))
 }
 
 fn escaped_chunk(bytes: &[u8]) -> Result<(Zeroizing<String>, Zeroizing<Vec<u8>>), OutputFailure> {
@@ -207,6 +247,134 @@ mod tests {
         value.raw_limit = raw;
         value.text_limit = text;
         value
+    }
+    #[test]
+    fn source_end_is_partition_invariant_for_unicode_controls_and_invalid_bytes() {
+        let sample = b"A \xc3\xa9\n\xf0\x9f\x99\x82\\\r\t\xff\xe2\x82";
+        let mut whole = HostOutputText::new();
+        whole.push_chunk(chunk(sample)).unwrap();
+        whole.finish_eof().unwrap();
+        let expected_end = advance_non_whitespace(0, whole.text()).unwrap();
+        for at in 0..=sample.len() {
+            let mut output = HostOutputText::new();
+            output.push_chunk(chunk(&sample[..at])).unwrap();
+            output.push_chunk(chunk(&sample[at..])).unwrap();
+            assert_eq!(
+                output.revision(),
+                if at == 0 || at == sample.len() { 1 } else { 2 }
+            );
+            output.finish_eof().unwrap();
+            assert_eq!(output.text(), whole.text());
+            assert_eq!(output.non_whitespace_end(), expected_end);
+            assert!(output.decode_complete());
+        }
+    }
+    #[test]
+    fn empty_chunks_and_display_whitespace_do_not_renew_source_occurrences() {
+        let mut output = HostOutputText::new();
+        output.push_chunk(chunk(b"Prompt? ")).unwrap();
+        let first_end = output.non_whitespace_end();
+        assert_eq!(first_end, 7);
+        output.push_chunk(chunk(b"")).unwrap();
+        assert_eq!(output.revision(), 1);
+        output.push_chunk(chunk(b" \n\n ")).unwrap();
+        assert_eq!(output.revision(), 2);
+        assert_eq!(output.non_whitespace_end(), first_end);
+        output.push_chunk(chunk(b"Prompt? ")).unwrap();
+        assert_eq!(output.non_whitespace_end(), first_end * 2);
+        assert_eq!(output.revision(), 3);
+    }
+    #[test]
+    fn identical_prompts_without_newlines_have_disjoint_source_intervals() {
+        let mut output = HostOutputText::new();
+        output.push_chunk(chunk(b"Again? ")).unwrap();
+        let first_end = output.non_whitespace_end();
+        output.push_chunk(chunk(b"Again? ")).unwrap();
+        let second_end = output.non_whitespace_end();
+        assert_eq!((first_end, second_end), (6, 12));
+        assert_eq!(second_end - 6, first_end);
+        assert!(!output.text().contains('\n'));
+    }
+    #[test]
+    fn pending_utf8_advances_revision_but_not_end_until_decoded_or_eof() {
+        let mut output = HostOutputText::new();
+        for (index, byte) in [0xf0, 0x9f, 0x99].iter().enumerate() {
+            output.push_chunk(chunk(&[*byte])).unwrap();
+            assert_eq!(output.revision(), (index + 1) as u64);
+            assert_eq!(output.non_whitespace_end(), 0);
+            assert!(!output.decode_complete());
+        }
+        output.push_chunk(chunk(b"")).unwrap();
+        assert_eq!(output.revision(), 3);
+        assert!(!output.decode_complete());
+        output.push_chunk(chunk(&[0x82])).unwrap();
+        assert_eq!(output.revision(), 4);
+        assert_eq!(output.non_whitespace_end(), 1);
+        assert!(output.decode_complete());
+
+        let mut output = HostOutputText::new();
+        output.push_chunk(chunk(&[0xf0, 0x9f, 0x99])).unwrap();
+        output.finish_eof().unwrap();
+        assert_eq!(output.revision(), 1);
+        assert_eq!(output.non_whitespace_end(), 12);
+        assert!(output.decode_complete());
+        assert_eq!(output.state(), OutputState::Eof);
+    }
+    #[test]
+    fn source_counts_display_scalars_not_raw_bytes_or_unicode_whitespace() {
+        let mut output = HostOutputText::new();
+        output.push_chunk(chunk("é🙂".as_bytes())).unwrap();
+        assert_eq!(output.non_whitespace_end(), 2);
+        output.push_chunk(chunk(b"\\\r\t\xff")).unwrap();
+        assert_eq!(output.non_whitespace_end(), 12); // 2 + 2 + 2 + 2 + 4
+        // Non-ASCII whitespace remains significant whether displayed or escaped.
+        assert_eq!(advance_non_whitespace(0, " \n\t\r\u{a0}\u{2003}"), Some(2));
+    }
+    #[test]
+    fn failure_and_cleanup_preserve_counters_without_reopening() {
+        let mut output = limited(3, 20);
+        output.push_chunk(chunk(b"ok ")).unwrap();
+        assert_eq!(output.push_chunk(chunk(b"x")), Err(OutputFailure::RawLimit));
+        assert_eq!((output.revision(), output.non_whitespace_end()), (1, 2));
+        output.clear_and_close();
+        assert_eq!((output.revision(), output.non_whitespace_end()), (1, 2));
+        assert_eq!(output.push_chunk(chunk(b"")), Err(OutputFailure::Closed));
+        assert!(output.text().is_empty());
+    }
+    #[test]
+    fn counter_overflow_is_terminal_and_never_partially_commits() {
+        let mut output = HostOutputText::new();
+        output.revision = u64::MAX;
+        output.push_chunk(chunk(b"")).unwrap();
+        assert_eq!(
+            output.push_chunk(chunk(b"x")),
+            Err(OutputFailure::CounterOverflow)
+        );
+        assert_eq!(output.revision(), u64::MAX);
+        assert_eq!(output.non_whitespace_end(), 0);
+        assert!(output.text().is_empty());
+
+        let mut output = HostOutputText::new();
+        output.non_whitespace_end = u64::MAX;
+        output.push_chunk(chunk(b" ")).unwrap();
+        assert_eq!(
+            output.push_chunk(chunk(b"x")),
+            Err(OutputFailure::CounterOverflow)
+        );
+        assert_eq!(output.revision(), 1);
+        assert_eq!(output.non_whitespace_end(), u64::MAX);
+        assert_eq!(output.text(), " ");
+
+        let mut output = HostOutputText::new();
+        output.non_whitespace_end = u64::MAX - 3;
+        output.push_chunk(chunk(&[0xf0])).unwrap();
+        assert_eq!(output.finish_eof(), Err(OutputFailure::CounterOverflow));
+        assert_eq!(output.non_whitespace_end(), u64::MAX - 3);
+        assert!(output.text().is_empty() && output.carry.is_empty());
+        assert_eq!(
+            output.state(),
+            OutputState::Failed(OutputFailure::CounterOverflow)
+        );
     }
     #[test]
     fn utf8_is_identical_across_every_chunk_split_and_carry_never_exceeds_three() {

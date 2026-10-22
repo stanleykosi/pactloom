@@ -20,6 +20,7 @@ class Controller:
 def snapshot(generation,*,protected=False,enabled=True,rect=None):
     return dict(phase='Selecting',subphase='None',owner=None,view_generation=generation,
                 focused=True,secret_input=protected,host_input=False,pixels_per_point=1,
+                host_observation=dict(revision=0,nonws_end=0,context_valid=True,entry='Idle',editor=None,view=None),
                 viewport=[1280,800],widgets=[dict(tag='BeginHostLine',owner=None,
                 rect=rect or [10,10,30,30],enabled=enabled)])
 

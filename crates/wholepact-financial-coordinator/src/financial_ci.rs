@@ -33,6 +33,20 @@ pub(super) fn begin(ctx: &egui::Context, phase: &'static str, subphase: &'static
             "pixels_per_point":ctx.pixels_per_point(),"viewport":[1280,800]}));
     });
 }
+/// Closed content-free context of the actual Host layout; never a readiness grant.
+pub(super) fn host_observation(revision: u64, nonws_end: u64, context_valid: bool,
+    entry: &'static str, editor: Option<(u64, u64)>, view: Option<crate::host_output_view::HostOutputView>) {
+    FRAME.with(|cell| {
+        let mut f = cell.borrow_mut();
+        if let Some(facts) = &mut f.facts {
+            facts["host_observation"] = json!({"revision":revision,"nonws_end":nonws_end,
+                "context_valid":context_valid,"entry":entry,
+                "editor":editor.map(|(ordinal,revision)| json!({"ordinal":ordinal,"revision":revision})),
+                "view":view.map(|v| json!({"rect":[v.rect.min.x,v.rect.min.y,v.rect.max.x,v.rect.max.y],
+                    "nonws":v.nonws,"rows":v.rows}))});
+        }
+    });
+}
 pub(super) fn owner() -> Option<&'static str> { FRAME.with(|f| f.borrow().owner) }
 pub(super) fn response(ui: &egui::Ui, response: &egui::Response, tag: &'static str,
     owner: Option<&'static str>) {
@@ -73,6 +87,7 @@ pub(super) fn finish(ctx: &egui::Context, visible: bool, secret: bool, host: boo
         facts["secret_input"] = json!(secret || facts["secret_input"] == true);
         facts["host_input"] = json!(host || facts["host_input"] == true);
         let protected = (facts["secret_input"] == true, facts["host_input"] == true);
+        if protected.0 || protected.1 { facts["host_observation"]["view"] = Value::Null; }
         // Bound the fixed 1800-second profile below its record budget. A new
         // protected-input boundary is never throttled behind an old safe frame.
         if f.last_protected == Some(protected)

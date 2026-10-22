@@ -43,7 +43,7 @@ MAX_COMMANDS = 524288
 MAX_FRAMES = 256
 MAX_COMMITS = 262144
 MAX_TEXT = 32768
-INPUT_BATCH_CHARS = 64
+INPUT_BATCH_CHARS = 32
 MAX_PROGRESS = 8192
 SESSION_NS = 1_800_000_000_000
 APP_ID = 'org.wholepact.CoordinatorFinancialQualification'
@@ -509,20 +509,29 @@ class Controller:
         if self._sequence + count > MAX_COMMANDS:
             self._reject('limit')
 
-    def type_ascii(self, public_value):
-        """Only existing paths and inert/public request values, never secrets."""
+    def _preflight_ascii_batches(self, value, *, extra_commands=0):
+        # Validate the WHOLE value before any key, including a later bad character.
+        # egui-winit 0.36.2 emits Key + Text + ModifiersChanged: shifted ASCII
+        # can cost seven raw events. 32 characters bound a batch to 224, leaving
+        # headroom below the unchanged native 256-event limit for pointer events.
         try:
-            events = _ascii_events(public_value)
+            _ascii_events(value)
         except Rejected:
             self._reject('input')
-        batches = (len(public_value) + INPUT_BATCH_CHARS - 1) // INPUT_BATCH_CHARS
-        self._budget(len(events) + batches)
-        if self._progress + batches > MAX_PROGRESS:
+        batches = tuple(_ascii_events(value[start:start + INPUT_BATCH_CHARS])
+                        for start in range(0, len(value), INPUT_BATCH_CHARS))
+        self._budget(sum(map(len, batches)) + len(batches) + extra_commands)
+        if self._progress + len(batches) > MAX_PROGRESS:
             self._reject('limit')
-        # Whole-value preflight above precedes all input. Never split a held
-        # modifier/key across batches. Each batch is at most 256 native events.
-        for start in range(0, len(public_value), INPUT_BATCH_CHARS):
-            for key, pressed in _ascii_events(public_value[start:start + INPUT_BATCH_CHARS]):
+        return batches
+
+    def type_ascii(self, public_value):
+        """Only existing paths and inert/public request values, never secrets."""
+        batches = self._preflight_ascii_batches(public_value)
+        # Each batch ends with all keys/modifiers released. Real painted progress
+        # separates batches; input ACK alone does not prove raw-event consumption.
+        for events in batches:
+            for key, pressed in events:
                 self._command(KEY, key, pressed)
             self.wait_render_progress()
         return self._receipt

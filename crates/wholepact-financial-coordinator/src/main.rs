@@ -32,6 +32,8 @@ mod financial_completed_pair_ui;
 mod host_line_input;
 #[cfg(all(target_os = "linux", feature = "coordinated-financial-source-ui"))]
 mod host_output_text;
+#[cfg(all(target_os = "linux", feature = "coordinated-financial-source-ui"))]
+mod host_output_view;
 #[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
 mod native_ui;
 #[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]

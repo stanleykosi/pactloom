@@ -47,14 +47,14 @@ class ContractTests(unittest.TestCase):
     def test_snapshot_has_no_arbitrary_text(self):
         snap={'phase':'Selecting','subphase':'None','owner':None,'view_generation':1,
               'focused':True,'secret_input':False,'host_input':False,'pixels_per_point':1,
-              'viewport':[1280,800],'widgets':[]}
+              'viewport':[1280,800],'widgets':[], 'host_observation':dict(revision=0,nonws_end=0,context_valid=True,entry='Idle',editor=None,view=None)}
         C.validate_snapshot(snap)
         snap['host_text']='must never enter records'
         with self.assertRaises(Exception):C.validate_snapshot(snap)
     def test_unknown_and_offscreen_widgets_rejected(self):
         base={'phase':'Selecting','subphase':'None','owner':None,'view_generation':1,
               'focused':True,'secret_input':False,'host_input':False,'pixels_per_point':1,
-              'viewport':[1280,800],'widgets':[]}
+              'viewport':[1280,800],'widgets':[], 'host_observation':dict(revision=0,nonws_end=0,context_valid=True,entry='Idle',editor=None,view=None)}
         for tag,rect in [('OverrideAuthority',[0,0,10,10]),('BeginHostLine',[0,0,1281,10])]:
             base['widgets']=[{'tag':tag,'owner':None,'enabled':True,'rect':rect}]
             with self.assertRaises(Exception):C.validate_snapshot(base)

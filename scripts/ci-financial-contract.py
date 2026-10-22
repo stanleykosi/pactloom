@@ -103,9 +103,32 @@ def loads(raw, limit=MAX_RECORD_BYTES):
     except (ValueError, UnicodeError, TypeError):
         raise Rejected('record_shape') from None
 
+def validate_host_observation(h, facts):
+    exact(h, ('revision','nonws_end','context_valid','entry','editor','view'), 'snapshot')
+    require(integer(h['revision'],0,262144) and integer(h['nonws_end'],0,1048576),'snapshot')
+    require(type(h['context_valid']) is bool and h['entry'] in ('Idle','Editing','Writing','Closed'),'snapshot')
+    editor=h['editor']
+    if h['entry']=='Editing':
+        exact(editor,('ordinal','revision'),'snapshot')
+        require(integer(editor['ordinal'],1,128) and integer(editor['revision'],0,262144)
+                and editor['revision']==h['revision'] and facts['host_input'],'snapshot')
+    else: require(editor is None,'snapshot')
+    if h['entry']=='Writing': require(facts['host_input'],'snapshot')
+    view=h['view']
+    if view is not None:
+        exact(view,('rect','nonws','rows'),'snapshot')
+        require(h['context_valid'] and h['entry']=='Idle' and not facts['host_input'] and not facts['secret_input'],'snapshot')
+        require(integer(view['nonws'],1,8192) and view['nonws']<=h['nonws_end'] and integer(view['rows'],1,32),'snapshot')
+        outputs=[w for w in facts['widgets'] if w['tag']=='HostOutput' and w['owner'] is None]
+        require(len(outputs)==1 and outputs[0]['enabled'],'snapshot')
+        r=view['rect']; outer=outputs[0]['rect']
+        require(type(r) is list and len(r)==4 and all(type(x) in (int,float) and math.isfinite(x) for x in r),'snapshot')
+        require(outer[0]<=r[0]<r[2]<=outer[2] and outer[1]<=r[1]<r[3]<=outer[3],'snapshot')
+    return h
+
 def validate_snapshot(facts):
     exact(facts, ('phase','subphase','owner','view_generation','focused','secret_input','host_input',
-                  'pixels_per_point','viewport','widgets'))
+                  'pixels_per_point','viewport','widgets','host_observation'))
     require(facts['phase'] in PHASES and facts['subphase'] in SUBPHASES, 'snapshot')
     require(facts['owner'] in (None, 'Signer1', 'Signer2'), 'snapshot')
     require(integer(facts['view_generation'], 1), 'snapshot')
@@ -125,6 +148,7 @@ def validate_snapshot(facts):
                 all(type(x) in (int,float) and math.isfinite(x) for x in rect), 'snapshot')
         x0,y0,x1,y1 = rect
         require(0 <= x0 < x1 <= 1280/scale and 0 <= y0 < y1 <= 800/scale, 'snapshot')
+    validate_host_observation(facts['host_observation'],facts)
     return facts
 
 def validate_record(record, expected_profile=PROFILE):
@@ -204,3 +228,14 @@ def cached_progress_diagnostic(records,expected_profile):
         else:continue
         row[index]=min(2,row[index]+1)
     return validate_progress_diagnostic(value)
+
+# Failure-only harness observations, never native milestones or success evidence.
+HOST_DIAGNOSTIC_CATEGORIES=frozenset(('none','tail_not_visible','capture_guard','host_context','host_capture_changed','host_capture_count','host_capture_grammar','host_occurrence_replay','host_entry_changed','host_capture_limit'))
+HOST_DIAGNOSTIC_STAGES=frozenset(('Unobserved','Profile','Workspace','Storage','Financial','Enrollment','Commands','Operational','Approval'))
+def validate_host_diagnostic(value):
+    exact(value,('version','category','startup_stage','attempted_lines'))
+    require(type(value['version']) is int and value['version']==1)
+    require(type(value['category']) is str and value['category'] in HOST_DIAGNOSTIC_CATEGORIES)
+    require(type(value['startup_stage']) is str and value['startup_stage'] in HOST_DIAGNOSTIC_STAGES)
+    require(integer(value['attempted_lines'],0,128))
+    return value

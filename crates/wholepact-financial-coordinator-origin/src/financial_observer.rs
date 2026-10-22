@@ -48,13 +48,44 @@ const SIGNER_STEPS:&[&str]=&["AdmissionAudited", "AdmissionCommitted", "Continua
 pub(crate) fn signer(owner:crate::SignerContinueRoleV1,step:&'static str)->Result<()>{let actual=role()?;let label=match owner{crate::SignerContinueRoleV1::Signer1=>"Signer1",crate::SignerContinueRoleV1::Signer2=>"Signer2"};if !SIGNER_STEPS.contains(&step)||(actual!=Role::Coordinator&&name(actual)!=label){return Err(rejected("financial observer signer role"));}emit("SignerMilestone",json!({"owner":label,"step":step}))}
 fn exact(v:&Value,keys:&[&str])->bool{v.as_object().is_some_and(|m|m.len()==keys.len()&&keys.iter().all(|k|m.contains_key(*k)))}
 fn owner(v:&Value)->bool{v.is_null()||matches!(v.as_str(),Some("Signer1"|"Signer2"))}
+fn host_observation(f: &Value) -> Result<()> {
+ let h=&f["host_observation"];
+ let bounded=|v:&Value,lo:u64,hi:u64|v.as_u64().is_some_and(|n|n>=lo&&n<=hi);
+ if !exact(h,&["revision","nonws_end","context_valid","entry","editor","view"])
+  || !bounded(&h["revision"],0,262144) || !bounded(&h["nonws_end"],0,1048576)
+  || !h["context_valid"].is_boolean()
+  || !matches!(h["entry"].as_str(),Some("Idle"|"Editing"|"Writing"|"Closed")) {return Err(rejected("financial Host context"));}
+ let e=&h["editor"];
+ if h["entry"]=="Editing" {
+  if !exact(e,&["ordinal","revision"]) || !bounded(&e["ordinal"],1,128)
+   || !bounded(&e["revision"],0,262144) || e["revision"]!=h["revision"] || f["host_input"]!=true {return Err(rejected("financial Host editor"));}
+ } else if !e.is_null() {return Err(rejected("financial Host editor"));}
+ if h["entry"]=="Writing" && f["host_input"]!=true {return Err(rejected("financial Host protection"));}
+ let v=&h["view"];
+ if !v.is_null() {
+  if !exact(v,&["rect","nonws","rows"]) || h["context_valid"]!=true || h["entry"]!="Idle"
+   || f["host_input"]!=false || f["secret_input"]!=false
+   || !bounded(&v["nonws"],1,8192) || v["nonws"].as_u64()>h["nonws_end"].as_u64()
+   || !bounded(&v["rows"],1,32) {return Err(rejected("financial Host view"));}
+  let widgets=f["widgets"].as_array().ok_or_else(||rejected("financial Host widgets"))?;
+  let output=widgets.iter().find(|w|w["tag"]=="HostOutput"&&w["owner"].is_null()).ok_or_else(||rejected("financial Host widget"))?;
+  if output["enabled"]!=true {return Err(rejected("financial Host disabled"));}
+  let r=v["rect"].as_array().filter(|r|r.len()==4).ok_or_else(||rejected("financial Host rectangle"))?;
+  let a:Vec<f64>=r.iter().map(|n|n.as_f64().filter(|n|n.is_finite()).ok_or_else(||rejected("financial Host coordinate"))).collect::<Result<_>>()?;
+  let b=output["rect"].as_array().ok_or_else(||rejected("financial Host clip"))?;
+  let b:Vec<f64>=b.iter().map(|n|n.as_f64().ok_or_else(||rejected("financial Host clip"))).collect::<Result<_>>()?;
+  if b.len()!=4 || !(b[0]<=a[0]&&a[0]<a[2]&&a[2]<=b[2]&&b[1]<=a[1]&&a[1]<a[3]&&a[3]<=b[3]) {return Err(rejected("financial Host clipped"));}
+ }
+ Ok(())
+}
 /// Closed geometry/state only. No review text, paths, passwords or Host output.
 fn validate_snapshot(facts:&Value)->Result<()>{
- if !exact(&facts,&["phase","subphase","owner","view_generation","focused","secret_input","host_input","pixels_per_point","viewport","widgets"]){return Err(rejected("financial snapshot shape"));}
+ if !exact(&facts,&["phase","subphase","owner","view_generation","focused","secret_input","host_input","pixels_per_point","viewport","widgets","host_observation"]){return Err(rejected("financial snapshot shape"));}
  let f=&facts;let scale=f["pixels_per_point"].as_f64().filter(|s|s.is_finite()&&*s>=0.5&&*s<=4.0).ok_or_else(||rejected("financial snapshot scale"))?;
  if !f["phase"].as_str().is_some_and(|s|PHASES.contains(&s))||!f["subphase"].as_str().is_some_and(|s|SUBPHASES.contains(&s))||!owner(&f["owner"])||!f["view_generation"].as_u64().is_some_and(|g|g>0)||["focused","secret_input","host_input"].iter().any(|k|!f[*k].is_boolean())||f["viewport"]!=json!([1280,800]){return Err(rejected("financial snapshot state"));}
  let widgets=f["widgets"].as_array().filter(|w|w.len()<=128).ok_or_else(||rejected("financial snapshot widgets"))?;let mut seen=std::collections::HashSet::new();
  for w in widgets{if !exact(w,&["tag","owner","rect","enabled"])||!w["tag"].as_str().is_some_and(|s|WIDGETS.contains(&s))||!owner(&w["owner"])||!w["enabled"].is_boolean()||!seen.insert((w["tag"].to_string(),w["owner"].to_string())){return Err(rejected("financial snapshot widget"));}let r=w["rect"].as_array().filter(|r|r.len()==4).ok_or_else(||rejected("financial snapshot rect"))?;let a:Vec<f64>=r.iter().map(|v|v.as_f64().filter(|n|n.is_finite()).ok_or_else(||rejected("financial snapshot coordinate"))).collect::<Result<_>>()?;if !(0.0<=a[0]&&a[0]<a[2]&&a[2]<=1280.0/scale&&0.0<=a[1]&&a[1]<a[3]&&a[3]<=800.0/scale){return Err(rejected("financial snapshot bounds"));}}
+ host_observation(f)?;
  Ok(())
 }
 pub fn financial_ci_snapshot(facts:Value)->Result<()>{if role()?!=Role::Coordinator{return Err(rejected("financial snapshot actor"));}validate_snapshot(&facts)?;emit("UiSnapshot",facts)}
@@ -76,9 +107,21 @@ pub(crate) fn source_packet(packet:&crate::financial_workflow_channel::Packet)->
 
 #[cfg(test)]mod tests{
  use super::*;
- fn snapshot()->Value{json!({"phase":"Selecting","subphase":"None","owner":null,"view_generation":1,"focused":true,"secret_input":false,"host_input":false,"pixels_per_point":1.0,"viewport":[1280,800],"widgets":[{"tag":"Close","owner":null,"rect":[1.0,1.0,40.0,20.0],"enabled":true}]})}
+ fn snapshot()->Value{json!({"phase":"Selecting","subphase":"None","owner":null,"view_generation":1,"focused":true,"secret_input":false,"host_input":false,"pixels_per_point":1.0,"viewport":[1280,800],"host_observation":{"revision":0,"nonws_end":0,"context_valid":true,"entry":"Idle","editor":null,"view":null},"widgets":[{"tag":"Close","owner":null,"rect":[1.0,1.0,40.0,20.0],"enabled":true}]})}
  #[test]fn closed_snapshot_never_accepts_text_or_unknown_fields(){let v=snapshot();validate_snapshot(&v).unwrap();let mut v=snapshot();v["password"]=json!("not permitted");assert!(validate_snapshot(&v).is_err());let mut v=snapshot();v["widgets"][0]["tag"]=json!("arbitrary private label");assert!(validate_snapshot(&v).is_err());}
  #[test]fn snapshot_rejects_duplicate_widgets_outside_geometry_and_new_phase(){let mut v=snapshot();let w=v["widgets"][0].clone();v["widgets"].as_array_mut().unwrap().push(w);assert!(validate_snapshot(&v).is_err());let mut v=snapshot();v["widgets"][0]["rect"]=json!([0,0,1400,800]);assert!(validate_snapshot(&v).is_err());let mut v=snapshot();v["phase"]=json!("ApproveEverything");assert!(validate_snapshot(&v).is_err());}
+ #[test] fn host_view_roundtrip_and_fixed_bounds() {
+  let mut v=snapshot();v["widgets"]=json!([{"tag":"HostOutput","owner":null,"rect":[0,0,640,240],"enabled":true}]);
+  v["host_observation"]=json!({"revision":1,"nonws_end":100,"context_valid":true,"entry":"Idle","editor":null,"view":{"rect":[10,10,600,230],"nonws":100,"rows":4}});
+  let bytes=serde_json::to_vec(&v).unwrap();let roundtrip:Value=serde_json::from_slice(&bytes).unwrap();validate_snapshot(&roundtrip).unwrap();
+  for (key,value) in [("revision",json!(262145)),("nonws_end",json!(1048577)),("raw_text",json!("forbidden"))] {
+   let mut bad=v.clone();bad["host_observation"][key]=value;assert!(validate_snapshot(&bad).is_err());
+  }
+  let mut bad=v.clone();bad["host_input"]=json!(true);assert!(validate_snapshot(&bad).is_err());
+  let mut bad=v.clone();bad["host_observation"]["view"]["rows"]=json!(33);assert!(validate_snapshot(&bad).is_err());
+  let mut bad=v;bad["host_observation"]["view"]["rect"]=json!([-1,0,600,230]);assert!(validate_snapshot(&bad).is_err());
+ }
+
 }
 
 pub(crate) fn inert_stopped()->Result<()>{if !matches!(role()?,Role::Owner1BootstrapHistory|Role::Owner1V3DeliveryAdmission|Role::Owner1DeliveryAuditHistory|Role::Owner2BootstrapHistory|Role::Owner2V3DeliveryAdmission|Role::Owner2DeliveryAuditHistory){return Err(rejected("financial observer inert role"));}emit("InertStopped",json!({}))}

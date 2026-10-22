@@ -28,8 +28,9 @@ class FinancialImageTests(unittest.TestCase):
         self.assertIn("(ROOT / 'base-passwd').chmod(0o444)",text)
     def test_exact_runtime_inputs(self):
         names=M.runtime_files()
-        self.assertEqual(len(names),10);self.assertNotIn(M.MODULE_BINARY,names)
+        self.assertEqual(len(names),11);self.assertNotIn(M.MODULE_BINARY,names)
         self.assertIn('ci-financial-external-operator.py',names)
+        self.assertIn('ci-financial-host-context.py',names)
     def test_metadata_has_exact_addon_and_no_base_change(self):
         ocr,base=M.O.validate_manifest((ROOT/'ci-financial-ocr-packages.json').read_bytes(),(ROOT/'ci-ui-packages.json').read_bytes())
         names=(*M.runtime_files(),M.MODULE_SOURCE,*M.ARTIFACT_FILES)

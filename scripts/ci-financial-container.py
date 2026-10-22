@@ -62,7 +62,7 @@ def emit_fixture_diagnostic(value):
     print(DIAGNOSTIC.decode('ascii')+json.dumps(value,separators=(',',':')),flush=True)
 
 OCR_SHA='74b76a5b994adcc18be362bf64ed5118082b2401d5d9a35242e92fc4c62e2b4b'
-RUNTIME_FILES=('ci-financial-container.py','ci-financial-flow.py','ci-financial-scenario.py',
+RUNTIME_FILES=('ci-financial-container.py','ci-financial-flow.py','ci-financial-scenario.py','ci-financial-host-context.py',
  'ci-financial-contract.py','ci-financial-fixture.py','ci-financial-controller.py',
  'ci-financial-observer.py','ci-financial-output.py','ci-financial-external-output.py',
  'ci-financial-external-operator.py','ci-financial-weston-module.so')
@@ -215,8 +215,7 @@ class NativeSession:
     def run(self):
         ocr=S.PinnedLocalOcr('/usr/bin/tesseract',OCR_SHA)
         self.flow=FLOW.FullFlow(self.controller,self.fixture,self.observer,ocr,self.operator)
-        # PRIVATE DIAGNOSTIC ONLY: cannot establish full-flow success.
-        self.flow.initial_selection_probe()
+        self.flow.run()
         status=self.product.wait(timeout=max(.001,(self.deadline-time.monotonic_ns())/1e9))
         return self.observer.read(final=True),self.product.pid,status
     def finish_display(self):
@@ -249,6 +248,16 @@ def emit_cached_progress_failure(flow):
     print('CI_FINANCIAL_PROGRESS_DIAGNOSTIC '+encoded,flush=True)
 
 
+def emit_cached_host_failure(flow):
+    if flow is None:return
+    try:
+        value=dict(version=1,category=flow.host_rejection or 'none',
+                   startup_stage=flow.host_stage,attempted_lines=flow.host_lines)
+        encoded=json.dumps(C.validate_host_diagnostic(value),separators=(',',':'))
+    except Exception:return
+    print('CI_FINANCIAL_HOST_DIAGNOSTIC '+encoded,flush=True)
+
+
 def main():
     if sys.argv[1:]==['fixture-child']:fixture_child();return
     C.require(not sys.argv[1:],'contract')
@@ -279,6 +288,7 @@ def main():
         if flow is not None and flow.location is not None:
             print('CI_FINANCIAL_LOCATION '+json.dumps(flow.location,separators=(',',':')),flush=True)
         emit_cached_progress_failure(flow)
+        emit_cached_host_failure(flow)
         # No raw exception/path/Host output escapes. Outer owner destroys whole
         # isolated namespace on failure; never report rescue cleanup as normal.
         print('CI_FINANCIAL_RESULT '+json.dumps(OUT.failure(code),separators=(',',':')),flush=True)

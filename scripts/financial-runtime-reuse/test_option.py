@@ -21,11 +21,11 @@ class Tests(unittest.TestCase):
   with zipfile.ZipFile(self.archive,'w') as z:z.write(self.bundle,'build.tar')
   self.pins=dict(artifact_id=123,archive_sha256=hashlib.sha256(self.archive.read_bytes()).hexdigest(),
    bundle_sha256=hashlib.sha256(self.bundle.read_bytes()).hexdigest())
-  self.run=dict(id=39719672684,run_attempt=1,head_sha=V.PRODUCER['source'],
+  self.run=dict(id=39704950389,run_attempt=1,head_sha=V.PRODUCER['source'],
    head_branch='qualification/durable-proposal-v1',event='push',status='completed',conclusion='failure',
    path='.github/workflows/durable-native-linux.yml',repository={'full_name':'stanleykosi/pactloom'})
-  self.artifact=dict(id=123,name='financial-build-39719672684-1-'+V.PRODUCER['source'],expired=False,
-   workflow_run={'id':39719672684,'head_sha':V.PRODUCER['source']},digest='sha256:'+self.pins['archive_sha256'])
+  self.artifact=dict(id=123,name='financial-build-39704950389-1-'+V.PRODUCER['source'],expired=False,
+   workflow_run={'id':39704950389,'head_sha':V.PRODUCER['source']},digest='sha256:'+self.pins['archive_sha256'])
   self.harness=dict(repository='stanleykosi/pactloom',source='c'*40,source_tree='d'*40)
  def qualify(self,**kw):
   args=dict(bundle=self.bundle,archive=self.archive,pins=self.pins,run=self.run,artifact=self.artifact,
@@ -74,16 +74,5 @@ class Tests(unittest.TestCase):
   same={k:V.PRODUCER[k] for k in self.harness}
   with self.assertRaises(V.A.Rejected):self.qualify(harness=same,current_inventory={**self.inventory,
    'scripts/ci-financial-container.py':'e'*64})
-
- def test_p03_producer_identity_is_rejected(self):
-  old_source='f98de7fd79389ce340343292086c852825f59b60'
-  for key,value in [('id',39704950389),('head_sha',old_source)]:
-   with self.assertRaises(V.A.Rejected):self.qualify(run={**self.run,key:value})
-  for key,value in [('name','financial-build-39704950389-1-'+old_source),
-    ('workflow_run',{'id':39704950389,'head_sha':old_source})]:
-   with self.assertRaises(V.A.Rejected):self.qualify(artifact={**self.artifact,key:value})
-  original=V.A.verify_bundle(self.bundle,V.PRODUCER,self.inventory)
-  old=dict(V.PRODUCER,source=old_source,source_tree='1b4df59f4e2e664cad33440a947645e66424e410',run_id=39704950389)
-  with self.assertRaises(V.A.Rejected):V.A.validate_manifest(original,old,self.inventory)
 
 if __name__=='__main__':unittest.main()

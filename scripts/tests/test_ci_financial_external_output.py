@@ -19,7 +19,8 @@ def external_case():
         if record['kind']=='SignerMilestone' and record['facts']['step']=='FinancialEntryOpened':
             snapshot=copy.deepcopy(record);snapshot['kind']='UiSnapshot'
             snapshot['facts']=dict(phase='Selecting',subphase='None',owner=None,view_generation=len(records)+1,
-                focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=[])
+                focused=True,secret_input=False,host_input=False,pixels_per_point=1,
+                host_observation=dict(revision=0,nonws_end=0,context_valid=True,entry='Idle',editor=None,view=None),viewport=[1280,800],widgets=[])
             records.append(snapshot)
         records.append(record)
     sequence={role:0 for role in C.ROLES}

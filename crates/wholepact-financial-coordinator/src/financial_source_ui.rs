@@ -654,7 +654,7 @@ pub(super) fn run(
         focus_seen: false, focused_last: false, close_when_done: false,
         read_to_end: false, acknowledged: false, phase_frame: 0, last_tail_frame: None,
         intent: None, first_failure: None, disposed: [false; 2],
-        host_input: None, host_entry: HostEntry::Idle, host_ordinal: 0,
+        host_input: None, host_entry: HostEntry::Idle, host_ordinal: 0, host_edit_revision: None,
         host_output: HostOutputText::new(), host_incomplete: false, host_output_ended: false,
         message: "Select and review one original V3 source at a time. Initial Entry unlocks only its actual account/journal; all later V3 and financial actions require separate genuine approvals." };
     let viewport = egui::ViewportBuilder::default()
@@ -959,6 +959,7 @@ struct Window {
     // canceled or automatically dropped. Leaf Drop is only best-effort cleanup.
     host_input: Option<HostLineInput>,
     host_entry: HostEntry,
+    host_edit_revision: Option<u64>,
     host_ordinal: u64,
     host_output: HostOutputText,
     host_incomplete: bool,
@@ -3967,6 +3968,27 @@ impl Window {
             }
         }
     }
+    fn check_host_edit_context(&mut self) {
+        if matches!(self.host_entry, HostEntry::Editing(_))
+            && (self.host_edit_revision != Some(self.host_output.revision())
+                || !self.host_output.decode_complete()
+                || self.host_output.state() != OutputState::Open) {
+            self.revoke("Host output changed during protected entry. The one-use line is discarded, never retried.");
+        }
+    }
+    #[cfg(wholepact_financial_ci)]
+    fn observe_host_context(&self, view: Option<crate::host_output_view::HostOutputView>) {
+        let (entry, editor) = match self.host_entry {
+            HostEntry::Idle => ("Idle", None),
+            HostEntry::Editing(ordinal) => ("Editing", self.host_edit_revision.map(|r| (ordinal, r))),
+            HostEntry::Writing(_) => ("Writing", None),
+            HostEntry::Closed => ("Closed", None),
+        };
+        crate::financial_ci::host_observation(self.host_output.revision(),
+            self.host_output.non_whitespace_end(),
+            self.host_output.decode_complete() && self.host_output.state() == OutputState::Open,
+            entry, editor, view);
+    }
     fn draw_host(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         ui.heading("Actual Host terminal · observation only");
@@ -3977,11 +3999,31 @@ impl Window {
         let _ci_output = egui::ScrollArea::vertical()
             .id_salt("original-host-output")
             .max_height(240.0)
+            .stick_to_bottom(true)
             .show(ui, |ui| {
-                ui.monospace(self.host_output.text());
+                // One actual layout and one paint: metadata never re-lays out text.
+                let (origin, galley, _) = egui::Label::new(egui::RichText::new(self.host_output.text()).monospace())
+                    .selectable(false).layout_in_ui(ui);
+                // Match epaint's physical-pixel origin snapping explicitly for
+                // BOTH the paint and the content-free observation geometry.
+                let origin = crate::host_output_view::paint_origin(origin, ui.ctx().pixels_per_point());
+                ui.painter().galley(origin, galley.clone(), ui.visuals().text_color());
+                (origin, galley, ui.clip_rect())
             });
         #[cfg(wholepact_financial_ci)]
-        crate::financial_ci::rect(ui, _ci_output.inner_rect, ui.is_enabled(), "HostOutput", None);
+        {
+            crate::financial_ci::rect(ui, _ci_output.inner_rect, ui.is_enabled(), "HostOutput", None);
+            let scale = ui.ctx().pixels_per_point();
+            let viewport = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1280.0/scale, 800.0/scale));
+            let (origin, galley, child_clip) = &_ci_output.inner;
+            let clip = _ci_output.inner_rect.intersect(*child_clip).intersect(ui.clip_rect()).intersect(viewport);
+            let view = if self.host_entry == HostEntry::Idle && self.password.is_none()
+                && self.host_output.decode_complete() && self.host_output.state() == OutputState::Open
+                && ui.is_visible() && ui.is_enabled() && !ui.is_sizing_pass() {
+                crate::host_output_view::visible_tail(galley, *origin, clip, scale, self.host_output.non_whitespace_end())
+            } else { None };
+            self.observe_host_context(view);
+        }
         match self.host_entry {
             HostEntry::Idle if host_phase_allows_input(self.phase) => {
                 ui.label("Enter only your own next Host line. Every line is protected, including empty/short replies; there is no prompt inference, history, automatic answer or local echo.");
@@ -4720,6 +4762,7 @@ impl Window {
         self.interrupt(facts, &ctx);
         self.check_current();
         self.poll_driver(&ctx);
+        self.check_host_edit_context();
         let frame = ctx.cumulative_frame_nr();
         let visible = ui.is_enabled() && ui.is_visible() && !ui.is_sizing_pass();
         #[cfg(wholepact_financial_ci)]
@@ -4727,6 +4770,8 @@ impl Window {
             if self.phase == Phase::WriterFlow { ci_writer_stage(self.writer_flow.stage) }
             else if self.phase == Phase::CompletedPairFlow { ci_pair_stage(self.pair_flow.stage()) } else { "None" },
             ci_role(self.active), self.focused_last, self.password.is_some(), host_entry_blocks_source(self.host_entry));
+        #[cfg(wholepact_financial_ci)]
+        self.observe_host_context(None);
         let painted_phase = self.phase;
         // Consent progress is speculative until the final eligible tail. A
         // discarded/sizing/hidden/repeated pass cannot prime a later approval.
@@ -5391,6 +5436,7 @@ impl Window {
         // This is the ONLY SourceEntry/Read/Continue native Arm/A site. Every original raw
         // event and every Cancel widget has been processed before this tail.
         self.check_current();
+        self.check_host_edit_context();
         let host_line = match (&mut self.host_input, self.host_entry) {
             (Some(input), HostEntry::Editing(ordinal)) => {
                 input.finish_frame(ordinal, &mut || self.native.revoke())
@@ -5508,6 +5554,7 @@ impl Window {
             };
             if let Some(line) = submitted.into_line_for(ordinal, &mut || self.native.revoke()) {
                 self.host_entry = HostEntry::Writing(ordinal);
+                self.host_edit_revision = None;
                 let queued = self.driver.borrow_mut().send_host_line(ordinal, line);
                 if let Err(unsent) = queued {
                     self.revoke("The one-use Host line could not be queued. Do not resubmit; accepted input or effects may be unconfirmed.");
@@ -6498,7 +6545,11 @@ impl Window {
                     HostLineInput::new(ctx, ordinal, self.session_deadline)
                         .ok_or_else(|| rejected("protected Host line unavailable"))?,
                 );
+                if !self.host_output.decode_complete() || self.host_output.state() != OutputState::Open {
+                    return Err(rejected("Host output context unavailable"));
+                }
                 self.host_ordinal = ordinal;
+                self.host_edit_revision = Some(self.host_output.revision());
                 self.host_entry = HostEntry::Editing(ordinal);
             }
             Intent::SaveContinuationSelector(role) | Intent::SaveResultSelector(role)
@@ -6938,6 +6989,7 @@ impl eframe::App for Window {
         self.interrupt(raw_facts(raw), ctx);
         self.check_current();
         self.poll_driver(ctx);
+        self.check_host_edit_context();
         if self.host_input.is_some() && self.password.is_some() {
             self.revoke("Protected Host and Signer input cannot share an event batch.");
         }

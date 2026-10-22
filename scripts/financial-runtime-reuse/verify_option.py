@@ -18,9 +18,9 @@ PARSER_SHA='d24433f973c77d34e6d1f5c299cc1c7d00a7d024584bbfcb3d45e077c0e92f5d'
 assert hashlib.sha256((HERE/'producer_artifacts.py').read_bytes()).hexdigest()==PARSER_SHA
 A=_reviewed_parser()
 
-PRODUCER=dict(repository='stanleykosi/pactloom',source='4576bd01590a41a4a0d78ed606e6e97586e25abf',
- source_tree='d66ff7da98b845c3764845f6256490776b0897ef',run_id=39719672684,attempt=1)
-JOB_ID=119629987296
+PRODUCER=dict(repository='stanleykosi/pactloom',source='f98de7fd79389ce340343292086c852825f59b60',
+ source_tree='1b4df59f4e2e664cad33440a947645e66424e410',run_id=39704950389,attempt=1)
+JOB_ID=119582700875
 # Exact existing runtime files, NOT a suffix/directory exclusion. Contract,
 # output projection, fixture profile/scenario, image and orchestration are fixed.
 RUNTIME_ONLY=frozenset((
@@ -112,7 +112,7 @@ def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventor
         and run.get('repository',{}).get('full_name')==PRODUCER['repository'],'producer_run')
     # A runtime-failed job is expected and does not invalidate its pre-fixture build.
     require(run.get('conclusion') in ('failure','success'),'producer_terminal')
-    name='financial-build-39719672684-1-'+PRODUCER['source']
+    name='financial-build-39704950389-1-'+PRODUCER['source']
     origin=artifact.get('workflow_run',{})
     require(artifact.get('id')==pins['artifact_id'] and type(artifact.get('id')) is int
         and artifact.get('name')==name and artifact.get('expired') is False

@@ -41,7 +41,7 @@ class NativeScenario:
         for s in (first,second):
             C.require(s['phase']==phase and s['owner']==owner and s['focused'],'input_phase')
             C.require(protected or not(s['secret_input'] or s['host_input']),'sensitive_capture')
-        shape=lambda s:{k:v for k,v in s.items() if k!='view_generation'}
+        shape=lambda s:{k:v for k,v in s.items() if k not in ('view_generation','host_observation')}
         C.require(shape(first)==shape(second),'snapshot');return second
     @staticmethod
     def widget(snapshot,tag,owner):
@@ -90,38 +90,61 @@ class NativeScenario:
             self.controller.scroll_down(*self.point(s,body,owner))
             self.controller.wait_render_progress()
         raise C.Rejected('input_disabled')
-    def protected_input(self,phase,owner,tag,secret):
+    def protected_input(self,phase,owner,tag,secret,host_context=None):
         """Closed disposable fixture passwords only, never capture during input."""
         C.require(type(secret) is F.SyntheticSecret and tag in ('HostEditor','SourcePassword'),'fixture_secret')
         s=self.stable(phase,owner,protected=True)
         C.require(s['host_input'] if tag=='HostEditor' else s['secret_input'],'input_phase')
+        if tag=='HostEditor':self.check_host_editor(s,host_context)
         point=self.point(s,tag,None if tag=='HostEditor' else owner);self._protected=True
         try:
-            self.controller.click(*point)
             def native(value):
                 # Convert only fixed synthetic bytes, preflight then emit evdev.
                 # Do not call public type_ascii or include values in exceptions.
-                text=bytes(value).decode('ascii');events=K._ascii_events(text)
-                self.controller._budget(len(events)+1)
-                for key,pressed in events:self.controller._command(K.KEY,key,pressed)
-                self.controller.wait_render_progress()
+                text=bytes(value).decode('ascii')
+                batches=self.controller._preflight_ascii_batches(text,extra_commands=3)
+                self.controller.click(*point)
+                for events in batches:
+                    for key,pressed in events:self.controller._command(K.KEY,key,pressed)
+                    self.controller.wait_render_progress()
             secret.consume(native)
         finally:secret.wipe()
         # Remains protected until actual submit and later observer says both
         # protected editors are absent. Never clear merely on successful typing.
-    def public_host_line(self,phase,owner,value):
+    def public_host_line(self,phase,owner,value,host_context=None):
         C.require(type(value) is str and '\n' not in value and '\r' not in value,'input_phase')
         K._ascii_events(value)
         s=self.stable(phase,owner,protected=True);C.require(s['host_input'],'input_phase')
+        self.check_host_editor(s,host_context)
         self._protected=True;self.controller.click(*self.point(s,'HostEditor',None))
         self.controller.type_ascii(value)
+    @staticmethod
+    def check_host_editor(s,occurrence):
+        h=s['host_observation'];e=h['editor']
+        C.require(occurrence is not None and h['context_valid'] and h['entry']=='Editing'
+                  and e is not None and e['revision']==h['revision']==occurrence[2]
+                  and h['nonws_end']==occurrence[1] and h['view'] is None,'input_phase')
+    def host_stable(self,phase,owner):
+        # Generic source actions keep legacy semantics; Host capture requires its
+        # own stronger exact output/layout equality across genuine later frames.
+        first=self.stable(phase,owner);self.controller.wait_render_progress();second=self.snapshot()
+        shape=lambda s:{k:v for k,v in s.items() if k!='view_generation'}
+        C.require(shape(first)==shape(second),'snapshot')
+        h=second['host_observation']
+        C.require(h['context_valid'] and h['entry']=='Idle' and h['view'] is not None,'snapshot')
+        return second
     def capture_host(self,phase,owner,ocr):
-        s=self.stable(phase,owner)
+        s=self.host_stable(phase,owner)
         C.require(not s['secret_input'] and not s['host_input'],'sensitive_capture')
         self._protected=False
-        rect=self.widget(s,'HostOutput',None)['rect'];scale=s['pixels_per_point']
-        physical=tuple(int(v*scale) for v in rect)
-        with self.controller.observe() as frame:return ocr.read(frame,physical,self.fixture.deadline_ns)
+        rect=s['host_observation']['view']['rect'];scale=s['pixels_per_point']
+        physical=tuple(round(v*scale) for v in rect)
+        with self.controller.observe() as frame:
+            text=ocr.read(frame,physical,self.fixture.deadline_ns)
+        after=self.host_stable(phase,owner)
+        C.require({k:v for k,v in s.items() if k!='view_generation'}==
+                  {k:v for k,v in after.items() if k!='view_generation'},'snapshot')
+        return text,after['host_observation']
 
 def bounded_ocr_process(argv,ppm,deadline_ns):
     """Bound both directions in memory; kill/reap only our own OCR on failure."""
