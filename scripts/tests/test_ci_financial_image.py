@@ -40,7 +40,7 @@ class FinancialImageTests(unittest.TestCase):
         self.assertEqual(meta['base'],M.B.expected_packages(base,'base'))
         package_names={r['name'] for mode in meta['packages'].values() for r in mode}
         self.assertEqual(len(package_names),274)
-        self.assertEqual(meta['profile'],'coordinated-financial-external-pre-v3-witness-v1')
+        self.assertEqual(meta['profile'],M.profile())
     def test_missing_input_or_fake_source_rejected(self):
         ocr,base=M.O.validate_manifest((ROOT/'ci-financial-ocr-packages.json').read_bytes(),(ROOT/'ci-ui-packages.json').read_bytes())
         with self.assertRaises(Exception):M.metadata(base,ocr,{},'1'*40)

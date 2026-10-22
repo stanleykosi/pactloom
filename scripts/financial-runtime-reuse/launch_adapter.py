@@ -1,9 +1,8 @@
 """PRIVATE review candidate, no network or activation at import.
 
-Only P16 native producer is accepted. H contains reviewed runtime edits plus,
-for plan v2 only, the exact diagnostic-only contract annex. L is an independent
-exact CI event checkout. Missing artifact/H pins reject. No compiler invocation,
-context override, monkey-patch, native authority or success-gate change.
+Only retry03 native producer is accepted. H contains runtime-only edits; L is
+an independent exact CI event checkout. Missing future artifact/H pins reject.
+No compiler invocation, context override, monkey-patch or runtime policy change.
 """
 import hashlib
 import types
@@ -139,12 +138,9 @@ def load_json(path):
 
 
 def validate_plan(plan):
-    V.require(type(plan) is dict,'plan_schema')
-    V.require(type(plan.get('version')) is int and plan['version'] in (1,2),'plan_version')
-    keys={'version','producer','harness','artifact_pins','api_pins','reviewed_runtime_changes'}
-    if plan['version']==2:keys.add('diagnostic_compatibility')
-    V.require(set(plan)==keys,'plan_schema')
-    if plan['version']==2:V.validate_diagnostic_compatibility(plan['diagnostic_compatibility'])
+    V.require(type(plan) is dict and set(plan)=={'version','producer','harness','artifact_pins',
+        'api_pins','reviewed_runtime_changes'},'plan_schema')
+    V.require(type(plan['version']) is int and plan['version']==1,'plan_version')
     V.require(plan['producer']==V.PRODUCER,'producer_pin')
     h=plan['harness']
     V.require(type(h) is dict and set(h)=={'repository','source','source_tree'}
@@ -194,8 +190,8 @@ def verify_sources(plan,producer_root,harness_root,launcher_root):
     l_sha=os.environ.get('GITHUB_SHA','');l_tree,l_inv=V.inventory_checkout(roots[2],l_sha)
     V.require(HERE.is_relative_to(roots[2]),'launcher_location')
     V.require(p_tree==V.PRODUCER['source_tree'] and h_tree==plan['harness']['source_tree'],'tree_identity')
-    changes=V.equivalent(p_inv,h_inv,plan.get('diagnostic_compatibility'))
-    V.require({k:h_inv[k] for k in changes if k in V.RUNTIME_ONLY}==plan['reviewed_runtime_changes'],'unreviewed_runtime_delta')
+    changes=V.equivalent(p_inv,h_inv)
+    V.require({k:h_inv[k] for k in changes}==plan['reviewed_runtime_changes'],'unreviewed_runtime_delta')
     return p_inv,h_inv,dict(repository=V.PRODUCER['repository'],source=l_sha,source_tree=l_tree)
 
 
@@ -224,7 +220,7 @@ def acquire_verified_inputs(root,staging,plan,p_inv,h_inv):
     with zipfile.ZipFile(archive) as z:
         with z.open('build.tar') as source,bundle.open('xb') as destination:shutil.copyfileobj(source,destination)
     bundle.chmod(0o400)
-    evidence=V.qualify(bundle,archive,plan['artifact_pins'],api['run'],api['artifact'],p_inv,h_inv,plan['harness'],plan.get('diagnostic_compatibility'))
+    evidence=V.qualify(bundle,archive,plan['artifact_pins'],api['run'],api['artifact'],p_inv,h_inv,plan['harness'])
     inputs=root/'artifacts';inputs.mkdir(mode=0o700)
     # The strict verifier has checked every header, name, mode and byte digest.
     # Stream the named entries to newly-created explicit paths; never extractall.
@@ -315,13 +311,8 @@ def main():
     if mode=='acquire':
         boot_require(len(sys.argv)==5,'arguments')
         _,_,plan_path,staging,launcher=sys.argv
-        try:
-            trusted,raw=bootstrap(launcher,plan_path);load_helpers(trusted)
-            acquisition=trusted.module('reviewed_acquisition',HERE/'acquire_archive.py',L=sys.modules[__name__])
-        except BaseException:
-            try:print('CI_FINANCIAL_REUSE_ACQUISITION_DIAGNOSTIC {"version":1,"stage":"bootstrap","category":"verification","api_pin":"none","http_status":0}',flush=True)
-            except BaseException:pass
-            raise
+        trusted,raw=bootstrap(launcher,plan_path);load_helpers(trusted)
+        acquisition=trusted.module('reviewed_acquisition',HERE/'acquire_archive.py',L=sys.modules[__name__])
         return acquisition.acquire_command(raw,staging)
     boot_require(mode=='run' and len(sys.argv)==7,'arguments')
     _,_,plan_path,producer,harness,staging,launcher=sys.argv

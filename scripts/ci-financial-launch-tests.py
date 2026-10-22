@@ -58,10 +58,14 @@ class LaunchTests(unittest.TestCase):
             self.assertEqual({n for n,_,_ in builds},set(S.FEATURES))
             for name,args,env in builds:
                 self.assertEqual(env.get('RUSTFLAGS'),
-                    '--cfg wholepact_financial_ci --cfg wholepact_financial_external_ci'
+                    S.A.recipe(S.I.profile())['observed_rustflags']
                     if name=='coordinator-observed' else None)
                 self.assertTrue(set(env)<=S.BUILD_ENV_KEYS)
             self.assertEqual(len([c for c in calls if '--list' in c[1]]),1)
+
+    def test_old_pixel_only_build_does_not_enable_semantic_cfg(self):
+        with patch.object(S.I,'profile',return_value=S.P.C.EXTERNAL_PROFILE):
+            self.test_only_observed_receives_financial_cfgs()
 
     def test_artifact_selector_rejects_wrong_features_and_duplicate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -138,7 +142,7 @@ class LaunchTests(unittest.TestCase):
             self.assertEqual(output.read_text(),'artifact_bundle_ready=true\n')
             expected={'Cargo.lock':S.hashlib.sha256(b'100644\0fabricated lock').hexdigest()}
             value=S.A.verify_bundle(bundle,dict(repository='stanleykosi/pactloom',source='a'*40,
-                    source_tree='b'*40,run_id=123,attempt=1),expected)
+                    source_tree='b'*40,run_id=123,attempt=1),expected,S.I.profile())
             self.assertEqual(set(value['files']),set(S.A.NAMES))
 
     def test_failed_bundle_never_marks_upload_ready(self):
@@ -160,7 +164,7 @@ class LaunchTests(unittest.TestCase):
 
     def test_all_financial_tests_are_mandatory_before_compile(self):
         launcher=(HERE/'ci-financial-linux.sh').read_text()
-        discovery="python3 -I -B -m unittest discover -s scripts/tests -p 'test_ci_financial*.py'"
+        discovery="python3 -I -B -m unittest discover -s scripts/tests -p 'test*financial*.py'"
         self.assertEqual(launcher.count(discovery),1)
         self.assertLess(launcher.index(discovery),launcher.index('exec python3'))
         self.assertIn('set -euo pipefail',launcher)
@@ -203,7 +207,7 @@ class LaunchTests(unittest.TestCase):
              contextlib.redirect_stdout(io.StringIO()):
             def command(args,stage,**kwargs):
                 kwargs['on_line'](self.candidate());return 0,b''
-            with patch.object(S,'command',side_effect=command):
+            with patch.object(S,'command',side_effect=command),patch.object(S.I,'profile',return_value=S.P.C.EXTERNAL_PROFILE):
                 result,passed=S.run_case('external','sha256:'+'a'*64,'run','a'*40)
             self.assertTrue(result['native_oracle_verified']);self.assertFalse(passed)
 
@@ -227,10 +231,10 @@ class LaunchTests(unittest.TestCase):
         workflow=(HERE.parent/'.github/workflows/durable-native-linux.yml').read_text()
         self.assertIn('"$mode" == financial-ui',workflow)
         self.assertIn("steps.mode.outputs.gate != 'financial-ui'",workflow)
-        self.assertIn("always() && steps.mode.outputs.gate == 'financial-ui'",workflow)
+        self.assertIn("always() && (steps.mode.outputs.gate == 'financial-ui' || steps.mode.outputs.gate == 'financial-semantic')",workflow)
         self.assertEqual(workflow.count('run: bash scripts/ci-financial-linux.sh'),1)
         self.assertEqual(workflow.count('run: bash scripts/ci-ui-linux.sh'),1)
-        self.assertIn("always() && steps.mode.outputs.gate == 'financial-ui' && steps.financial.outputs.artifact_bundle_ready == 'true'",workflow)
+        self.assertIn("always() && (steps.mode.outputs.gate == 'financial-ui' || steps.mode.outputs.gate == 'financial-semantic') && steps.financial.outputs.artifact_bundle_ready == 'true'",workflow)
         self.assertIn('wholepact-financial-build-${{ github.run_id }}-${{ github.run_attempt }}/build.tar',workflow)
 
 if __name__=='__main__':unittest.main()

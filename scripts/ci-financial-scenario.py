@@ -27,12 +27,23 @@ K=module('ci-financial-controller')
 
 class NativeScenario:
     """One actual fixture and target; no retries, rebinding or renewed clocks."""
-    def __init__(self,controller,fixture,next_snapshot):
+    def __init__(self,controller,fixture,next_snapshot,*,expected_profile=C.PROFILE,host_view=None,wait_ceiling=None):
+        C.require(expected_profile in (C.PROFILE,C.EXTERNAL_PROFILE,C.SEMANTIC_PROFILE))
+        C.require((host_view is not None)==(expected_profile==C.SEMANTIC_PROFILE))
+        C.require(wait_ceiling is None or (expected_profile==C.SEMANTIC_PROFILE and callable(wait_ceiling)))
+        self.expected_profile=expected_profile;self.host_view=host_view;self.wait_ceiling=wait_ceiling
         self.controller=controller;self.fixture=fixture;self.next_snapshot=next_snapshot
         self._used=set();self._protected=False;self._generation=0
         fixture.preflight_input_budget()
     def snapshot(self):
-        self.fixture.check();s=C.validate_snapshot(self.next_snapshot(self.fixture.deadline_ns))
+        self.fixture.check();deadline=self.fixture.deadline_ns
+        if self.wait_ceiling is not None:
+            bound=self.wait_ceiling()
+            C.require(bound is None or (type(bound) is int and bound>0),'deadline')
+            if bound is not None:deadline=min(deadline,bound)
+            C.require(time.monotonic_ns()<deadline,'deadline')
+        s=C.validate_snapshot(self.next_snapshot(deadline),self.expected_profile)
+        if self.wait_ceiling is not None:C.require(time.monotonic_ns()<deadline,'deadline')
         C.require(s['view_generation']>self._generation,'replay')
         self._generation=s['view_generation'];return s
     def stable(self,phase,owner,*,protected=False):
@@ -41,7 +52,7 @@ class NativeScenario:
         for s in (first,second):
             C.require(s['phase']==phase and s['owner']==owner and s['focused'],'input_phase')
             C.require(protected or not(s['secret_input'] or s['host_input']),'sensitive_capture')
-        shape=lambda s:{k:v for k,v in s.items() if k not in ('view_generation','host_observation')}
+        shape=lambda s:{k:v for k,v in s.items() if k not in ('view_generation','host_observation','host_view_id')}
         C.require(shape(first)==shape(second),'snapshot');return second
     @staticmethod
     def widget(snapshot,tag,owner):
@@ -137,10 +148,13 @@ class NativeScenario:
         s=self.host_stable(phase,owner)
         C.require(not s['secret_input'] and not s['host_input'],'sensitive_capture')
         self._protected=False
-        rect=s['host_observation']['view']['rect'];scale=s['pixels_per_point']
-        physical=tuple(round(v*scale) for v in rect)
-        with self.controller.observe() as frame:
-            text=ocr.read(frame,physical,self.fixture.deadline_ns)
+        if self.expected_profile==C.SEMANTIC_PROFILE:
+            text=self.host_view(s)
+        else:
+            rect=s['host_observation']['view']['rect'];scale=s['pixels_per_point']
+            physical=tuple(round(v*scale) for v in rect)
+            with self.controller.observe() as frame:
+                text=ocr.read(frame,physical,self.fixture.deadline_ns)
         after=self.host_stable(phase,owner)
         C.require({k:v for k,v in s.items() if k!='view_generation'}==
                   {k:v for k,v in after.items() if k!='view_generation'},'snapshot')

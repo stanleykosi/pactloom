@@ -74,8 +74,8 @@ class SyntheticSecret:
 class Fixture:
     __slots__=('_data','deadline_ns','original_deadline_ns','_wall_start','_last_wall','_fixture_root','_artifact_root_identity')
     def __init__(self,data,original_deadline_ns,now_ns,wall_ms,expected_profile=C.PROFILE):
-        C.require(expected_profile in (C.PROFILE,C.EXTERNAL_PROFILE))
-        live=expected_profile==C.EXTERNAL_PROFILE
+        C.require(expected_profile in (C.PROFILE,C.EXTERNAL_PROFILE,C.SEMANTIC_PROFILE))
+        live=expected_profile in (C.EXTERNAL_PROFILE,C.SEMANTIC_PROFILE)
         C.exact(data,_KEYS,'fixture')
         C.require(data['version']==1 and data['purpose']==('genuine-coordinated-financial-live-pre-v3-v1' if live else PURPOSE),'fixture')
         C.require(all(data[k] is False for k in ('prepared_v3','admitted_v3','signed','dispatch_requested','full_product_verified')),'fixture')

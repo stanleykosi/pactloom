@@ -246,6 +246,7 @@ class CachedProgressDiagnostics(unittest.TestCase):
                 for obj,name in ((M,'root_setup'),(M,'FixtureParent'),(M,'write_account'),(M.os,'setgroups'),
                     (M.os,'setresgid'),(M.os,'setresuid'),(M.K,'harden_process'),(M.F.Fixture,'load'),
                     (M.OUT,'validate_completed')):stack.enter_context(mock.patch.object(obj,name))
+                stack.enter_context(mock.patch.object(M,'root_setup',return_value=(b'',M.C.EXTERNAL_PROFILE)))
                 stack.enter_context(mock.patch.object(M,'NativeSession',return_value=session))
                 stack.enter_context(mock.patch.object(M,'secure_file',return_value=(b'{}',None)))
                 stack.enter_context(mock.patch.object(M.pathlib.Path,'iterdir',return_value=[pathlib.Path('1')]))

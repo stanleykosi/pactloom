@@ -36,11 +36,11 @@ jobs:
         run: |
           set -euo pipefail
           mode="$(cat scripts/qualification-gate-mode)"
-          [[ "$mode" == origin || "$mode" == full || "$mode" == financial || "$mode" == bootstrap || "$mode" == ui || "$mode" == financial-ui || "$mode" == financial-reuse ]]
+          [[ "$mode" == origin || "$mode" == full || "$mode" == financial || "$mode" == bootstrap || "$mode" == ui || "$mode" == financial-ui || "$mode" == financial-semantic || "$mode" == financial-reuse ]]
           [[ "$(wc -l < scripts/qualification-gate-mode)" -eq 1 ]]
           printf 'gate=%s\n' "$mode" >> "$GITHUB_OUTPUT"
       - name: Minimal real production origin integration (not full qualification)
-        if: steps.mode.outputs.gate != 'bootstrap' && steps.mode.outputs.gate != 'ui' && steps.mode.outputs.gate != 'financial-ui' && steps.mode.outputs.gate != 'financial-reuse'
+        if: steps.mode.outputs.gate != 'bootstrap' && steps.mode.outputs.gate != 'ui' && steps.mode.outputs.gate != 'financial-ui' && steps.mode.outputs.gate != 'financial-semantic' && steps.mode.outputs.gate != 'financial-reuse'
         shell: bash
         working-directory: source
         run: bash scripts/ci-origin-integration-linux.sh
@@ -121,13 +121,13 @@ jobs:
           echo 'Historical CI70 seven bootstrap reap/lifetime prerequisites were reused only after exact source/Cargo/script closure and original job checks. They were not rerun on this image. The new foundation and isolated actual UI gate passed. CI70 remains failed at image installation. The eight packet/credential fault results are historical individual CI69 evidence, not rerun or current-image qualification; CI69 remains failed. One unfunded synthetic fixture was reused for cancel, blur/refocus and at most one authenticated synthetic journal append. Historical CI64 financial evidence is unchanged, not revalidated. No public-chain settlement, deployment, funded wallet or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
       - name: Fresh isolated two-signer financial UI (external pre-V3 native Witness)
         id: financial
-        if: steps.mode.outputs.gate == 'financial-ui'
+        if: steps.mode.outputs.gate == 'financial-ui' || steps.mode.outputs.gate == 'financial-semantic'
         timeout-minutes: 200
         shell: bash
         working-directory: source
         run: bash scripts/ci-financial-linux.sh
       - name: Preserve exact credential-free compiled financial bundle
-        if: always() && steps.mode.outputs.gate == 'financial-ui' && steps.financial.outputs.artifact_bundle_ready == 'true'
+        if: always() && (steps.mode.outputs.gate == 'financial-ui' || steps.mode.outputs.gate == 'financial-semantic') && steps.financial.outputs.artifact_bundle_ready == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: financial-build-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
@@ -138,7 +138,7 @@ jobs:
           overwrite: false
           include-hidden-files: false
       - name: Verify financial containers, temporary images and build cache removed
-        if: always() && steps.mode.outputs.gate == 'financial-ui'
+        if: always() && (steps.mode.outputs.gate == 'financial-ui' || steps.mode.outputs.gate == 'financial-semantic')
         timeout-minutes: 5
         shell: bash
         working-directory: source
@@ -148,6 +148,11 @@ jobs:
         shell: bash
         run: |
           echo 'Fresh exact-source synthetic two-signer financial UI passed the external-pre-V3-native-Witness profile, including seven integrated financial Witness services, six retained-inert Witness roots and actual owned reaps. Early history, admission and audit used the actual external native Witness operator, not thirteen integrated service purposes. Both signing retirements, CompletedPair, separate Returns, normal close and container/image/cache cleanup were verified. No dispatch, public-chain settlement, deployment or full-product acceptance is claimed. Existing narrow CI evidence was not rerun or upgraded.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Distinct semantic-assisted financial evidence boundary
+        if: success() && steps.mode.outputs.gate == 'financial-semantic'
+        shell: bash
+        run: |
+          echo 'Fresh coordinated-financial-rendered-host-semantic-v1 synthetic two-signer qualification passed using read-only same-rendered-Host-text observation. All native authority, full proof, retirements, Returns, normal close and cleanup checks remain required. This is NOT pixel-only UI qualification; the original financial-ui gate remains separately callable and is not upgraded. No dispatch, public-chain settlement, deployment or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
       - name: Fetch exact independent producer P and reviewed harness H without credentials
         if: steps.mode.outputs.gate == 'financial-reuse'
         shell: bash
@@ -167,8 +172,8 @@ jobs:
             test "$(git -C "$destination" rev-parse HEAD)" = "$commit"
             test -z "$(git -C "$destination" status --porcelain --untracked-files=all)"
           }
-          fetch_exact P 6f00b00454ba062bea40d1f1e73efe0165ae8aa2
-          fetch_exact H 171b908042a083c00043ea673fe6ae36b7831465
+          fetch_exact P f98de7fd79389ce340343292086c852825f59b60
+          fetch_exact H ecda810b7167a54bdb3f6d587fb60956b56c6b6d
       - name: Run launcher negative and protocol tests without credentials
         if: steps.mode.outputs.gate == 'financial-reuse'
         timeout-minutes: 5

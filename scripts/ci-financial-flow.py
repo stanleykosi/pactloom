@@ -72,7 +72,10 @@ class FullFlow:
         self.operator=operator
         self.expected_profile=observer.expected_profile
         self.controller=controller;self.fixture=fixture;self.observer=observer;self.ocr=ocr
-        self.native=S.NativeScenario(controller,fixture,observer.next_snapshot)
+        if self.expected_profile==C.SEMANTIC_PROFILE:
+            self.native=S.NativeScenario(controller,fixture,observer.next_snapshot,expected_profile=self.expected_profile,host_view=observer.host_view,wait_ceiling=self.startup_wait_ceiling)
+        else:
+            self.native=S.NativeScenario(controller,fixture,observer.next_snapshot)
         self.done=set();self.filled=set();self.scrolls={};self.actions=0;self.host_lines=0
         self.last_ocr=0;self.ocr_delay=1_000_000_000;self.last_capture=None;self.challenges=set();self.host_paths=set()
         self.reviewer_index=0;self.continue_index=0;self.result_index=0
@@ -84,6 +87,13 @@ class FullFlow:
         self.last_phase=None;self.search_direction='up';self.search_geometry=None
         self.host_action='Unobserved';self.host_observed=None
         self.host_capture_outcome='Unobserved';self.host_capture_context=None
+        self._startup_ceiling=None
+        if self.expected_profile==C.SEMANTIC_PROFILE:
+            self._startup_ceiling=min(self.fixture.deadline_ns,time.monotonic_ns()+C.ACTION_NS)
+            S.K.Controller.install_wait_ceiling(controller,self.startup_wait_ceiling)
+    def startup_wait_ceiling(self):
+        # Read-only: observations, captures and navigation never renew this bound.
+        return self._startup_ceiling
     def cache_host_observation(self,h):
         # Called only after existing validated snapshot/capture operations.
         # No text, paths, geometry or input values are retained here.
@@ -290,10 +300,15 @@ class FullFlow:
         return line
 
     def startup_submitted(self):
+        if self.expected_profile==C.SEMANTIC_PROFILE:
+            now=time.monotonic_ns()
+            C.require(self._startup_ceiling is not None and now<self._startup_ceiling,'deadline')
         C.require(self.pending_startup==self.startup_index==self.startup_issued,'input_phase')
         self.host_paths.add(HOST_STARTUP[self.startup_index])
         self.startup_index+=1;self.startup_issued=None;self.pending_startup=None
         self.startup_input_attempted=False;self.startup_waiting=True
+        if self.expected_profile==C.SEMANTIC_PROFILE and self.startup_index<len(HOST_STARTUP):
+            self._startup_ceiling=min(self.fixture.deadline_ns,now+C.ACTION_NS)
 
     def expected_host_line(self,rendered):
         # OCR whitespace wrapping may vary; characters/challenge are never repaired.
@@ -392,7 +407,11 @@ class FullFlow:
             if s['host_input']:
                 self.controller.wait_render_progress();return True
             self.startup_waiting=False
-            if self.startup_index==len(HOST_STARTUP):return False
+            if self.startup_index==len(HOST_STARTUP):
+                if self.expected_profile==C.SEMANTIC_PROFILE:
+                    C.require(self._startup_ceiling is not None and time.monotonic_ns()<self._startup_ceiling,'deadline')
+                    self._startup_ceiling=None
+                return False
         if self.startup_index<len(HOST_STARTUP):
             C.require(not(s['secret_input'] or s['host_input']),'input_phase')
         if s['host_input']:

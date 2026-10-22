@@ -3,6 +3,10 @@
 //! Initial launch is trusted, credential-free and uninjected; no public worker
 //! entry, source factory or reusable financial approval is accepted.
 #![forbid(unsafe_code)]
+#[cfg(all(wholepact_financial_rendered_host_semantic_ci,
+    not(all(wholepact_financial_ci,wholepact_financial_external_ci,
+        feature = "coordinated-financial-runtime",target_os = "linux"))))]
+compile_error!("Rendered Host semantic qualification requires Linux external financial observation");
 #[cfg(all(wholepact_bootstrap_ci, any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")))]
 compile_error!("Bootstrap-only CI instrumentation cannot select the source-opening UI profile");
 

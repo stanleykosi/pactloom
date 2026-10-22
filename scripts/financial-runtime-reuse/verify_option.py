@@ -18,12 +18,11 @@ PARSER_SHA='d24433f973c77d34e6d1f5c299cc1c7d00a7d024584bbfcb3d45e077c0e92f5d'
 assert hashlib.sha256((HERE/'producer_artifacts.py').read_bytes()).hexdigest()==PARSER_SHA
 A=_reviewed_parser()
 
-PRODUCER=dict(repository='stanleykosi/pactloom',source='6f00b00454ba062bea40d1f1e73efe0165ae8aa2',
- source_tree='d367a59509acef544d75de4120cbe5f991375e7b',run_id=39792448140,attempt=1)
-JOB_ID=119871612406
+PRODUCER=dict(repository='stanleykosi/pactloom',source='f98de7fd79389ce340343292086c852825f59b60',
+ source_tree='1b4df59f4e2e664cad33440a947645e66424e410',run_id=39704950389,attempt=1)
+JOB_ID=119582700875
 # Exact existing runtime files, NOT a suffix/directory exclusion. Contract,
 # output projection, fixture profile/scenario, image and orchestration are fixed.
-# The contract diagnostic exception requires the separate exact v2 annex below.
 RUNTIME_ONLY=frozenset((
  'scripts/ci-financial-container.py',
  'scripts/ci-financial-fixture.py',
@@ -35,10 +34,6 @@ RUNTIME_ONLY=frozenset((
  'scripts/tests/test_ci_financial_fixture_diagnostics.py',
 ))
 
-
-# Separate diagnostic-only exception; never part of the original eight paths.
-# Exact reviewed mode-bound blobs only; AST review is offline evidence, not policy.
-DIAGNOSTIC_COMPATIBILITY={'version': 1, 'name': 'host-failure-diagnostic-v2', 'path': 'scripts/ci-financial-contract.py', 'producer_mode_sha256': '5aeb89f919fffab7eaeaf5d9a6bf99786a37d0ed92c3be970e38fd1380f46efa', 'harness_mode_sha256': 'db472f79cd73b101647c5dcd153425ec1ab98c2b53f97608093bfe4fe82635ed'}
 
 def require(ok,reason):
     if not ok:raise A.Rejected(reason)
@@ -73,31 +68,11 @@ def inventory_checkout(root,commit):
     return tree,result
 
 
-def validate_diagnostic_compatibility(annex):
-    require(type(annex) is dict and set(annex)==set(DIAGNOSTIC_COMPATIBILITY),
-        'diagnostic_annex_schema')
-    require(type(annex['version']) is int and annex['version']==1,
-        'diagnostic_annex_version')
-    for key in set(annex)-{'version'}:
-        require(type(annex[key]) is str,'diagnostic_annex_type')
-    for key in ('producer_mode_sha256','harness_mode_sha256'):
-        require(A.SHA.fullmatch(annex[key]) is not None,'diagnostic_annex_digest')
-    require(annex==DIAGNOSTIC_COMPATIBILITY,'diagnostic_annex_pin')
-    return annex
-
-
-def equivalent(producer,current,diagnostic_compatibility=None):
+def equivalent(producer,current):
     A.closure(producer);A.closure(current)
     require(set(producer)==set(current),'tracked_path_set')
     changed=sorted(name for name in producer if producer[name]!=current[name])
-    exceptions=set()
-    if diagnostic_compatibility is not None:
-        annex=validate_diagnostic_compatibility(diagnostic_compatibility)
-        path=annex['path']
-        require(path in changed and producer.get(path)==annex['producer_mode_sha256']
-            and current.get(path)==annex['harness_mode_sha256'],'diagnostic_annex_source')
-        exceptions.add(path)
-    require(set(changed)<=RUNTIME_ONLY|exceptions,'native_or_unreviewed_input_changed')
+    require(set(changed)<=RUNTIME_ONLY,'native_or_unreviewed_input_changed')
     # Empty change is valid; it does not imply runtime acceptance.
     return changed
 
@@ -117,7 +92,7 @@ def archive_digest(archive,pins):
     return digest
 
 
-def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventory,harness,diagnostic_compatibility=None):
+def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventory,harness):
     """Pins are independently reviewed API/log facts; never manifest-supplied.
 
     ZIP must contain exactly build.tar with independently pinned bytes.
@@ -137,7 +112,7 @@ def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventor
         and run.get('repository',{}).get('full_name')==PRODUCER['repository'],'producer_run')
     # A runtime-failed job is expected and does not invalidate its pre-fixture build.
     require(run.get('conclusion') in ('failure','success'),'producer_terminal')
-    name='financial-build-39792448140-1-'+PRODUCER['source']
+    name='financial-build-39704950389-1-'+PRODUCER['source']
     origin=artifact.get('workflow_run',{})
     require(artifact.get('id')==pins['artifact_id'] and type(artifact.get('id')) is int
         and artifact.get('name')==name and artifact.get('expired') is False
@@ -152,15 +127,12 @@ def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventor
     require(harness['repository']==PRODUCER['repository'] and
         A.COMMIT.fullmatch(harness['source']) is not None and
         A.COMMIT.fullmatch(harness['source_tree']) is not None,'harness_identity')
-    changes=equivalent(producer_inventory,current_inventory,diagnostic_compatibility)
+    changes=equivalent(producer_inventory,current_inventory)
     require(not changes or (harness['source']!=PRODUCER['source'] and
         harness['source_tree']!=PRODUCER['source_tree']),'contradictory_harness_identity')
-    evidence=dict(schema=1 if diagnostic_compatibility is None else 2,native_producer=PRODUCER.copy(),harness=harness.copy(),
+    return dict(schema=1,native_producer=PRODUCER.copy(),harness=harness.copy(),
         original_manifest=original,current_source_inventory=current_inventory.copy(),
-        permitted_runtime_changes=[name for name in changes if name in RUNTIME_ONLY],artifact_pins=pins.copy(),
+        permitted_runtime_changes=changes,artifact_pins=pins.copy(),
         native_binaries_reused=True,native_binaries_freshly_compiled=False,
         runtime_verified=False,synthetic_full_native_verified=False,
         public_chain_verified=False,dispatch_requested=False)
-    if diagnostic_compatibility is not None:
-        evidence['diagnostic_compatibility']=diagnostic_compatibility.copy()
-    return evidence

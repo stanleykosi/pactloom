@@ -45,4 +45,4 @@ zeroize = { version = "=1.9.1", optional = true }
 log = { version = "=0.4.34", optional = true }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wholepact_bootstrap_ci)', 'cfg(wholepact_delivery_ci)', 'cfg(wholepact_financial_ci)', 'cfg(wholepact_financial_external_ci)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wholepact_bootstrap_ci)', 'cfg(wholepact_delivery_ci)', 'cfg(wholepact_financial_ci)', 'cfg(wholepact_financial_external_ci)', 'cfg(wholepact_financial_rendered_host_semantic_ci)'] }

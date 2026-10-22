@@ -110,7 +110,7 @@ def root_setup():
     os.environ.clear()
     raw,_=secure_file(ROOT/'manifest.json',0,0o444,32768);manifest=C.loads(raw,32768)
     C.exact(manifest,('schema','profile','source_commit','files'))
-    C.require(manifest['schema']==1 and manifest['profile']==C.EXTERNAL_PROFILE and
+    C.require(manifest['schema']==1 and manifest['profile'] in (C.EXTERNAL_PROFILE,C.SEMANTIC_PROFILE) and
               type(manifest['source_commit']) is str and len(manifest['source_commit'])==40 and
               set(manifest['files'])==set(RUNTIME_FILES+ARTIFACTS),'contract')
     observed=None
@@ -134,7 +134,7 @@ def root_setup():
     write_new(pathlib.Path('/etc/wholepact/financial-coordinator-common-image-v1.json'),json.dumps(pin).encode(),0o444)
     base,_=secure_file(ROOT/'base-passwd',0,0o444,65536)
     write_account(base,'/nonexistent',initial=True)
-    return base
+    return base,manifest['profile']
 
 def write_new(path,data,mode):
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,mode)
@@ -192,9 +192,9 @@ class FixtureParent:
         C.require(self.process.wait(timeout=max(.001,(self.deadline-time.monotonic_ns())/1e9))==0,'cleanup')
 
 class NativeSession:
-    def __init__(self,fixture,deadline):
+    def __init__(self,fixture,deadline,expected_profile=C.EXTERNAL_PROFILE):
         self.deadline=min(deadline,fixture.deadline_ns);self.fixture=fixture
-        self.observer=OBS.ObserverFiles(EVIDENCE,self.deadline,C.EXTERNAL_PROFILE)
+        self.observer=OBS.ObserverFiles(EVIDENCE,self.deadline,expected_profile)
         self.operator=EXT.ExternalOperator()
         self.controller,edge,additions=K.make_channel(deadline,self.deadline)
         try:
@@ -213,7 +213,7 @@ class NativeSession:
             stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,close_fds=True,pass_fds=(),env=env,start_new_session=True)
         self.controller.bind_process(self.product);self.controller.focus(True)
     def run(self):
-        ocr=S.PinnedLocalOcr('/usr/bin/tesseract',OCR_SHA)
+        ocr=None if self.observer.expected_profile==C.SEMANTIC_PROFILE else S.PinnedLocalOcr('/usr/bin/tesseract',OCR_SHA)
         self.flow=FLOW.FullFlow(self.controller,self.fixture,self.observer,ocr,self.operator)
         self.flow.run()
         status=self.product.wait(timeout=max(.001,(self.deadline-time.monotonic_ns())/1e9))
@@ -262,21 +262,22 @@ def main():
     C.require(not sys.argv[1:],'contract')
     original=time.monotonic_ns()+C.ORIGINAL_NS
     parent=session=None
+    expected_profile=C.EXTERNAL_PROFILE
     try:
-        base=root_setup();parent=FixtureParent(original)
+        base,expected_profile=root_setup();parent=FixtureParent(original)
         write_account(base,str(parent.home))
         os.setgroups([]);os.setresgid(UID,UID,UID);os.setresuid(UID,UID,UID);K.harden_process()
-        fixture=F.Fixture.load(parent.path,original,C.EXTERNAL_PROFILE)
-        session=NativeSession(fixture,original);records,pid,status=session.run()
+        fixture=F.Fixture.load(parent.path,original,expected_profile)
+        session=NativeSession(fixture,original,expected_profile);records,pid,status=session.run()
         parent.finish(True)
         cleanup_raw,_=secure_file(FIXTURE/'coordinated-financial-cleanup-v1.json',UID,0o600,16384)
         external=session.operator.evidence(C.loads(cleanup_raw,16384),parent.process.pid,parent.process.returncode)
-        evidence=OUT.validate_completed(records,pid,status,external)
+        evidence=OUT.validate_completed(records,pid,status,external,expected_profile)
         session.finish_display()
         C.require({int(p.name) for p in pathlib.Path('/proc').iterdir() if p.name.isdecimal()}=={1},'cleanup')
         # Outer rootfs owner MUST verify removal before translating candidate
         # into public_result; this marker itself is not a qualification pass.
-        print('CI_FINANCIAL_CANDIDATE '+json.dumps({'schema':1,'profile':C.EXTERNAL_PROFILE,
+        print('CI_FINANCIAL_CANDIDATE '+json.dumps({'schema':1,'profile':expected_profile,
               'native_oracle_verified':True,'fixture_cleaned':True,'display_cleaned':True,
               'public_chain_verified':False,'dispatch_attempted':False},separators=(',',':')),flush=True)
     except BaseException as error:
@@ -290,7 +291,7 @@ def main():
         emit_cached_host_failure(flow)
         # No raw exception/path/Host output escapes. Outer owner destroys whole
         # isolated namespace on failure; never report rescue cleanup as normal.
-        print('CI_FINANCIAL_RESULT '+json.dumps(OUT.failure(code),separators=(',',':')),flush=True)
+        print('CI_FINANCIAL_RESULT '+json.dumps(OUT.failure(code,expected_profile),separators=(',',':')),flush=True)
         raise SystemExit(1) from None
 
 if __name__=='__main__':main()

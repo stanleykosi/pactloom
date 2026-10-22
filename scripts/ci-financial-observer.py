@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Bounded private append-only observer collection; observations grant nothing."""
+import copy
 import importlib.util
 import os
 import pathlib
@@ -16,18 +17,23 @@ MAX_TOTAL_BYTES=64*1024*1024
 
 class ObserverFiles:
     def __init__(self,directory,deadline_ns,expected_profile=C.PROFILE):
-        C.require(expected_profile in (C.PROFILE,C.EXTERNAL_PROFILE));self.expected_profile=expected_profile
+        C.require(expected_profile in (C.PROFILE,C.EXTERNAL_PROFILE,C.SEMANTIC_PROFILE));self.expected_profile=expected_profile
         self.directory=pathlib.Path(directory);self.deadline_ns=deadline_ns
         self._files={};self._roles={};self._snapshot_generation=0
+        self._semantic_active=None
         try:meta=self.directory.stat(follow_symlinks=False)
         except OSError:raise C.Rejected('observer_missing') from None
         C.require(stat.S_ISDIR(meta.st_mode) and meta.st_uid==os.getuid() and
                   stat.S_IMODE(meta.st_mode)==0o700,'observer_missing')
         self._directory_identity=(meta.st_dev,meta.st_ino)
     def read(self,*,final=False):
-        C.require(time.monotonic_ns()<self.deadline_ns,'deadline')
-        try:return self._read(final)
-        except OSError:raise C.Rejected('observer_failure') from None
+        try:
+            C.require(time.monotonic_ns()<self.deadline_ns,'deadline')
+            return self._read(final)
+        except C.Rejected:
+            self._clear_host_view();raise
+        except OSError:
+            self._clear_host_view();raise C.Rejected('observer_failure') from None
     def _read(self,final):
         meta=self.directory.stat(follow_symlinks=False)
         C.require((meta.st_dev,meta.st_ino)==self._directory_identity,'observer_failure')
@@ -61,7 +67,23 @@ class ObserverFiles:
                 C.require(self._roles.get(role,name)==name,'lineage');self._roles[role]=name
             self._files[name]=(identity,complete);records.extend(entries)
         C.require(not final or len(self._roles)==17,'observer_missing')
+        if self.expected_profile==C.SEMANTIC_PROFILE:self._join_host_views(records)
         return records
+    def _clear_host_view(self):
+        if self._semantic_active is not None:
+            self._semantic_active['text'][:]=b'\0'*len(self._semantic_active['text'])
+        self._semantic_active=None
+    def _join_host_views(self,records):
+        active=C.join_host_views(records)
+        self._clear_host_view()
+        if active is not None:
+            self._semantic_active=copy.deepcopy(active)
+            self._semantic_active['text']=bytearray(active['text'],'ascii')
+    def host_view(self,snapshot):
+        C.require(self.expected_profile==C.SEMANTIC_PROFILE and self._semantic_active is not None,'snapshot')
+        view=self._semantic_active.copy();view['text']=bytes(view['text']).decode('ascii')
+        C.match_host_view(snapshot,view)
+        return view['text']
     def next_snapshot(self,deadline_ns):
         C.require(type(deadline_ns) is int and deadline_ns<=self.deadline_ns,'deadline')
         while time.monotonic_ns()<deadline_ns:

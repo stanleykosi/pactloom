@@ -15,20 +15,22 @@ C = importlib.util.module_from_spec(_spec); sys.modules[_spec.name] = C; _spec.l
 
 class FullFlowEvidence:
     """Private validated evidence; repr intentionally excludes PIDs and records."""
-    __slots__ = ('_token','_root_pid','_record_count')
-    def __init__(self, token, root_pid, record_count):
+    __slots__ = ('_token','_root_pid','_record_count','_profile')
+    def __init__(self, token, root_pid, record_count,profile):
         C.require(token is _TOKEN)
         self._token,self._root_pid,self._record_count=token,root_pid,record_count
+        self._profile=profile
     def __repr__(self):
         return '<FullFlowEvidence private>'
 _TOKEN = object()
 
-def validate_completed(records, actual_root_pid, actual_root_exit, external_evidence):
+def validate_completed(records, actual_root_pid, actual_root_exit, external_evidence,expected_profile=C.EXTERNAL_PROFILE):
+    C.require(expected_profile in (C.EXTERNAL_PROFILE,C.SEMANTIC_PROFILE))
     C.require(type(records) is list and 0 < len(records) <= C.MAX_RECORDS,'record_limit')
     C.require(C.integer(actual_root_pid,2,2**31-1) and actual_root_exit == 0 and type(actual_root_exit) is int,'process')
     by_role={role:[] for role in C.ROLES}
     for record in records:
-        C.validate_record(record,C.EXTERNAL_PROFILE)
+        C.validate_record(record,expected_profile)
         C.require(record['kind'] != 'Failure','observer_failure')
         by_role[record['role']].append(record)
     births={}
@@ -39,6 +41,7 @@ def validate_completed(records, actual_root_pid, actual_root_exit, external_evid
         C.require(entries[0]['kind']=='Birth' and sum(e['kind']=='Birth' for e in entries)==1,'lineage')
         C.require(all(a['elapsed_ns']<=b['elapsed_ns'] for a,b in zip(entries,entries[1:])),'order')
         births[role]=entries[0]
+    if expected_profile==C.SEMANTIC_PROFILE:C.join_host_views(by_role['Coordinator'],final=True)
     pids=[r['facts']['pid'] for r in births.values()]
     C.require(len(set(pids))==17 and births['Coordinator']['facts']['pid']==actual_root_pid,'lineage')
     for role,parent in C.PARENTS.items():
@@ -102,24 +105,31 @@ def validate_completed(records, actual_root_pid, actual_root_exit, external_evid
     C.require(max(r['elapsed_ns'] for r in reaps.values()) <= root_events['NormalFinished'],'normal_finish')
     C.require(reaps['Signer1']['elapsed_ns'] <= reaps['Host']['elapsed_ns'] and
               reaps['Signer2']['elapsed_ns'] <= reaps['Host']['elapsed_ns'],'cleanup')
-    return FullFlowEvidence(_TOKEN,actual_root_pid,len(records))
+    return FullFlowEvidence(_TOKEN,actual_root_pid,len(records),expected_profile)
 
 def public_result(evidence, *, exact_build_verified, container_removed):
     C.require(type(evidence) is FullFlowEvidence and evidence._token is _TOKEN,'missing_evidence')
     C.require(exact_build_verified is True and container_removed is True,'cleanup')
     # Never call a saved synthetic transaction public-chain settlement.
-    return {'schema':C.SCHEMA,'profile':C.EXTERNAL_PROFILE,'status':'passed',
+    result={'schema':C.SCHEMA,'profile':evidence._profile,'status':'passed',
             'synthetic_full_native_verified':False,'synthetic_external_witness_flow_verified':True,'integrated_witness_services':7,'retained_inert_witnesses':6,'public_chain_verified':False,
             'dispatch_attempted':False,'original_roles':17,'owned_child_reaps':16,
             'normal_finish_verified':True,'container_removed':True}
+    if evidence._profile==C.SEMANTIC_PROFILE:
+        result.update(semantic_assisted_host_observation=True,pixel_only_ui_verified=False)
+    return result
 
-def failure(code):
-    return {'schema':C.SCHEMA,'profile':C.EXTERNAL_PROFILE,'status':'failed',
+def failure(code,expected_profile=C.EXTERNAL_PROFILE):
+    C.require(expected_profile in (C.EXTERNAL_PROFILE,C.SEMANTIC_PROFILE))
+    return {'schema':C.SCHEMA,'profile':expected_profile,'status':'failed',
             'code':code if code in C.ERRORS else 'contract',
             'synthetic_full_native_verified':False,'public_chain_verified':False}
 
 
 def validate_external_operator(evidence,milestones,by_role):
+    # Underlying external pre-V3 service protocol identity, NOT the observer or
+    # qualification profile. Semantic Host observation does not alter transport,
+    # service purposes, genuine gate evidence, or owned cleanup requirements.
     C.exact(evidence,('profile','events','gates','cleanup','actual_fixture_parent_pid','actual_fixture_parent_exit'))
     C.require(evidence['profile']==C.EXTERNAL_PROFILE and C.integer(evidence['actual_fixture_parent_pid'],2) and
               type(evidence['actual_fixture_parent_exit']) is int and evidence['actual_fixture_parent_exit']==0,'cleanup')

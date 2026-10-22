@@ -4017,7 +4017,11 @@ impl Window {
             let viewport = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1280.0/scale, 800.0/scale));
             let (origin, galley, child_clip) = &_ci_output.inner;
             let clip = _ci_output.inner_rect.intersect(*child_clip).intersect(ui.clip_rect()).intersect(viewport);
-            let view = if self.host_entry == HostEntry::Idle && self.password.is_none()
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            let semantic_focused = self.focused_last;
+            #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
+            let semantic_focused = true;
+            let view = if semantic_focused && self.host_entry == HostEntry::Idle && self.password.is_none()
                 && self.host_output.decode_complete() && self.host_output.state() == OutputState::Open
                 && ui.is_visible() && ui.is_enabled() && !ui.is_sizing_pass() {
                 crate::host_output_view::visible_tail(galley, *origin, clip, scale, self.host_output.non_whitespace_end())

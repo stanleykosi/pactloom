@@ -223,7 +223,7 @@ def exact_source(sha):
             'source', 'source_commit')
     require(checked(['git', 'status', '--porcelain', '--untracked-files=all'], 'source', limit=65536) == b'',
             'source', 'dirty_source')
-    require((HERE / 'qualification-gate-mode').read_bytes() == b'financial-ui\n', 'source', 'gate_mode')
+    require((HERE / 'qualification-gate-mode').read_bytes() in (b'financial-ui\n',b'financial-semantic\n'), 'source', 'gate_mode')
 
 
 BUILD_LOG_LIMIT = 64 * 1024
@@ -457,7 +457,7 @@ def export_compiled_artifacts(artifacts, sha):
     destination.mkdir(mode=0o700, exist_ok=False)
     bundle = destination / 'build.tar'
     try:
-        A.export_bundle(artifacts, bundle, producer, inventory)
+        A.export_bundle(artifacts, bundle, producer, inventory,I.profile())
         exact_source(sha)
         digest = hashlib.sha256()
         with bundle.open('rb') as stream:
@@ -465,7 +465,7 @@ def export_compiled_artifacts(artifacts, sha):
         output = os.environ['GITHUB_OUTPUT']
         with open(output, 'a', encoding='ascii') as stream:
             stream.write('artifact_bundle_ready=true\n')
-        emit('BUILD_BUNDLE', dict(source=sha, source_tree=tree, run_id=producer['run_id'],
+        emit('BUILD_BUNDLE', dict(source=sha, source_tree=tree,profile=I.profile(), run_id=producer['run_id'],
             attempt=producer['attempt'], sha256=digest.hexdigest(), size=bundle.stat().st_size,
             artifacts=list(A.NAMES), pre_credential=True, reused=False, uploaded=False))
     except Exception:
@@ -490,7 +490,7 @@ def build_inputs(root, sha):
     exact_source(sha);env=encrypted_build_environment(root,env)
     for name in I.ARTIFACT_FILES:
         exact_source(sha);selected=dict(env);setup=name=='pristine-setup'
-        if name=='coordinator-observed':selected['RUSTFLAGS']='--cfg wholepact_financial_ci --cfg wholepact_financial_external_ci'
+        if name=='coordinator-observed':selected['RUSTFLAGS']=A.recipe(I.profile())['observed_rustflags']
         args=build_recipe(name)
         raw=build_command(name,args,'compile',selected,seconds=1800,limit=32*1024*1024)
         artifact=select_artifact(raw,name,root/'target')
@@ -646,7 +646,10 @@ FIXTURE_REASONS = frozenset(('Setup','Unclassified','Deadline','ChildObservation
 
 
 class RuntimeRecords:
-    def __init__(self,mode):self.mode,self.first_failure,self.result,self.location,self.fixture_diagnostic=mode,None,None,None,None;self.progress_diagnostic=None;self.host_diagnostic=None
+    def __init__(self,mode,expected_profile=None):
+        self.expected_profile=P.C.EXTERNAL_PROFILE if expected_profile is None else expected_profile
+        require(self.expected_profile in (P.C.EXTERNAL_PROFILE,P.C.SEMANTIC_PROFILE),'projection','result_schema')
+        self.mode,self.first_failure,self.result,self.location,self.fixture_diagnostic=mode,None,None,None,None;self.progress_diagnostic=None;self.host_diagnostic=None
     def __call__(self,line):
         require(type(line) is bytes and 0<len(line)<=8192 and self.result is None,'projection','result_records')
         if line.startswith(b'CI_FINANCIAL_LOCATION '):
@@ -683,14 +686,14 @@ class RuntimeRecords:
             self.host_diagnostic=value
         elif line.startswith(b'CI_FINANCIAL_CANDIDATE '):
             value=loads(line[len(b'CI_FINANCIAL_CANDIDATE '):])
-            expected=dict(schema=1,profile=P.C.EXTERNAL_PROFILE,native_oracle_verified=True,
+            expected=dict(schema=1,profile=self.expected_profile,native_oracle_verified=True,
                           fixture_cleaned=True,display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)
             require(type(value) is dict and value==expected and all(type(value[k]) is type(v) for k,v in expected.items())
                     and self.first_failure is None and self.location is None and self.fixture_diagnostic is None
                     and self.progress_diagnostic is None and self.host_diagnostic is None,'projection','result_schema');self.result=value
         elif line.startswith(b'CI_FINANCIAL_RESULT '):
             value=loads(line[len(b'CI_FINANCIAL_RESULT '):])
-            require(type(value) is dict and value==P.failure(value.get('code')),'projection','result_schema')
+            require(type(value) is dict and value==P.failure(value.get('code'),self.expected_profile),'projection','result_schema')
             self.first_failure=value;self.result=value
             if self.progress_diagnostic is not None:emit('PROGRESS_DIAGNOSTIC',self.progress_diagnostic)
             if self.host_diagnostic is not None:emit('HOST_DIAGNOSTIC',self.host_diagnostic)
@@ -704,7 +707,7 @@ class RuntimeRecords:
 
 def run_case(mode, image_id, token, sha):
     name = 'wp-financial-' + token + '-' + mode
-    records = RuntimeRecords(mode)
+    records = RuntimeRecords(mode,I.profile())
     removed, create_pending, result, first = False, False, None, None
     try:
         require(name not in names(token), 'container', 'container_identity')
@@ -909,7 +912,8 @@ def main():
     try:
         if not cleanup_only:
             exact_source(sha)
-            emit('SOURCE',dict(source=sha,profile=P.C.EXTERNAL_PROFILE,toolchain='1.99.0',container_base=BASE,
+            emit('SOURCE',dict(source=sha,profile=I.profile(),
+                semantic_assisted_host_observation=I.profile()==P.C.SEMANTIC_PROFILE,toolchain='1.99.0',container_base=BASE,
                 cargo_lock_sha256=hashlib.sha256((REPO/'Cargo.lock').read_bytes()).hexdigest(),
                 financial_session_seconds=1800,original_fixture_ceiling_seconds=900,
                 active_financial_witnesses=7,retained_inert_witnesses=6,external_native_witness=True,
@@ -930,7 +934,9 @@ def main():
         try:shutil.rmtree(root)
         except OSError:clean=False
         passed=passed and clean and first is None
-        emit('RESULT',dict(passed=passed,cleanup_only=cleanup_only,source=sha,profile=P.C.EXTERNAL_PROFILE,
+        emit('RESULT',dict(passed=passed,cleanup_only=cleanup_only,source=sha,profile=I.profile(),
+            semantic_assisted_host_observation=I.profile()==P.C.SEMANTIC_PROFILE,
+            pixel_only_ui_verified=passed and not cleanup_only and I.profile()==P.C.EXTERNAL_PROFILE,
             synthetic_external_witness_flow_verified=passed and not cleanup_only,
             synthetic_full_native_verified=False,integrated_witness_services=7,retained_inert_witnesses=6,
             containers_and_image_removed=clean,public_chain_verified=False,dispatch_requested=False,

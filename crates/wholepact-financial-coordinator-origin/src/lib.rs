@@ -276,3 +276,9 @@ compile_error!("financial CI observer requires the full financial workflow");
 
 #[cfg(all(wholepact_financial_external_ci,not(wholepact_financial_ci)))]
 compile_error!("external financial CI profile requires the financial CI observer");
+
+#[cfg(all(wholepact_financial_rendered_host_semantic_ci,
+    not(all(wholepact_financial_ci, wholepact_financial_external_ci, target_os = "linux", feature = "coordinated-financial-workflow-v1"))))]
+compile_error!("rendered Host semantic CI requires the Linux external full-financial observer");
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+pub use financial_observer::financial_ci_clear_host_view;

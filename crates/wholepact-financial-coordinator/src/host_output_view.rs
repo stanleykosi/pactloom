@@ -1,20 +1,24 @@
-//! Content-free geometry for one actually painted Host suffix. No prompt parser.
+//! Geometry for one actually painted Host suffix. No prompt parser.
+//! Only the separately compiled semantic CI observer owns the admitted suffix text.
 use eframe::egui::{self, Galley, Pos2, Rect};
 use egui::emath::GuiRounding;
 
 pub(super) fn paint_origin(origin: Pos2, scale: f32) -> Pos2 { origin.round_to_pixels(scale) }
 
-#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(wholepact_financial_rendered_host_semantic_ci), derive(Clone, Copy, Debug))]
 pub(super) struct HostOutputView {
     pub rect: Rect,
     pub nonws: u64,
     pub rows: u64,
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    pub text: zeroize::Zeroizing<String>,
 }
 fn nonws(c: char) -> bool { !c.is_ascii_whitespace() }
 fn ink_in_crop(ink: Rect, crop: Rect) -> bool { ink.is_positive() && ink.intersect(crop).is_positive() }
 
 /// Uses the SAME galley and origin as the ordinary painted label. No re-layout,
-/// scroll setter, text export, hash, synthetic newline or inferred prompt ID.
+/// scroll setter, synthetic newline or inferred prompt ID. Semantic text exists
+/// only in the explicit semantic CI build, never the pixel-only profiles.
 pub(super) fn visible_tail(galley: &Galley, origin: Pos2, clip: Rect,
     scale: f32, expected_nonws: u64) -> Option<HostOutputView> {
     if galley.elided || galley.rows.is_empty() || !clip.is_positive() || galley.pixels_per_point != scale
@@ -51,7 +55,34 @@ pub(super) fn visible_tail(galley: &Galley, origin: Pos2, clip: Rect,
         let ink = row.visuals.mesh_bounds.translate((origin + row.pos.to_vec2()).to_vec2());
         if ink_in_crop(ink, crop) { return None; }
     }
-    Some(HostOutputView { rect: crop, nonws: count, rows })
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    let text = rendered_suffix(galley, first)?;
+    Some(HostOutputView { rect: crop, nonws: count, rows,
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)] text })
+}
+
+/// Recover only admitted row characters. Soft wrapping adds no characters;
+/// ends_with_newline represents an actual LF in this SAME galley's layout job.
+/// The equality check rejects any unaccounted shaping/elision or source mismatch.
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+fn rendered_suffix(galley: &Galley, first: usize) -> Option<zeroize::Zeroizing<String>> {
+    let mut text = zeroize::Zeroizing::new(String::with_capacity(8192));
+    for row in &galley.rows[first..] {
+        for glyph in &row.glyphs {
+            if !matches!(glyph.chr, ' '..='~') || text.len() >= 8192 { return None; }
+            text.push(glyph.chr);
+        }
+        if row.ends_with_newline {
+            if text.len() >= 8192 { return None; }
+            text.push('\n');
+        }
+    }
+    let prefix_bytes = galley.rows[..first].iter().try_fold(0_usize, |length, row| {
+        row.glyphs.iter().try_fold(length, |n, glyph| n.checked_add(glyph.chr.len_utf8()))?
+            .checked_add(usize::from(row.ends_with_newline))
+    })?;
+    if text.is_empty() || galley.job.text.get(prefix_bytes..) != Some(text.as_str()) { return None; }
+    Some(text)
 }
 
 #[cfg(test)]
@@ -141,4 +172,57 @@ mod tests {
         let shifted=egui::pos2(0.13,0.17);let clip=tight.translate(shifted.to_vec2());
         assert!(visible_tail(&g,shifted,clip,1.5,7).is_none());
     }
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    #[test]
+    fn semantic_wraps_preserve_spaces_real_lf_and_exact_challenge() {
+        let text = "old prompt: new prompt: \nExact random challenge O0Il1S5B8-0123456789abcdef: ";
+        let g = layout(text, 180.0);
+        assert!(g.rows.len() > 2);
+        let view = visible_tail(&g, Pos2::ZERO, full(&g), 1.0, end(text)).unwrap();
+        assert_eq!(view.text.as_str(), text);
+        assert_eq!(view.text.bytes().filter(|b| *b == b'\n').count(), 1);
+    }
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    #[test]
+    fn semantic_clipped_prefix_is_not_disclosed_or_normalized() {
+        let text = "hidden history ".repeat(80) + "\ncurrent challenge 0O1l: \n";
+        let g = layout(&text, 400.0);
+        let clip = Rect::from_min_max(egui::pos2(-2.0, g.rect.bottom() - 100.0), egui::pos2(402.0, g.rect.bottom() + 2.0));
+        let view = visible_tail(&g, Pos2::ZERO, clip, 1.0, end(&text)).unwrap();
+        assert!(text.ends_with(view.text.as_str()));
+        assert!(view.text.len() < text.len());
+        assert!(view.text.ends_with("current challenge 0O1l: \n"));
+        assert_eq!(end(&view.text), view.nonws);
+    }
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    #[test]
+    fn semantic_total_bytes_not_just_nonwhitespace_are_bounded() {
+        let text = "a".to_owned() + &" ".repeat(8191);
+        let g = layout(&text, 200000.0);
+        assert_eq!(visible_tail(&g, Pos2::ZERO, full(&g), 1.0, 1).unwrap().text.len(), 8192);
+        let text = text + " ";
+        let g = layout(&text, 200000.0);
+        assert!(visible_tail(&g, Pos2::ZERO, full(&g), 1.0, 1).is_none());
+        let g = layout("prompt\t", 500.0);
+        assert!(visible_tail(&g, Pos2::ZERO, full(&g), 1.0, end("prompt\t")).is_none());
+    }
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    #[test]
+    fn semantic_uses_exact_painted_label_galley_without_relayout() {
+        let ctx = egui::Context::default();
+        let mut painted = None;
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 800.0)));
+        let output = ctx.run_ui(raw, |ui| {
+            let (origin, galley, _) = egui::Label::new(egui::RichText::new("Challenge: 0OIl1 abcdef\n").monospace()).selectable(false).layout_in_ui(ui);
+            let origin = paint_origin(origin, ui.ctx().pixels_per_point());
+            ui.painter().galley(origin, galley.clone(), ui.visuals().text_color());
+            let view = visible_tail(&galley, origin, ui.clip_rect(), 1.0, end(&galley.job.text)).unwrap();
+            assert_eq!(view.text.as_str(), galley.job.text.as_str());
+            painted = Some(galley);
+        });
+        let painted = painted.unwrap();
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if std::sync::Arc::ptr_eq(&text.galley, &painted))));
+    }
+
 }

@@ -980,17 +980,28 @@ class HostStartupContractTests(unittest.TestCase):
         flow.pump_host(observed_snapshot(secret_input=False,host_input=True));self.assertFalse(flow.host_startup_complete)
         flow.pump_host(observed_snapshot(secret_input=False,host_input=False));self.assertTrue(flow.host_startup_complete)
     def test_actual_native_methods_focus_type_blank_and_submit_once_with_writing_wait(self):
+        self._actual_startup(False)
+    def test_semantic_all13_actual_native_methods_without_ocr_or_capture(self):
+        self._actual_startup(True)
+    def _actual_startup(self,semantic):
         from unittest import mock
         import itertools,contextlib,io
         from test_ci_financial_input_batching import RecordingController,raw_event_count
         controller=mock.Mock();budget=RecordingController()
+        if semantic:self.fixture.deadline_ns=time.monotonic_ns()+F.C.ORIGINAL_NS
         state=dict(mode='Idle',remaining=0,step=0,generation=0,line=None,submitted=[],captures=0,focus=0,
                    begin_boundary=0,submit_boundary=0,coverage=0)
         prompts=self.PROMPTS
         def text():return '\n'.join(prompts[:min(state['step']+1,13)])
         def crop():return (':' if state['coverage']==0 else 'directory (absolute): ') if state['step']==0 and state['coverage']<2 else text()
         class Observer:
-            expected_profile=F.C.EXTERNAL_PROFILE
+            expected_profile=F.C.SEMANTIC_PROFILE if semantic else F.C.EXTERNAL_PROFILE
+            def host_view(self,s):
+                state['captures']+=1
+                h=s['host_observation']
+                view=dict(id=s['host_view_id'],view_generation=s['view_generation'],revision=h['revision'],nonws_end=h['nonws_end'],view=h['view'],text=crop())
+                F.C.match_host_view(s,view)
+                return view['text']
             def read(self):return []
             def next_snapshot(self,deadline):
                 state['generation']+=1;assert state['generation']<5000,'finite synthetic frame bound'
@@ -1010,9 +1021,11 @@ class HostStartupContractTests(unittest.TestCase):
                 h=dict(revision=min(state['step']+1,13),nonws_end=F.H.count(text()),context_valid=True,
                        entry=entry,editor=dict(ordinal=state['step']+1,revision=state['step']+1) if editing else None,
                        view=dict(rect=[10,200,110,220],nonws=F.H.count(crop()),rows=20) if not protected else None)
-                return observed_snapshot(phase='Selecting',owner=None,subphase='None',focused=True,
+                result=observed_snapshot(phase='Selecting',owner=None,subphase='None',focused=True,
                     view_generation=state['generation'],secret_input=False,host_input=protected,host_observation=h,
                     pixels_per_point=1,viewport=[1280,800],widgets=[dict(tag=t,owner=None,rect=[10,y,110,y+20],enabled=True) for t,y in widgets])
+                if semantic:result['host_view_id']=None if protected else 1+state['step']*3+state['coverage']
+                return result
         def click(x,y):
             if y==260:
                 self.assertEqual(state['mode'],'Idle');state.update(mode='BeginIdle',remaining=2,line=None)
@@ -1038,7 +1051,7 @@ class HostStartupContractTests(unittest.TestCase):
         controller.scroll_up.side_effect=wheel;controller.scroll_down.side_effect=wheel
         ocr=mock.Mock();ocr.read.side_effect=lambda *a:crop()
         flow=F.FullFlow(controller,self.fixture,Observer(),ocr)
-        clock=itertools.count(10_000_000_000,2_000_000_000);output=io.StringIO()
+        clock=itertools.count(time.monotonic_ns(),100_000_000 if semantic else 2_000_000_000);output=io.StringIO()
         def first_source_action(*args):
             self.assertTrue(flow.host_startup_complete);self.assertEqual(state['mode'],'Idle')
             raise F.C.Rejected('missing_evidence') # intended pure-test stop after startup
@@ -1056,6 +1069,8 @@ class HostStartupContractTests(unittest.TestCase):
         self.assertIsNot(self.fixture.secret_instances[0],self.fixture.secret_instances[1])
         self.assertTrue(all(not any(secret._bytes) for secret in self.fixture.secret_instances))
         self.assertEqual(state['captures'],15);controller.focus.assert_not_called()
+        if semantic:
+            ocr.read.assert_not_called();controller.observe.assert_not_called()
         self.assertEqual(state['coverage'],2);self.assertEqual(controller.scroll_up.call_count,2)
         self.assertGreaterEqual(state['begin_boundary'],13);self.assertGreaterEqual(state['submit_boundary'],13)
         self.assertEqual(flow.host_occurrences.attempts,13)
@@ -1349,3 +1364,153 @@ class ReviewViewportTests(unittest.TestCase):
         flow.review(base|dict(widgets=[dict(tag='ReturnRead',owner='Signer1',enabled=False),dict(tag='ReviewBody',owner='Signer1',enabled=True)]),'ReturnRead','Signer1')
         flow.review(base|dict(widgets=[dict(tag='ReturnRead',owner='Signer1',enabled=True)]),'ReturnRead','Signer1')
         self.assertEqual(events,['ReviewAcknowledgement','scroll:ReviewBody','ReturnRead'])
+
+
+class SemanticHostObserverTests(unittest.TestCase):
+    def setUp(self):
+        import copy
+        self.copy=copy.deepcopy
+        self.temp=tempfile.TemporaryDirectory();self.directory=pathlib.Path(self.temp.name)
+        self.o=O.ObserverFiles(self.directory,time.monotonic_ns()+10_000_000_000,O.C.SEMANTIC_PROFILE)
+        self.text='Additional shared agreement IDs, comma-separated; blank for none: '
+        n=sum(c not in ' \t\r\n\f\v' for c in self.text)
+        self.view=dict(id=1,view_generation=1,revision=7,nonws_end=n,view=dict(rect=[10,10,600,230],nonws=n,rows=4),text=self.text)
+        self.snapshot=dict(phase='Selecting',subphase='None',owner=None,view_generation=1,focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=[dict(tag='HostOutput',owner=None,enabled=True,rect=[0,0,640,240])],host_observation=dict(revision=7,nonws_end=n,context_valid=True,entry='Idle',editor=None,view=self.copy(self.view['view'])),host_view_id=1)
+    def tearDown(self):self.temp.cleanup()
+    def record(self,kind,facts,sequence,role='Coordinator',profile=None):
+        return dict(schema=1,profile=profile or O.C.SEMANTIC_PROFILE,role=role,sequence=sequence,elapsed_ns=0,kind=kind,facts=facts)
+    def records(self):
+        return [self.record('Birth',dict(pid=100,parent_pid=99,parent_role=None),1),self.record('HostRenderedView',self.copy(self.view),2),self.record('UiSnapshot',self.copy(self.snapshot),3)]
+    def write(self,records):
+        p=self.directory/'100.jsonl';p.write_text(''.join(json.dumps(r)+'\n' for r in records));p.chmod(0o600)
+    def validate_join(self,records):
+        for r in records:O.C.validate_record(r,O.C.SEMANTIC_PROFILE)
+        self.o._join_host_views(records)
+    def test_exact_private_record_join_no_text_in_snapshot(self):
+        self.write(self.records());s=self.o.next_snapshot(self.o.deadline_ns)
+        self.assertEqual(self.o.host_view(s),self.text);self.assertNotIn('text',s)
+        self.assertEqual(len(self.o.read()),3) # proof sequence never filtered
+    def test_old_profiles_reject_new_kind_and_snapshot_key(self):
+        for profile in (O.C.PROFILE,O.C.EXTERNAL_PROFILE):
+            for r in self.records()[1:]:
+                r['profile']=profile
+                with self.assertRaises(O.C.Rejected):O.C.validate_record(r,profile)
+        with self.assertRaises(O.C.Rejected):O.C.validate_snapshot(self.snapshot)
+    def test_missing_forward_duplicate_and_stale_refs_reject(self):
+        records=self.records()
+        variants=[records[:1]+records[2:],records[:1]+[records[2],records[1]],records+[records[1]],records+[self.record('UiSnapshot',self.snapshot|{'host_view_id':2,'view_generation':2},4)]]
+        for variant in variants:
+            with self.subTest(case=variants.index(variant)),self.assertRaises(O.C.Rejected):self.validate_join(variant)
+    def test_partial_pair_is_not_usable_then_joins(self):
+        records=self.records();self.write(records[:2]);self.o.read()
+        with self.assertRaises(O.C.Rejected):self.o.host_view(self.snapshot)
+        self.write(records);self.assertEqual(self.o.next_snapshot(self.o.deadline_ns),self.snapshot)
+        self.assertEqual(self.o.host_view(self.snapshot),self.text)
+    def test_all_metadata_mismatches_fail_closed(self):
+        for key,value in (('revision',8),('nonws_end',self.view['nonws_end']+1),('view_generation',2),('id',2),('text',self.text+'x')):
+            records=self.records();records[1]['facts'][key]=value
+            with self.subTest(key=key),self.assertRaises(O.C.Rejected):self.validate_join(records)
+        for key,value in (('rows',5),('rect',[11,10,600,230])):
+            records=self.records();records[1]['facts']['view'][key]=value
+            with self.assertRaises(O.C.Rejected):self.validate_join(records)
+    def test_null_protected_clears_mutable_cache_and_reentry_needs_new_id(self):
+        records=self.records();self.validate_join(records);old=self.o._semantic_active['text']
+        s=self.copy(self.snapshot);s.update(host_view_id=None,view_generation=2,host_input=True)
+        s['host_observation'].update(entry='Writing',view=None)
+        records.append(self.record('UiSnapshot',s,4));self.validate_join(records)
+        self.assertTrue(old and not any(old));self.assertIsNone(self.o._semantic_active)
+        with self.assertRaises(O.C.Rejected):self.o.host_view(self.snapshot)
+        with self.assertRaises(O.C.Rejected):self.validate_join(records+[self.record('UiSnapshot',self.snapshot|{'view_generation':3},5)])
+        v=self.copy(self.view);v.update(id=2,view_generation=3)
+        self.validate_join(records+[self.record('HostRenderedView',v,5),self.record('UiSnapshot',self.snapshot|{'view_generation':3,'host_view_id':2},6)])
+        self.assertEqual(self.o.host_view(self.snapshot|{'view_generation':3,'host_view_id':2}),self.text)
+    def test_native_lf_row_bound_is_identical(self):
+        view=self.copy(self.view);view['text']=self.text+'\n'*4
+        with self.assertRaises(O.C.Rejected):O.C.validate_host_rendered_view(view)
+        view['text']=self.text+'\n'*3;O.C.validate_host_rendered_view(view)
+    def test_bad_role_bytes_budget_and_extra_fields_reject_without_text_exception(self):
+        for value in ('private-sentinel\x00','private-sentinel\t','private-sentinelé','x'*8193,''):
+            v=self.copy(self.view);v['text']=value
+            with self.assertRaises(O.C.Rejected) as error:O.C.validate_host_rendered_view(v)
+            self.assertNotIn('private-sentinel',str(error.exception))
+        for key,value in (('id',513),('id',True),('unexpected','private-sentinel')):
+            v=self.copy(self.view);v[key]=value
+            with self.assertRaises(O.C.Rejected):O.C.validate_host_rendered_view(v)
+        with self.assertRaises(O.C.Rejected):O.C.validate_record(self.record('HostRenderedView',self.view,1,role='Host'),O.C.SEMANTIC_PROFILE)
+    def test_identical_new_id_after_unobserved_hidden_pass_does_not_renew_occurrence(self):
+        records=self.records();self.validate_join(records+[self.record('UiSnapshot',self.snapshot|{'view_generation':2},4)])
+        v=self.copy(self.view);v.update(id=2,view_generation=2)
+        self.validate_join(records+[self.record('HostRenderedView',v,4),self.record('UiSnapshot',self.snapshot|{'host_view_id':2,'view_generation':2},5)])
+        ledger=F.H.HostOccurrences();occurrence,_=ledger.inspect(self.text,self.snapshot['host_observation']);ledger.latch(occurrence)
+        with self.assertRaises(F.H.HostContextRejected):ledger.inspect(self.o.host_view(self.snapshot|{'host_view_id':2,'view_generation':2}),self.snapshot['host_observation'])
+        v['revision']=8;s=self.copy(self.snapshot);s.update(host_view_id=2,view_generation=2);s['host_observation']['revision']=8
+        self.validate_join(records+[self.record('HostRenderedView',v,4),self.record('UiSnapshot',s,5)])
+
+    def test_final_requires_paired_view_and_no_unpaired_tail(self):
+        records=self.records()
+        with self.assertRaises(O.C.Rejected):O.C.join_host_views(records[:1],final=True)
+        with self.assertRaises(O.C.Rejected):O.C.join_host_views(records[:2],final=True)
+        O.C.join_host_views(records,final=True)
+        new=self.copy(self.view);new.update(id=2,view_generation=2,revision=8)
+        with self.assertRaises(O.C.Rejected):O.C.join_host_views(records+[self.record('HostRenderedView',new,4)],final=True)
+
+class SemanticStartupCeilingTests(unittest.TestCase):
+    def test_blocked_controller_read_uses_subordinate_timeout_and_original_clocks(self):
+        from unittest import mock
+        import socket
+        now=[1_000_000_000];bound=now[0]+20_000_000
+        transport=mock.Mock()
+        def receive(*args):now[0]+=20_000_000;raise socket.timeout()
+        transport.recvmsg.side_effect=receive
+        controller=K.Controller(transport,now[0]+900_000_000_000,now[0]+900_000_000_000,_clock=lambda:now[0])
+        originals=(controller.original_deadline_ns,controller.session_deadline_ns)
+        controller.install_wait_ceiling(lambda:bound)
+        with self.assertRaises(K.Rejected) as error:controller.wait_ready()
+        self.assertEqual(error.exception.code,'deadline');transport.settimeout.assert_called_once_with(.02)
+        transport.close.assert_called_once();transport.send.assert_not_called()
+        self.assertEqual((controller.original_deadline_ns,controller.session_deadline_ns),originals)
+    def test_ceiling_installed_once_invalid_bounds_and_legacy_deadline(self):
+        from unittest import mock
+        for value in (True,False,0,-1,'120',1.5):
+            c=K.Controller(mock.Mock(),1000,1000,_clock=lambda:1);c.install_wait_ceiling(lambda:value)
+            with self.assertRaises(K.Rejected):c._remaining()
+        c=K.Controller(mock.Mock(),1000,1000,_clock=lambda:1)
+        self.assertEqual(c._remaining(),999/1e9)
+        c.install_wait_ceiling(lambda:None);self.assertEqual(c._remaining(),999/1e9)
+        with self.assertRaises(K.Rejected):c.install_wait_ceiling(lambda:9999)
+    def test_native_snapshot_passes_bound_to_actual_blocked_observer_loop(self):
+        from unittest import mock
+        now=[1_000_000_000];bound=now[0]+20_000_000
+        with tempfile.TemporaryDirectory() as temp:
+            observer=O.ObserverFiles(temp,now[0]+900_000_000_000,O.C.SEMANTIC_PROFILE)
+            observer.read=mock.Mock(return_value=[])
+            fixture=mock.Mock(deadline_ns=observer.deadline_ns);controller=mock.Mock()
+            native=F.S.NativeScenario(controller,fixture,observer.next_snapshot,expected_profile=F.C.SEMANTIC_PROFILE,host_view=observer.host_view,wait_ceiling=lambda:bound)
+            with mock.patch.object(O.time,'monotonic_ns',side_effect=lambda:now[0]),mock.patch.object(O.time,'sleep',side_effect=lambda _:now.__setitem__(0,now[0]+10_000_000)):
+                with self.assertRaises(O.C.Rejected) as error:native.snapshot()
+            self.assertEqual(error.exception.code,'deadline');self.assertEqual(now[0],bound)
+            controller.assert_not_called();self.assertEqual(controller.mock_calls,[])
+    def test_slot_not_renewed_by_observation_and_final_writing_retains_bound(self):
+        from unittest import mock
+        now=[1_000_000_000];fixture=mock.Mock(deadline_ns=900_000_000_000)
+        observer=mock.Mock(expected_profile=F.C.SEMANTIC_PROFILE);controller=mock.Mock()
+        with mock.patch.object(F.time,'monotonic_ns',side_effect=lambda:now[0]):
+            flow=F.FullFlow(controller,fixture,observer,None);first=flow.startup_wait_ceiling()
+            self.assertEqual(first,now[0]+F.C.ACTION_NS)
+            for i in range(5):
+                now[0]+=1_000_000_000
+                flow.cache_host_observation(dict(entry='Idle',context_valid=True,revision=i,nonws_end=i,view=None))
+                self.assertEqual(flow.startup_wait_ceiling(),first)
+            flow.pending_startup=flow.startup_issued=0;flow.startup_submitted()
+            second=flow.startup_wait_ceiling();self.assertGreater(second,first)
+            self.assertEqual(second,now[0]+F.C.ACTION_NS)
+            flow.startup_index=12;flow.pending_startup=flow.startup_issued=12
+            flow.startup_submitted();self.assertEqual(flow.startup_wait_ceiling(),second)
+            flow.pending_host=None
+            writing=observed_snapshot(secret_input=False,host_input=True)
+            self.assertTrue(flow.pump_host(writing));self.assertEqual(flow.startup_wait_ceiling(),second)
+            self.assertFalse(flow.pump_host(observed_snapshot(secret_input=False,host_input=False)))
+            self.assertTrue(flow.host_startup_complete);self.assertIsNone(flow.startup_wait_ceiling())
+        old=F.FullFlow(mock.Mock(),mock.Mock(),mock.Mock(expected_profile=F.C.EXTERNAL_PROFILE),None)
+        self.assertIsNone(old.startup_wait_ceiling())
+        self.assertNotIn('_wait_ceiling_installed',old.controller.__dict__)

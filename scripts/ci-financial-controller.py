@@ -206,6 +206,7 @@ def _ascii_events(text):
 class Controller:
     """One closed session, one Popen target, one live private image buffer."""
 
+    _wait_ceiling_source = None
     _rendered_clicks = False  # legacy standalone contract; FullFlow opts in once
 
     def __init__(self, transport, original_deadline_ns, session_deadline_ns,
@@ -267,10 +268,27 @@ class Controller:
             commit=self._receipt.commit, frame=self._receipt.frame,
             input_sequence=self._receipt.input_sequence)
 
+    def install_wait_ceiling(self, source):
+        """One harness-only restrictive ceiling source; original clocks unchanged.
+
+        The source reads cached per-startup-slot state. It sends no commands,
+        creates no native authority and cannot replace this installed source.
+        """
+        if not callable(source) or self.__dict__.get('_wait_ceiling_installed', False):
+            self._reject('deadline')
+        self._wait_ceiling_source=source
+        self._wait_ceiling_installed=True
+
     def _remaining(self):
         if self._closed:
             raise Rejected('disconnected')
-        left = min(self._original, self._session) - self._clock()
+        ceiling=min(self._original,self._session)
+        if self._wait_ceiling_source is not None:
+            bound=self._wait_ceiling_source()
+            if bound is not None:
+                if type(bound) is not int or bound<=0:self._reject('deadline')
+                ceiling=min(ceiling,bound)
+        left = ceiling - self._clock()
         if left <= 0:
             self._reject('deadline')
         if self._process is not None:

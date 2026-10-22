@@ -5,6 +5,7 @@ import math
 
 PROFILE = 'coordinated-financial-full-native-v1'
 EXTERNAL_PROFILE = 'coordinated-financial-external-pre-v3-witness-v1'
+SEMANTIC_PROFILE = 'coordinated-financial-rendered-host-semantic-v1'
 SCHEMA = 1
 ORIGINAL_NS = 1_800_000_000_000
 ACTION_NS = 120_000_000_000
@@ -126,7 +127,14 @@ def validate_host_observation(h, facts):
         require(outer[0]<=r[0]<r[2]<=outer[2] and outer[1]<=r[1]<r[3]<=outer[3],'snapshot')
     return h
 
-def validate_snapshot(facts):
+def validate_snapshot(facts, expected_profile=PROFILE):
+    require(expected_profile in (PROFILE,EXTERNAL_PROFILE,SEMANTIC_PROFILE))
+    original=facts
+    if expected_profile==SEMANTIC_PROFILE:
+        require(type(facts) is dict and 'host_view_id' in facts,'snapshot')
+        reference=facts['host_view_id']
+        require(reference is None or integer(reference,1,512),'snapshot')
+        facts={k:v for k,v in facts.items() if k!='host_view_id'}
     exact(facts, ('phase','subphase','owner','view_generation','focused','secret_input','host_input',
                   'pixels_per_point','viewport','widgets','host_observation'))
     require(facts['phase'] in PHASES and facts['subphase'] in SUBPHASES, 'snapshot')
@@ -149,10 +157,66 @@ def validate_snapshot(facts):
         x0,y0,x1,y1 = rect
         require(0 <= x0 < x1 <= 1280/scale and 0 <= y0 < y1 <= 800/scale, 'snapshot')
     validate_host_observation(facts['host_observation'],facts)
+    if expected_profile==SEMANTIC_PROFILE and original['host_view_id'] is not None:
+        h=facts['host_observation']
+        require(facts['focused'] and not facts['host_input'] and not facts['secret_input']
+                and h['context_valid'] and h['entry']=='Idle' and h['view'] is not None,'snapshot')
+    return original
+
+def validate_host_rendered_view(facts):
+    exact(facts,('id','view_generation','revision','nonws_end','view','text'))
+    require(integer(facts['id'],1,512) and integer(facts['view_generation'],1)
+            and integer(facts['revision'],0,262144) and integer(facts['nonws_end'],0,1048576),'snapshot')
+    v=facts['view'];exact(v,('rect','nonws','rows'),'snapshot')
+    require(integer(v['nonws'],1,8192) and v['nonws']<=facts['nonws_end'] and integer(v['rows'],1,32),'snapshot')
+    r=v['rect'];require(type(r) is list and len(r)==4 and all(type(x) in (int,float) and math.isfinite(x) for x in r),'snapshot')
+    require(0<=r[0]<r[2]<=2560 and 0<=r[1]<r[3]<=1600,'snapshot')
+    text=facts['text']
+    require(type(text) is str and 0<len(text)<=8192 and all(c=='\n' or ' '<=c<='~' for c in text),'snapshot')
+    require(text.count('\n')<v['rows'],'snapshot')
+    require(sum(c not in ' \t\r\n\f\v' for c in text)==v['nonws'],'snapshot')
     return facts
 
+def match_host_view(snapshot, view):
+    validate_snapshot(snapshot,SEMANTIC_PROFILE);validate_host_rendered_view(view)
+    h=snapshot['host_observation']
+    require(snapshot['host_view_id']==view['id'] and view['view_generation']<=snapshot['view_generation']
+            and view['revision']==h['revision'] and view['nonws_end']==h['nonws_end']
+            and view['view']==h['view'],'snapshot')
+    return view
+
+def join_host_views(records, *, final=False):
+    """Pure strict linkage over validated private records; never an input grant.
+
+    Identical fresh IDs can follow an unobserved discarded/hidden pass. Only
+    source occurrence positions, not view IDs, decide whether input is new.
+    """
+    active=None;pending=None;last_id=0;paired=0;sequence=0;generation=0
+    for record in records:
+        validate_record(record,SEMANTIC_PROFILE)
+        if record['role']!='Coordinator':continue
+        require(record['sequence']==sequence+1,'order');sequence=record['sequence']
+        kind=record['kind'];facts=record['facts']
+        if kind=='HostRenderedView':
+            require(pending is None and facts['id']==last_id+1,'replay')
+            require(facts['view_generation']>generation,'snapshot')
+            pending=facts;last_id=facts['id']
+        elif kind=='UiSnapshot':
+            require(facts['view_generation']>generation,'replay');generation=facts['view_generation']
+            reference=facts['host_view_id']
+            if reference is None:
+                require(pending is None,'snapshot');active=None
+            else:
+                selected=pending if pending is not None else active
+                require(selected is not None,'snapshot');match_host_view(facts,selected)
+                if pending is not None:
+                    require(selected['view_generation']==generation,'snapshot');paired+=1
+                active=selected;pending=None
+    if final:require(pending is None and paired>0,'missing_evidence')
+    return active
+
 def validate_record(record, expected_profile=PROFILE):
-    require(expected_profile in (PROFILE,EXTERNAL_PROFILE))
+    require(expected_profile in (PROFILE,EXTERNAL_PROFILE,SEMANTIC_PROFILE))
     exact(record, ('schema','profile','role','sequence','elapsed_ns','kind','facts'))
     require(type(record['schema']) is int and record['schema'] == SCHEMA and record['profile'] == expected_profile, 'record_shape')
     require(record['role'] in ROLES and integer(record['sequence'],1,MAX_RECORDS) and
@@ -171,7 +235,7 @@ def validate_record(record, expected_profile=PROFILE):
     elif kind in ('PurposeServing','PurposeDisposed','PurposeClosed'):
         exact(facts, ()); require(role in WITNESSES,'role')
     elif kind == 'InertStopped':
-        exact(facts, ()); require(expected_profile==EXTERNAL_PROFILE and role in INERT_WITNESSES,'role')
+        exact(facts, ()); require(expected_profile in (EXTERNAL_PROFILE,SEMANTIC_PROFILE) and role in INERT_WITNESSES,'role')
     elif kind == 'OwnedReap':
         exact(facts, ('child','pid','exit_code'))
         require(facts['child'] in PARENTS and PARENTS[facts['child']] == role and
@@ -179,7 +243,10 @@ def validate_record(record, expected_profile=PROFILE):
     elif kind in ('NormalFinishAdmitted','NormalFinished','PtyHeld','PtyReleased'):
         exact(facts, ()); require(role == 'Coordinator','role')
     elif kind == 'UiSnapshot':
-        require(role == 'Coordinator','role'); validate_snapshot(facts)
+        require(role == 'Coordinator','role'); validate_snapshot(facts,expected_profile)
+    elif kind == 'HostRenderedView':
+        require(expected_profile==SEMANTIC_PROFILE and role=='Coordinator','role')
+        validate_host_rendered_view(facts)
     elif kind == 'Failure':
         exact(facts, ('code',)); require(facts['code'] in ERRORS,'record_shape')
     else:
@@ -208,7 +275,7 @@ def validate_progress_diagnostic(value):
 
 def cached_progress_diagnostic(records,expected_profile):
     """Project only validated cached records; no reads, waits or clock changes."""
-    require(expected_profile in (PROFILE,EXTERNAL_PROFILE),'record_shape')
+    require(expected_profile in (PROFILE,EXTERNAL_PROFILE,SEMANTIC_PROFILE),'record_shape')
     require(type(records) is list and len(records)<=MAX_RECORDS,'record_limit')
     value={'version':1,'signer_counts':[[0]*len(SIGNER_STEPS) for _ in range(2)],
            'host_counts':[0]*len(HOST_STEPS),'normal_counts':[0]*len(NORMAL_DIAGNOSTIC_STEPS),
