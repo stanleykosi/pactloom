@@ -168,7 +168,7 @@ jobs:
             test -z "$(git -C "$destination" status --porcelain --untracked-files=all)"
           }
           fetch_exact P f98de7fd79389ce340343292086c852825f59b60
-          fetch_exact H 14244f763caaaa32c93f4883107987899d9d2008
+          fetch_exact H 2bc072a264ad1e2b7a320c8df9967b672f53fa83
       - name: Run launcher negative and protocol tests without credentials
         if: steps.mode.outputs.gate == 'financial-reuse'
         timeout-minutes: 5

@@ -110,4 +110,65 @@ class NativeScrollAckTests(unittest.TestCase):
         self.assertIn('.value = op == SCROLL_UP ? -120.0 : 120.0',source[start:end])
         self.assertIn('(void)ack(c);',source[end:end+80])
 
+
+# Pure scheduling regressions: no product, UI, credentials or forged runtime proof.
+spec=importlib.util.spec_from_file_location('financial_completion_flow_tested',ROOT/'ci-financial-flow.py')
+F=importlib.util.module_from_spec(spec);sys.modules[spec.name]=F;spec.loader.exec_module(F)
+
+class CompletionSnapshotTests(unittest.TestCase):
+    def flow(self, kinds, *, failure_after_snapshot=False, expired_after_snapshot=False):
+        from unittest import mock
+        profile=F.C.EXTERNAL_PROFILE
+        def record(kind, sequence):
+            return dict(schema=1,profile=profile,role='Coordinator',sequence=sequence,
+                        elapsed_ns=sequence,kind=kind,facts={})
+        proof=[record(kind,i+1) for i,kind in enumerate(kinds)]
+        failure=record('Failure',len(proof)+1);failure['facts']={'code':'normal_finish'}
+        class Observer:
+            expected_profile=profile
+            generation=0
+            def read(self):
+                if self.generation and expired_after_snapshot:raise F.C.Rejected('deadline')
+                if not self.generation:return []
+                return proof+([failure] if failure_after_snapshot else [])
+            def next_snapshot(self, deadline):
+                self.generation+=1
+                return dict(phase='Finished',subphase='None',owner=None,
+                    view_generation=self.generation,focused=True,secret_input=False,
+                    host_input=False,pixels_per_point=1,viewport=[1280,800],
+                    widgets=[dict(tag='Close',owner=None,rect=[10,10,30,30],enabled=True)])
+        fixture=mock.Mock();fixture.deadline_ns=123
+        controller=mock.Mock()
+        return F.FullFlow(controller,fixture,Observer(),None),controller,proof
+    def test_finished_snapshot_refreshes_records_before_unchanged_native_guard(self):
+        flow,controller,proof=self.flow(('NormalFinishAdmitted','PtyHeld','PtyReleased','NormalFinished'))
+        flow.run()
+        self.assertEqual(flow.records,proof)
+        controller.terminal_click.assert_called_once_with(20,20)
+        controller.click.assert_not_called()
+        # Actual stable-frame checks remain in place before the sole Close.
+        self.assertEqual(flow.observer.generation,3)
+    def test_cancel_missing_or_duplicate_normal_proof_never_closes(self):
+        kinds=('NormalFinishAdmitted','PtyHeld','PtyReleased','NormalFinished')
+        cases=[()]+[kinds[:i]+kinds[i+1:] for i in range(4)]+[kinds+(kind,) for kind in kinds]
+        for case in cases:
+            with self.subTest(kinds=case):
+                flow,controller,_=self.flow(case)
+                with self.assertRaises(F.C.Rejected) as error:flow.run()
+                self.assertEqual(error.exception.code,'normal_finish')
+                controller.terminal_click.assert_not_called()
+                controller.click.assert_not_called()
+    def test_failure_arriving_during_snapshot_is_not_ignored(self):
+        flow,controller,_=self.flow(('NormalFinishAdmitted','PtyHeld','PtyReleased','NormalFinished'),failure_after_snapshot=True)
+        with self.assertRaises(F.C.Rejected) as error:flow.run()
+        self.assertEqual(error.exception.code,'observer_failure')
+        controller.terminal_click.assert_not_called()
+    def test_refresh_cannot_extend_original_observer_deadline(self):
+        flow,controller,_=self.flow(('NormalFinishAdmitted','PtyHeld','PtyReleased','NormalFinished'),expired_after_snapshot=True)
+        with self.assertRaises(F.C.Rejected) as error:flow.run()
+        self.assertEqual(error.exception.code,'deadline')
+        self.assertEqual(flow.fixture.deadline_ns,123)
+        controller.terminal_click.assert_not_called()
+
 if __name__=='__main__':unittest.main()
+

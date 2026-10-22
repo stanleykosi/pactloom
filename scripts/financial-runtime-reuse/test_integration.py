@@ -9,10 +9,10 @@ ROOT=HERE.parents[1]
 class IntegrationTests(unittest.TestCase):
  def test_concrete_plan_pins_and_exact_delta(self):
   plan=L.validate_plan(json.loads((HERE/'plan.json').read_text()))
-  self.assertEqual(plan['harness']['source'],'14244f763caaaa32c93f4883107987899d9d2008')
-  self.assertEqual(plan['harness']['source_tree'],'271ef0f3497d4e074592cde6318589035597f4ab')
+  self.assertEqual(plan['harness']['source'],'2bc072a264ad1e2b7a320c8df9967b672f53fa83')
+  self.assertEqual(plan['harness']['source_tree'],'c8aec3705293e36ad4be4c46a37b7b6973d11ced')
   self.assertEqual(plan['artifact_pins']['artifact_id'],12395613903)
-  self.assertEqual(set(plan['reviewed_runtime_changes']),{'scripts/ci-financial-controller.py','scripts/tests/test_ci_financial_observer.py'})
+  self.assertEqual(set(plan['reviewed_runtime_changes']),{'scripts/ci-financial-controller.py','scripts/ci-financial-flow.py','scripts/tests/test_ci_financial_observer.py'})
   self.assertNotIn('launcher',plan)
   for path,pin in plan['reviewed_runtime_changes'].items():
    data=(ROOT/path).read_bytes()
