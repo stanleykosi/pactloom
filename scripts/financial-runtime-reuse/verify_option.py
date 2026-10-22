@@ -23,6 +23,7 @@ PRODUCER=dict(repository='stanleykosi/pactloom',source='6f00b00454ba062bea40d1f1
 JOB_ID=119871612406
 # Exact existing runtime files, NOT a suffix/directory exclusion. Contract,
 # output projection, fixture profile/scenario, image and orchestration are fixed.
+# The contract diagnostic exception requires the separate exact v2 annex below.
 RUNTIME_ONLY=frozenset((
  'scripts/ci-financial-container.py',
  'scripts/ci-financial-fixture.py',
@@ -34,6 +35,10 @@ RUNTIME_ONLY=frozenset((
  'scripts/tests/test_ci_financial_fixture_diagnostics.py',
 ))
 
+
+# Separate diagnostic-only exception; never part of the original eight paths.
+# Exact reviewed mode-bound blobs only; AST review is offline evidence, not policy.
+DIAGNOSTIC_COMPATIBILITY={'version': 1, 'name': 'host-failure-diagnostic-v2', 'path': 'scripts/ci-financial-contract.py', 'producer_mode_sha256': '5aeb89f919fffab7eaeaf5d9a6bf99786a37d0ed92c3be970e38fd1380f46efa', 'harness_mode_sha256': 'db472f79cd73b101647c5dcd153425ec1ab98c2b53f97608093bfe4fe82635ed'}
 
 def require(ok,reason):
     if not ok:raise A.Rejected(reason)
@@ -68,11 +73,31 @@ def inventory_checkout(root,commit):
     return tree,result
 
 
-def equivalent(producer,current):
+def validate_diagnostic_compatibility(annex):
+    require(type(annex) is dict and set(annex)==set(DIAGNOSTIC_COMPATIBILITY),
+        'diagnostic_annex_schema')
+    require(type(annex['version']) is int and annex['version']==1,
+        'diagnostic_annex_version')
+    for key in set(annex)-{'version'}:
+        require(type(annex[key]) is str,'diagnostic_annex_type')
+    for key in ('producer_mode_sha256','harness_mode_sha256'):
+        require(A.SHA.fullmatch(annex[key]) is not None,'diagnostic_annex_digest')
+    require(annex==DIAGNOSTIC_COMPATIBILITY,'diagnostic_annex_pin')
+    return annex
+
+
+def equivalent(producer,current,diagnostic_compatibility=None):
     A.closure(producer);A.closure(current)
     require(set(producer)==set(current),'tracked_path_set')
     changed=sorted(name for name in producer if producer[name]!=current[name])
-    require(set(changed)<=RUNTIME_ONLY,'native_or_unreviewed_input_changed')
+    exceptions=set()
+    if diagnostic_compatibility is not None:
+        annex=validate_diagnostic_compatibility(diagnostic_compatibility)
+        path=annex['path']
+        require(path in changed and producer.get(path)==annex['producer_mode_sha256']
+            and current.get(path)==annex['harness_mode_sha256'],'diagnostic_annex_source')
+        exceptions.add(path)
+    require(set(changed)<=RUNTIME_ONLY|exceptions,'native_or_unreviewed_input_changed')
     # Empty change is valid; it does not imply runtime acceptance.
     return changed
 
@@ -92,7 +117,7 @@ def archive_digest(archive,pins):
     return digest
 
 
-def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventory,harness):
+def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventory,harness,diagnostic_compatibility=None):
     """Pins are independently reviewed API/log facts; never manifest-supplied.
 
     ZIP must contain exactly build.tar with independently pinned bytes.
@@ -127,12 +152,15 @@ def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventor
     require(harness['repository']==PRODUCER['repository'] and
         A.COMMIT.fullmatch(harness['source']) is not None and
         A.COMMIT.fullmatch(harness['source_tree']) is not None,'harness_identity')
-    changes=equivalent(producer_inventory,current_inventory)
+    changes=equivalent(producer_inventory,current_inventory,diagnostic_compatibility)
     require(not changes or (harness['source']!=PRODUCER['source'] and
         harness['source_tree']!=PRODUCER['source_tree']),'contradictory_harness_identity')
-    return dict(schema=1,native_producer=PRODUCER.copy(),harness=harness.copy(),
+    evidence=dict(schema=1 if diagnostic_compatibility is None else 2,native_producer=PRODUCER.copy(),harness=harness.copy(),
         original_manifest=original,current_source_inventory=current_inventory.copy(),
-        permitted_runtime_changes=changes,artifact_pins=pins.copy(),
+        permitted_runtime_changes=[name for name in changes if name in RUNTIME_ONLY],artifact_pins=pins.copy(),
         native_binaries_reused=True,native_binaries_freshly_compiled=False,
         runtime_verified=False,synthetic_full_native_verified=False,
         public_chain_verified=False,dispatch_requested=False)
+    if diagnostic_compatibility is not None:
+        evidence['diagnostic_compatibility']=diagnostic_compatibility.copy()
+    return evidence

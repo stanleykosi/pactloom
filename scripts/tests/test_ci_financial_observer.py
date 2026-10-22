@@ -258,6 +258,157 @@ class ClickRenderBoundaryTests(unittest.TestCase):
 spec=importlib.util.spec_from_file_location('financial_completion_flow_tested',ROOT/'ci-financial-flow.py')
 F=importlib.util.module_from_spec(spec);sys.modules[spec.name]=F;spec.loader.exec_module(F)
 
+
+class HostBoundaryDiagnosticV2Tests(unittest.TestCase):
+    def flow(self):
+        from unittest import mock
+        f=F.FullFlow(mock.Mock(),mock.Mock(),mock.Mock(expected_profile=F.C.EXTERNAL_PROFILE),None)
+        return f
+    def snap(self,entry='Idle',revision=1,end=10,coverage='whole'):
+        h=dict(revision=revision,nonws_end=end,context_valid=True,entry=entry,
+            editor=dict(ordinal=1,revision=revision) if entry=='Editing' else None,
+            view=None if coverage=='none' or entry!='Idle' else dict(rect=[10,10,110,30],nonws=end if coverage=='whole' else end-1,rows=1))
+        s=observed_snapshot(phase='Selecting',subphase='None',owner=None,view_generation=1,
+            focused=True,host_input=entry in ('Editing','Writing'),secret_input=False,
+            pixels_per_point=1,viewport=[1280,800],host_observation=h,widgets=[
+                dict(tag='HostOutput',owner=None,rect=[0,0,120,40],enabled=True)])
+        F.C.validate_snapshot(s);return s
+    def test_v1_unchanged_and_v2_unobserved_has_only_closed_fields(self):
+        old=dict(version=1,category='none',startup_stage='Financial',attempted_lines=4)
+        self.assertEqual(F.C.validate_host_diagnostic(old),old)
+        value=self.flow().host_diagnostic();F.C.validate_host_diagnostic(value)
+        self.assertEqual(value['observation'],dict(entry='Unobserved',context_valid=None,
+            pending_context='Unobserved',coverage='Unobserved',capture_outcome='Unobserved',capture_context='Unobserved'))
+    def test_current_pending_relation_is_projected_after_cached_idle(self):
+        f=self.flow();f.cache_host_observation(self.snap()['host_observation'])
+        self.assertEqual(f.host_diagnostic()['observation']['pending_context'],'NoPending')
+        f.pending_occurrence=(0,10,1);f.pending_host=('secret','NEVER_PRINT_ME')
+        self.assertEqual(f.host_diagnostic()['observation']['pending_context'],'Same')
+        f.pending_occurrence=(0,11,2)
+        self.assertEqual(f.host_diagnostic()['observation']['pending_context'],'Changed')
+        self.assertNotIn('NEVER_PRINT_ME',json.dumps(f.host_diagnostic()))
+    def test_cached_coverage_does_not_claim_prompt_completeness(self):
+        f=self.flow()
+        for coverage,expected in (('none','Unavailable'),('partial','TailSuffix'),('whole','WholeRetained')):
+            f.cache_host_observation(self.snap(coverage=coverage)['host_observation'])
+            self.assertEqual(f.host_diagnostic()['observation']['coverage'],expected)
+        f.host_capture_context=(1,10);f.host_capture_outcome='host_capture_grammar'
+        self.assertEqual(f.host_diagnostic()['observation']['capture_context'],'Same')
+        f.cache_host_observation(self.snap(revision=2,end=11)['host_observation'])
+        self.assertEqual(f.host_diagnostic()['observation']['capture_context'],'Changed')
+        f.host_capture_context=None
+        self.assertEqual(f.host_diagnostic()['observation']['capture_context'],'Unobserved')
+    def pending(self):
+        from unittest import mock
+        f=self.flow();s=self.snap('Editing',coverage='none')
+        f.host_lines=1;f.pending_host=('public','synthetic');f.pending_occurrence=(0,10,1)
+        f.startup_issued=f.pending_startup=0;f.cache_host_observation(s['host_observation'])
+        f.native=mock.Mock();f.native.check_host_editor=F.S.NativeScenario.check_host_editor
+        f.snapshot=mock.Mock(return_value=s);f.press=mock.Mock()
+        return f,s
+    def test_begin_request_return_boundaries_and_cached_pre_begin_context(self):
+        from unittest import mock
+        for fails in (True,False):
+            f=self.flow();s=self.snap();f.cache_host_observation(s['host_observation'])
+            f.host_prepared=((0,10,1),('public','synthetic'))
+            f.find=mock.Mock(return_value={'enabled':True});f.press=mock.Mock()
+            f.native.public_host_line=mock.Mock()
+            if fails:f.press.side_effect=F.C.Rejected('deadline')
+            if fails:
+                with self.assertRaises(F.C.Rejected):f.pump_host(s)
+            else:self.assertTrue(f.pump_host(s))
+            d=F.C.validate_host_diagnostic(f.host_diagnostic())
+            self.assertEqual(d['boundary']['action'],'BeginRequested' if fails else 'BeginReturned')
+            self.assertTrue(d['boundary']['pending_host']);self.assertEqual(d['observation']['pending_context'],'Same')
+            f.press.assert_called_once();f.native.public_host_line.assert_not_called()
+    def test_typing_submit_failures_never_claim_call_return_or_acceptance(self):
+        for stop,expected in (('typing','TypingRequested'),('snapshot','TypingReturned'),('submit','SubmitRequested'),('none','SubmitReturned')):
+            f,s=self.pending()
+            if stop=='typing':f.native.public_host_line.side_effect=F.C.Rejected('deadline')
+            elif stop=='snapshot':f.snapshot.side_effect=F.C.Rejected('deadline')
+            elif stop=='submit':f.press.side_effect=F.C.Rejected('deadline')
+            if stop!='none':
+                with self.assertRaises(F.C.Rejected):f.pump_host(s)
+            else:self.assertTrue(f.pump_host(s))
+            d=F.C.validate_host_diagnostic(f.host_diagnostic());b=d['boundary']
+            self.assertEqual(b['action'],expected);self.assertEqual(b['pending_host'],stop!='none')
+            self.assertEqual(b['startup_index'],1 if stop=='none' else 0)
+            self.assertEqual(b['waiting'],stop=='none')
+            self.assertEqual(d['observation']['entry'],'Editing') # cached, not claimed current
+            f.native.public_host_line.assert_called_once()
+    def test_submit_returned_persists_through_writing_until_observed_idle(self):
+        f,s=self.pending();f.pump_host(s)
+        writing=self.snap('Writing',coverage='none');f.cache_host_observation(writing['host_observation'])
+        self.assertTrue(f.pump_host(writing));self.assertEqual(f.host_diagnostic()['boundary']['action'],'SubmitReturned')
+        f.host_occurrences.frontier=10
+        idle=self.snap();f.cache_host_observation(idle['host_observation']);self.assertFalse(f.pump_host(idle))
+        self.assertEqual(f.host_diagnostic()['boundary']['action'],'NoPending');self.assertFalse(f.startup_waiting)
+    def test_successful_inspection_replaces_stale_grammar_without_fake_submission(self):
+        import test_ci_financial_host_context as T
+        f=T.PumpTests().make();f.text=': ';f.current['host_observation']=T.observation(f.text,1,T.H.count(T.PROMPT))
+        f.pump_host(f.current);self.assertEqual(f.host_capture_outcome,'host_capture_grammar')
+        f.text=T.PROMPT;f.current['host_observation']=T.observation(T.PROMPT);f.last_ocr=0
+        f.pump_host(f.current)
+        d=F.C.validate_host_diagnostic(f.host_diagnostic())
+        self.assertEqual(d['category'],'none');self.assertEqual(d['observation']['capture_outcome'],'Accepted')
+        self.assertEqual(d['boundary']['action'],'BeginReturned');self.assertTrue(d['boundary']['pending_host'])
+        self.assertEqual(f.inputs,['BeginHostLine'])
+    def test_capture_failure_does_not_reuse_prior_bound_context(self):
+        import test_ci_financial_host_context as T
+        f=T.PumpTests().make();f.host_capture_context=(1,1);f.host_capture_outcome='Accepted'
+        rejection=f.pump_host.__func__.__globals__['C'].Rejected
+        def failed(*a):raise rejection('snapshot')
+        f.native.capture_host=failed
+        with self.assertRaises(rejection):f.pump_host(f.current)
+        d=f.host_diagnostic()['observation'];self.assertEqual(d['capture_outcome'],'capture_guard')
+        self.assertEqual(d['capture_context'],'Unobserved')
+    def test_validator_rejects_unknown_keys_types_enums_bounds_and_payloads(self):
+        import copy
+        good=self.flow().host_diagnostic()
+        mutations=[((), 'version',v) for v in (True,0,3,'2')]
+        mutations += [((), 'raw_text','secret'),(('boundary',),'raw_path','/private'),(('observation',),'pixels',[])]
+        for key in ('startup_index','issued_index','pending_index'):
+            mutations += [(('boundary',),key,v) for v in (True,-2,14,'0',None)]
+        for key in ('pending_host','input_attempted','waiting'):
+            mutations += [(('boundary',),key,v) for v in (0,1,None,'secret')]
+        for key in ('action',):mutations += [(('boundary',),key,v) for v in (None,[],{},'secret')]
+        for key in ('entry','pending_context','coverage','capture_outcome','capture_context'):
+            mutations += [(('observation',),key,v) for v in (None,[],{},'secret')]
+        mutations += [(('observation',),'context_valid',v) for v in (True,False,0,'secret')]
+        for path,key,value in mutations:
+            bad=copy.deepcopy(good);target=bad
+            for component in path:target=target[component]
+            target[key]=value
+            with self.subTest(path=path,key=key,value=value):
+                with self.assertRaises(F.C.Rejected):F.C.validate_host_diagnostic(bad)
+        for section in ('boundary','observation'):
+            for key in good[section]:
+                bad=copy.deepcopy(good);del bad[section][key]
+                with self.assertRaises(F.C.Rejected):F.C.validate_host_diagnostic(bad)
+    def test_failure_projection_and_stdout_failure_make_no_new_observation(self):
+        from unittest import mock
+        f=self.flow();f.snapshot=mock.Mock(side_effect=AssertionError('new observation'))
+        container=F.load('ci-financial-container')
+        with mock.patch('builtins.print',side_effect=BrokenPipeError):container.emit_cached_host_failure(f)
+        f.snapshot.assert_not_called();self.assertEqual(f.controller.mock_calls,[])
+        F.C.validate_host_diagnostic(f.host_diagnostic())
+    def test_supervisor_v2_failure_only_duplicate_and_post_result_rejection(self):
+        import io,contextlib
+        supervisor=F.load('ci-financial-supervisor');d=self.flow().host_diagnostic()
+        line=b'CI_FINANCIAL_HOST_DIAGNOSTIC '+json.dumps(d).encode()
+        records=supervisor.RuntimeRecords('external');output=io.StringIO()
+        with contextlib.redirect_stdout(output):records(line)
+        self.assertEqual(output.getvalue(),'')
+        with self.assertRaises(supervisor.Failure):records(line)
+        records=supervisor.RuntimeRecords('external');records(line)
+        with contextlib.redirect_stdout(output):records(b'CI_FINANCIAL_RESULT '+json.dumps(supervisor.P.failure('deadline')).encode())
+        self.assertIn('HOST_DIAGNOSTIC',output.getvalue())
+        with self.assertRaises(supervisor.Failure):records(line)
+        records=supervisor.RuntimeRecords('external');records(line)
+        candidate=dict(schema=1,profile=supervisor.P.C.EXTERNAL_PROFILE,native_oracle_verified=True,
+            fixture_cleaned=True,display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)
+        with self.assertRaises(supervisor.Failure):records(b'CI_FINANCIAL_CANDIDATE '+json.dumps(candidate).encode())
+
 class CompletionSnapshotTests(unittest.TestCase):
     def flow(self, kinds, *, failure_after_snapshot=False, expired_after_snapshot=False):
         from unittest import mock

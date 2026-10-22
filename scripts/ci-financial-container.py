@@ -251,11 +251,10 @@ def emit_cached_progress_failure(flow):
 def emit_cached_host_failure(flow):
     if flow is None:return
     try:
-        value=dict(version=1,category=flow.host_rejection or 'none',
-                   startup_stage=flow.host_stage,attempted_lines=flow.host_lines)
+        value=flow.host_diagnostic()
         encoded=json.dumps(C.validate_host_diagnostic(value),separators=(',',':'))
-    except Exception:return
-    print('CI_FINANCIAL_HOST_DIAGNOSTIC '+encoded,flush=True)
+        print('CI_FINANCIAL_HOST_DIAGNOSTIC '+encoded,flush=True)
+    except Exception:return # best effort; preserve original failure and cleanup
 
 
 def main():

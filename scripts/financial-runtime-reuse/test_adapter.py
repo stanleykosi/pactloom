@@ -27,6 +27,15 @@ class AdapterTests(unittest.TestCase):
    with self.assertRaises(L.V.A.Rejected):L.validate_plan({**p,key:value})
   p['producer']['source']='b85e126eee1067a17f34b21e4abf1c3b767db166'
   with self.assertRaises(L.V.A.Rejected):L.validate_plan(p)
+ def test_versioned_diagnostic_annex_plan_exactness(self):
+  p=self.plan();self.assertEqual(L.validate_plan(p),p)
+  v2={**p,'version':2,'diagnostic_compatibility':L.V.DIAGNOSTIC_COMPATIBILITY.copy()}
+  self.assertEqual(L.validate_plan(v2),v2)
+  for changed in ({**p,'diagnostic_compatibility':v2['diagnostic_compatibility']},
+                  {**p,'version':2}, {**v2,'diagnostic_compatibility':None},
+                  {**v2,'version':True}, {**v2,'version':3},
+                  {**v2,'reviewed_runtime_changes':{L.V.DIAGNOSTIC_COMPATIBILITY['path']:'a'*64}}):
+   with self.assertRaises(L.V.A.Rejected):L.validate_plan(changed)
  def test_acquisition_credentials_never_accepted_in_runtime_process(self):
   with patch.dict(os.environ,{'PATH':'/bin'},clear=True):self.assertEqual(set(L.safe_environment()),
    {'PATH','HOME','GIT_CONFIG_NOSYSTEM','GIT_CONFIG_GLOBAL','GIT_TERMINAL_PROMPT'})
@@ -126,9 +135,13 @@ class AcquisitionTests(unittest.TestCase):
 
 class IdentityTests(unittest.TestCase):
  plan=AdapterTests.plan
- def identities(self,change=None):
+ def identities(self,change=None,diagnostic=False):
   plan=self.plan();p_inv={k:'a'*64 for k in L.V.RUNTIME_ONLY};p_inv['Cargo.lock']='b'*64
   h_inv={**p_inv,**plan['reviewed_runtime_changes']}
+  if diagnostic:
+   annex=L.V.DIAGNOSTIC_COMPATIBILITY.copy()
+   p_inv[annex['path']]=annex['producer_mode_sha256'];h_inv[annex['path']]=annex['harness_mode_sha256']
+   plan.update(version=2,diagnostic_compatibility=annex)
   if change:h_inv.update(change)
   mapping={str(pathlib.Path('/P')):(L.V.PRODUCER['source_tree'],p_inv),
            str(pathlib.Path('/H')):(plan['harness']['source_tree'],h_inv),
@@ -136,6 +149,12 @@ class IdentityTests(unittest.TestCase):
   with patch.dict(os.environ,{'GITHUB_SHA':'f'*40}),patch.object(L,'HERE',pathlib.Path('/L/scripts')), \
        patch.object(L,'safe_environment'),patch.object(L.V,'inventory_checkout',side_effect=lambda root,sha:mapping[str(root)]):
    return L.verify_sources(plan,'/P','/H','/L')
+ def test_version2_source_verification_keeps_runtime_hash_review_exact(self):
+  self.identities(diagnostic=True)
+  for changes in ({'Cargo.lock':'e'*64},
+                  {L.V.DIAGNOSTIC_COMPATIBILITY['path']:'e'*64},
+                  {'scripts/ci-financial-container.py':'e'*64}):
+   with self.assertRaises(L.V.A.Rejected):self.identities(changes,diagnostic=True)
  def test_native_change_cannot_hide_in_separate_launcher_identity(self):
   self.identities()
   for changes in ({'Cargo.lock':'e'*64},{'new-adapter.py':'e'*64},

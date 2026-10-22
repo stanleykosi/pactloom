@@ -16,6 +16,7 @@ class Tests(unittest.TestCase):
    'scripts/build-encrypted-storage-deps.sh','scripts/ci-financial-supervisor.py',
    'scripts/ci-financial-artifacts.py','scripts/ci-financial-image.py',
    'scripts/ci-financial-weston-module.c','.github/workflows/durable-native-linux.yml')})
+  self.inventory[V.DIAGNOSTIC_COMPATIBILITY['path']]=V.DIAGNOSTIC_COMPATIBILITY['producer_mode_sha256']
   self.bundle=self.root/'build.tar';V.A.export_bundle(self.inputs,self.bundle,V.PRODUCER,self.inventory)
   self.archive=self.root/'download.zip'
   with zipfile.ZipFile(self.archive,'w') as z:z.write(self.bundle,'build.tar')
@@ -85,5 +86,47 @@ class Tests(unittest.TestCase):
   original=V.A.verify_bundle(self.bundle,V.PRODUCER,self.inventory)
   old=dict(V.PRODUCER,source=old_source,source_tree='1b4df59f4e2e664cad33440a947645e66424e410',run_id=39704950389)
   with self.assertRaises(V.A.Rejected):V.A.validate_manifest(original,old,self.inventory)
+
+
+ def test_diagnostic_annex_is_explicit_exact_and_separate(self):
+  annex=V.DIAGNOSTIC_COMPATIBILITY.copy();path=annex['path']
+  current={**self.inventory,path:annex['harness_mode_sha256']}
+  self.assertEqual(len(V.RUNTIME_ONLY),8);self.assertNotIn(path,V.RUNTIME_ONLY)
+  with self.assertRaises(V.A.Rejected):V.equivalent(self.inventory,current)
+  self.assertEqual(V.equivalent(self.inventory,current,annex),[path])
+  result=self.qualify(current_inventory=current,diagnostic_compatibility=annex)
+  self.assertEqual(result['schema'],2);self.assertEqual(result['permitted_runtime_changes'],[])
+  self.assertEqual(result['diagnostic_compatibility'],annex)
+  self.assertEqual(result['original_manifest']['closure'],self.inventory)
+  self.assertFalse(result['runtime_verified']);self.assertFalse(result['native_binaries_freshly_compiled'])
+ def test_diagnostic_annex_rejects_unknown_missing_and_unpinned(self):
+  annex=V.DIAGNOSTIC_COMPATIBILITY.copy()
+  for key in annex:
+   for changed in ({k:v for k,v in annex.items() if k!=key},
+                   {**annex,key:'0'*64}, {**annex,key:None}):
+    with self.assertRaises(V.A.Rejected):V.validate_diagnostic_compatibility(changed)
+  swapped={**annex,'producer_mode_sha256':annex['harness_mode_sha256'],
+   'harness_mode_sha256':annex['producer_mode_sha256']}
+  for changed in ({**annex,'extra':False},{**annex,'version':True},swapped,[],None):
+   with self.assertRaises(V.A.Rejected):V.validate_diagnostic_compatibility(changed)
+ def test_annex_binds_both_mode_bound_contract_blobs(self):
+  annex=V.DIAGNOSTIC_COMPATIBILITY.copy();path=annex['path']
+  current={**self.inventory,path:annex['harness_mode_sha256']}
+  for p,h in (({**self.inventory,path:'e'*64},current),
+              (self.inventory,{**current,path:'e'*64}), (self.inventory,self.inventory)):
+   with self.assertRaises(V.A.Rejected):V.equivalent(p,h,annex)
+  # Mode-only edits change the bound blob digest and are not annex-authorized.
+  contract=(pathlib.Path(__file__).resolve().parents[2]/path).read_bytes()
+  self.assertEqual(hashlib.sha256(b'100644\0'+contract).hexdigest(),annex['harness_mode_sha256'])
+  altered=hashlib.sha256(b'100755\0'+contract).hexdigest()
+  with self.assertRaises(V.A.Rejected):V.equivalent(self.inventory,{**current,path:altered},annex)
+ def test_annex_does_not_admit_other_paths_or_inventory_changes(self):
+  annex=V.DIAGNOSTIC_COMPATIBILITY.copy();path=annex['path']
+  current={**self.inventory,path:annex['harness_mode_sha256']}
+  for name in set(self.inventory)-V.RUNTIME_ONLY-{path}:
+   with self.assertRaises(V.A.Rejected):V.equivalent(self.inventory,{**current,name:'e'*64},annex)
+  for changed in ({**current,'scripts/extra-diagnostic.py':'e'*64},
+                  {k:v for k,v in current.items() if k!='Cargo.lock'}):
+   with self.assertRaises(V.A.Rejected):V.equivalent(self.inventory,changed,annex)
 
 if __name__=='__main__':unittest.main()
