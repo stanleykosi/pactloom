@@ -36,6 +36,7 @@ def load(name, filename):
 B = load('financial_bootstrap_supervisor', 'ci-bootstrap-supervisor.py')
 I = load('financial_image', 'ci-financial-image.py')
 P = load('financial_output', 'ci-financial-external-output.py')
+A = load('financial_artifacts', 'ci-financial-artifacts.py')
 OCR = load('financial_ocr_preflight', 'ci-financial-ocr-image.py')
 BASE = I.BASE_IMAGE
 LABEL = 'org.wholepact.financial-run'
@@ -420,6 +421,60 @@ def build_recipe(name):
     return args
 
 
+def export_compiled_artifacts(artifacts, sha):
+    # Host-only output established before any container/fixture starts. This
+    # directory is never mounted into a container. No environment dump or logs.
+    exact_source(sha)
+    require(A.RECIPE['rustc'] == B.RUSTC and A.RECIPE['coordinator_features'] == FEATURE
+            and A.RECIPE['artifact_features'] == FEATURES,
+            'compile', 'artifact_bundle')
+    tree = checked(['git', 'rev-parse', 'HEAD^{tree}'], 'source', limit=128).strip().decode('ascii')
+    rows = checked(['git', 'ls-tree', '-rz', '--full-tree', 'HEAD'], 'source', limit=16 * 1024 * 1024)
+    inventory = {}
+    for row in rows.split(b'\0'):
+        if not row:
+            continue
+        fields, path = row.split(b'\t', 1)
+        mode, kind, oid = fields.split(b' ')
+        require(mode in (b'100644', b'100755') and kind == b'blob', 'compile', 'artifact_bundle')
+        name = path.decode('ascii')
+        require(name not in inventory and not name.startswith('/') and
+                all(part not in ('', '.', '..') for part in name.split('/')), 'compile', 'artifact_bundle')
+        file = REPO / name
+        meta = file.lstat()
+        require(stat.S_ISREG(meta.st_mode) and meta.st_nlink == 1 and meta.st_size <= 64 * 1024 * 1024,
+                'compile', 'artifact_bundle')
+        # Bind file mode as well as content. Tree/source IDs remain explicit.
+        digest = hashlib.sha256(mode + b'\0')
+        with file.open('rb') as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        inventory[name] = digest.hexdigest()
+    producer = dict(repository=os.environ['GITHUB_REPOSITORY'], source=sha, source_tree=tree,
+                    run_id=int(os.environ['GITHUB_RUN_ID']), attempt=int(os.environ['GITHUB_RUN_ATTEMPT']))
+    destination = pathlib.Path(os.environ['RUNNER_TEMP']) / (
+        'wholepact-financial-build-' + str(producer['run_id']) + '-' + str(producer['attempt']))
+    destination.mkdir(mode=0o700, exist_ok=False)
+    bundle = destination / 'build.tar'
+    try:
+        A.export_bundle(artifacts, bundle, producer, inventory)
+        exact_source(sha)
+        digest = hashlib.sha256()
+        with bundle.open('rb') as stream:
+            digest = hashlib.file_digest(stream, 'sha256')
+        output = os.environ['GITHUB_OUTPUT']
+        with open(output, 'a', encoding='ascii') as stream:
+            stream.write('artifact_bundle_ready=true\n')
+        emit('BUILD_BUNDLE', dict(source=sha, source_tree=tree, run_id=producer['run_id'],
+            attempt=producer['attempt'], sha256=digest.hexdigest(), size=bundle.stat().st_size,
+            artifacts=list(A.NAMES), pre_credential=True, reused=False, uploaded=False))
+    except Exception:
+        # Never mark an incomplete bundle uploadable. Only this fresh directory.
+        shutil.rmtree(destination)
+        raise Failure('compile', 'artifact_bundle') from None
+
+
+
 def build_inputs(root, sha):
     package_preflight()
     inputs=root/'artifacts';inputs.mkdir()
@@ -449,6 +504,7 @@ def build_inputs(root, sha):
     require(pin(inputs/'coordinator-production')['sha256'] != pin(inputs/'coordinator-observed')['sha256'],
             'compile','artifact_profile')
     exact_source(sha)
+    export_compiled_artifacts(inputs,sha)
     build_context=root/'context'
     args=[sys.executable,'-I','-B',str(HERE/'ci-financial-image.py'),'--output',str(build_context),'--source-commit',sha]
     for name in I.ARTIFACT_FILES:args+=['--'+name,str(inputs/name)]
@@ -580,8 +636,16 @@ def inspect_isolation(name, token, mode, image_id, sha):
     isolation(mode, 'ulimits', ok, 'core_0_nofile_512', 'core_0_nofile_512' if ok else 'different_or_invalid')
 
 
+FIXTURE_PHASES = frozenset(('child_identity','child_directory','child_exec','core_policy','wait_policy',
+    'cutoff','parent_directory','temporary_root','tls_material','child_stage','cleanup','cleanup_record','completion'))
+FIXTURE_REASONS = frozenset(('Setup','Unclassified','Deadline','ChildObservation','ChildExit','PollIo',
+    'ReadIo','OutputLimit','IncompleteUtf8','InvalidUtf8','MultilineInput','WriteIo','FlushIo',
+    'MissingPathMarker','InvalidPath','InvalidChallenge','OutcomeRead','CleanupUnverified',
+    'FinancialPhaseDeadline','FinancialProgressInvalid'))
+
+
 class RuntimeRecords:
-    def __init__(self,mode):self.mode,self.first_failure,self.result,self.location=mode,None,None,None
+    def __init__(self,mode):self.mode,self.first_failure,self.result,self.location,self.fixture_diagnostic=mode,None,None,None,None
     def __call__(self,line):
         require(type(line) is bytes and 0<len(line)<=8192 and self.result is None,'projection','result_records')
         if line.startswith(b'CI_FINANCIAL_LOCATION '):
@@ -591,12 +655,24 @@ class RuntimeRecords:
                     and type(value['subphase']) is str and value['subphase'] in P.C.SUBPHASES
                     and value['owner'] in (None,'Signer1','Signer2'), 'projection','result_schema')
             self.location=value;emit('LOCATION',value)
+        elif line.startswith(b'CI_FINANCIAL_FIXTURE_DIAGNOSTIC '):
+            value=loads(line[len(b'CI_FINANCIAL_FIXTURE_DIAGNOSTIC '):])
+            require(self.fixture_diagnostic is None and type(value) is dict
+                    and set(value)=={'version','phase','reason','next','expected','process_cleanup','root_cleanup'}
+                    and type(value['version']) is int and value['version']==1
+                    and type(value['phase']) is str and value['phase'] in FIXTURE_PHASES
+                    and type(value['reason']) is str and value['reason'] in FIXTURE_REASONS
+                    and type(value['next']) is int and type(value['expected']) is int
+                    and 0<=value['next']<=value['expected']<=4096
+                    and type(value['process_cleanup']) is bool and type(value['root_cleanup']) is bool,
+                    'projection','result_schema')
+            self.fixture_diagnostic=value;emit('FIXTURE_DIAGNOSTIC',value)
         elif line.startswith(b'CI_FINANCIAL_CANDIDATE '):
             value=loads(line[len(b'CI_FINANCIAL_CANDIDATE '):])
             expected=dict(schema=1,profile=P.C.EXTERNAL_PROFILE,native_oracle_verified=True,
                           fixture_cleaned=True,display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)
             require(type(value) is dict and value==expected and all(type(value[k]) is type(v) for k,v in expected.items())
-                    and self.first_failure is None and self.location is None,'projection','result_schema');self.result=value
+                    and self.first_failure is None and self.location is None and self.fixture_diagnostic is None,'projection','result_schema');self.result=value
         elif line.startswith(b'CI_FINANCIAL_RESULT '):
             value=loads(line[len(b'CI_FINANCIAL_RESULT '):])
             require(type(value) is dict and value==P.failure(value.get('code')),'projection','result_schema')

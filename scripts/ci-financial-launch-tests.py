@@ -49,6 +49,7 @@ class LaunchTests(unittest.TestCase):
             def checked(args,stage,**kwargs):
                 return (S.B.RUSTC+'\n').encode() if '--version' in args else b''
             with patch.object(S,'checked',side_effect=checked),patch.object(S,'exact_source'), \
+                 patch.object(S,'export_compiled_artifacts'), \
                  patch.object(S,'encrypted_build_environment',side_effect=lambda root,env:env), \
                  patch.object(S,'build_command',side_effect=command),patch.object(S,'select_artifact',side_effect=artifact), \
                  contextlib.redirect_stdout(io.StringIO()):
@@ -73,6 +74,97 @@ class LaunchTests(unittest.TestCase):
             with self.assertRaises(S.Failure):S.select_artifact(raw+b'\n'+raw,'coordinator-production',target)
             row['features']=['coordinated-witness-delivery-append']
             with self.assertRaises(S.Failure):S.select_artifact(json.dumps(row).encode(),'coordinator-production',target)
+
+    def diagnostic(self,**changes):
+        value=dict(version=1,phase='child_stage',reason='ChildExit',next=2,expected=4,
+                   process_cleanup=True,root_cleanup=True)
+        value.update(changes)
+        return b'CI_FINANCIAL_FIXTURE_DIAGNOSTIC '+json.dumps(value).encode()
+
+    def test_fixture_diagnostic_closed_typed_once_and_failure_only(self):
+        for change in ({'version':True},{'phase':'private path'}, {'reason':'private error'},
+                       {'next':True},{'next':-1},{'next':5},{'expected':4097},
+                       {'process_cleanup':1},{'root_cleanup':None},{'secret':'private'}):
+            with self.assertRaises(S.Failure):
+                S.RuntimeRecords('external')(self.diagnostic(**change))
+        records=S.RuntimeRecords('external')
+        with contextlib.redirect_stdout(io.StringIO()):records(self.diagnostic())
+        with self.assertRaises(S.Failure):records(self.diagnostic())
+        with self.assertRaises(S.Failure):records(self.candidate())
+        with self.assertRaises(S.Failure):records.finish(0)
+        failure=b'CI_FINANCIAL_RESULT '+json.dumps(S.P.failure('fixture')).encode()
+        with contextlib.redirect_stdout(io.StringIO()):records(failure)
+        self.assertEqual(records.finish(1),S.P.failure('fixture'))
+        with self.assertRaises(S.Failure):records(self.diagnostic())
+
+    def test_exact_source_rejects_stale_or_dirty_checkout(self):
+        for outputs,reason in (([b'b'*40+b'\n'],'source_commit'),
+                               ([b'a'*40+b'\n',b' M Cargo.lock\n'],'dirty_source'),
+                               ([b'a'*40+b'\n',b'?? private-input\n'],'dirty_source')):
+            with patch.object(S,'checked',side_effect=outputs):
+                with self.assertRaises(S.Failure) as raised:S.exact_source('a'*40)
+                self.assertEqual(raised.exception.check,reason)
+
+    def test_financial_bundle_recipe_matches_actual_build(self):
+        self.assertEqual(S.A.RECIPE['coordinator_features'],S.FEATURE)
+        self.assertEqual(S.A.RECIPE['rustc'],S.B.RUSTC)
+        self.assertEqual(S.A.RECIPE['observed_rustflags'],
+                         '--cfg wholepact_financial_ci --cfg wholepact_financial_external_ci')
+        for name in S.A.NAMES:
+            args=S.build_recipe(name)
+            self.assertEqual(args[args.index('--features')+1],S.A.RECIPE[
+                'setup_features' if name=='pristine-setup' else 'coordinator_features'])
+        self.assertEqual(S.A.RECIPE['artifact_features'],S.FEATURES)
+
+    def test_bundle_preserved_outside_cleaned_build_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base=pathlib.Path(tmp);repo=base/'source';repo.mkdir()
+            (repo/'Cargo.lock').write_bytes(b'fabricated lock')
+            build=base/'ephemeral-build';build.mkdir();inputs=build/'artifacts';inputs.mkdir()
+            for name in S.A.NAMES:(inputs/name).write_bytes(b'\x7fELFfabricated '+name.encode())
+            output=base/'github-output';output.touch()
+            env=dict(RUNNER_TEMP=str(base),GITHUB_REPOSITORY='stanleykosi/pactloom',
+                     GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1',GITHUB_OUTPUT=str(output))
+            rows=b'100644 blob '+b'c'*40+b'\tCargo.lock\0'
+            with patch.dict(S.os.environ,env),patch.object(S,'REPO',repo), \
+                 patch.object(S,'exact_source') as guard, \
+                 patch.object(S,'checked',side_effect=[b'b'*40+b'\n',rows]), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                S.export_compiled_artifacts(inputs,'a'*40)
+                self.assertEqual(guard.call_count,2)
+            S.shutil.rmtree(build)
+            bundle=base/'wholepact-financial-build-123-1'/'build.tar'
+            self.assertTrue(bundle.is_file())
+            self.assertEqual(output.read_text(),'artifact_bundle_ready=true\n')
+            expected={'Cargo.lock':S.hashlib.sha256(b'100644\0fabricated lock').hexdigest()}
+            value=S.A.verify_bundle(bundle,dict(repository='stanleykosi/pactloom',source='a'*40,
+                    source_tree='b'*40,run_id=123,attempt=1),expected)
+            self.assertEqual(set(value['files']),set(S.A.NAMES))
+
+    def test_failed_bundle_never_marks_upload_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base=pathlib.Path(tmp);repo=base/'source';repo.mkdir()
+            (repo/'Cargo.lock').write_bytes(b'fabricated lock')
+            output=base/'github-output';output.touch()
+            env=dict(RUNNER_TEMP=str(base),GITHUB_REPOSITORY='stanleykosi/pactloom',
+                     GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1',GITHUB_OUTPUT=str(output))
+            rows=b'100644 blob '+b'c'*40+b'\tCargo.lock\0'
+            with patch.dict(S.os.environ,env),patch.object(S,'REPO',repo), \
+                 patch.object(S,'exact_source'), \
+                 patch.object(S,'checked',side_effect=[b'b'*40+b'\n',rows]), \
+                 patch.object(S.A,'export_bundle',side_effect=S.A.Rejected('file_set')):
+                with self.assertRaises(S.Failure) as raised:S.export_compiled_artifacts(base/'inputs','a'*40)
+            self.assertEqual(raised.exception.check,'artifact_bundle')
+            self.assertEqual(output.read_text(),'')
+            self.assertFalse((base/'wholepact-financial-build-123-1').exists())
+
+    def test_all_financial_tests_are_mandatory_before_compile(self):
+        launcher=(HERE/'ci-financial-linux.sh').read_text()
+        discovery="python3 -I -B -m unittest discover -s scripts/tests -p 'test_ci_financial*.py'"
+        self.assertEqual(launcher.count(discovery),1)
+        self.assertLess(launcher.index(discovery),launcher.index('exec python3'))
+        self.assertIn('set -euo pipefail',launcher)
+        self.assertNotIn('|| true',launcher)
 
     def candidate(self,**changes):
         value=dict(schema=1,profile=S.P.C.EXTERNAL_PROFILE,native_oracle_verified=True,
@@ -138,5 +230,7 @@ class LaunchTests(unittest.TestCase):
         self.assertIn("always() && steps.mode.outputs.gate == 'financial-ui'",workflow)
         self.assertEqual(workflow.count('run: bash scripts/ci-financial-linux.sh'),1)
         self.assertEqual(workflow.count('run: bash scripts/ci-ui-linux.sh'),1)
+        self.assertIn("always() && steps.mode.outputs.gate == 'financial-ui' && steps.financial.outputs.artifact_bundle_ready == 'true'",workflow)
+        self.assertIn('wholepact-financial-build-${{ github.run_id }}-${{ github.run_attempt }}/build.tar',workflow)
 
 if __name__=='__main__':unittest.main()

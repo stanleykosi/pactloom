@@ -35,6 +35,31 @@ PARENT_SELECTOR=('host::manual_enrollment::command::roster_publication_v2::seque
  'qualification::durable_proposal_v1::coordinated_full_fixture_v1::coordinator_live_full_financial_fixture_parent')
 READY=b'CI_FINANCIAL_FIXTURE_READY version=1'
 CLEANED=b'CI_FINANCIAL_FIXTURE_CLEANED version=1'
+DIAGNOSTIC=b'CI_FINANCIAL_FIXTURE_DIAGNOSTIC '
+FIXTURE_PHASES=frozenset(('child_identity','child_directory','child_exec','core_policy','wait_policy',
+    'cutoff','parent_directory','temporary_root','tls_material','child_stage','cleanup','cleanup_record','completion'))
+FIXTURE_REASONS=frozenset(('Setup','Unclassified','Deadline','ChildObservation','ChildExit','PollIo','ReadIo',
+    'OutputLimit','IncompleteUtf8','InvalidUtf8','MultilineInput','WriteIo','FlushIo','MissingPathMarker',
+    'InvalidPath','InvalidChallenge','OutcomeRead','CleanupUnverified','FinancialPhaseDeadline','FinancialProgressInvalid'))
+
+def fixture_diagnostic(line):
+    """Only a complete exact closed diagnostic can cross the private stdout boundary."""
+    C.require(type(line) is bytes and line.startswith(DIAGNOSTIC) and len(line)<=2048,'fixture')
+    value=C.loads(line[len(DIAGNOSTIC):],2048)
+    C.exact(value,('version','phase','reason','next','expected','process_cleanup','root_cleanup'))
+    C.require(type(value['version']) is int and value['version']==1 and
+        type(value['phase']) is str and value['phase'] in FIXTURE_PHASES and
+        type(value['reason']) is str and value['reason'] in FIXTURE_REASONS and
+        type(value['next']) is int and type(value['expected']) is int and
+        0<=value['next']<=value['expected']<=4096 and
+        type(value['process_cleanup']) is bool and type(value['root_cleanup']) is bool,'fixture')
+    return value
+
+def emit_fixture_diagnostic(value):
+    # Re-encode validated fields, never echo the source line or exception.
+    value=fixture_diagnostic(DIAGNOSTIC+json.dumps(value,separators=(',',':')).encode('utf-8'))
+    print(DIAGNOSTIC.decode('ascii')+json.dumps(value,separators=(',',':')),flush=True)
+
 OCR_SHA='74b76a5b994adcc18be362bf64ed5118082b2401d5d9a35242e92fc4c62e2b4b'
 RUNTIME_FILES=('ci-financial-container.py','ci-financial-flow.py','ci-financial-scenario.py',
  'ci-financial-contract.py','ci-financial-fixture.py','ci-financial-controller.py',
@@ -127,7 +152,7 @@ def write_account(base,home,*,initial=False):
 
 class FixtureParent:
     def __init__(self,deadline):
-        self.deadline=deadline;self.pending=bytearray();self.total=0;self.process=None
+        self.deadline=deadline;self.pending=bytearray();self.total=0;self.process=None;self.diagnostic=None
         # Root does not create/chown inside the UID-only fixture tmpfs. The
         # exact child creates its TMPDIR under its already assigned identity.
         self.process=subprocess.Popen(['/usr/local/bin/python3','-I','-B',str(ROOT/'ci-financial-container.py'),'fixture-child'],
@@ -151,7 +176,13 @@ class FixtureParent:
                 self.total+=len(block);C.require(self.total<=1024*1024,'record_limit');self.pending.extend(block)
                 while b'\n' in self.pending:
                     line,_,tail=self.pending.partition(b'\n');self.pending=bytearray(tail)
-                    if line.rstrip(b'\r')==marker:return
+                    line=bytes(line.rstrip(b'\r'))
+                    if line.startswith(DIAGNOSTIC):
+                        C.require(self.diagnostic is None,'fixture')
+                        self.diagnostic=fixture_diagnostic(line)
+                        emit_fixture_diagnostic(self.diagnostic)
+                        C.require(False,'fixture')
+                    if line==marker:return
     def finish(self,normal):
         C.require(self.process.poll() is None,'cleanup')
         line=b'FINISH\n' if normal else b'CANCEL\n'
@@ -192,10 +223,18 @@ class NativeSession:
         self.controller.finish_after_product(status,min(self.deadline,time.monotonic_ns()+5_000_000_000))
 
 def fixture_child():
-    C.require(os.getresuid()==(UID,UID,UID) and os.getresgid()==(UID,UID,UID) and not os.getgroups(),'process')
-    FIXTURE.mkdir(mode=0o700)
-    os.execve(ROOT/'pristine-setup',[str(ROOT/'pristine-setup'),'--exact',PARENT_SELECTOR,'--ignored','--nocapture','--test-threads=1'],
-              {'PATH':'/usr/bin:/bin','TMPDIR':str(FIXTURE),'LANG':'C.UTF-8','RUST_BACKTRACE':'0'})
+    phase='child_identity'
+    try:
+        C.require(os.getresuid()==(UID,UID,UID) and os.getresgid()==(UID,UID,UID) and not os.getgroups(),'process')
+        phase='child_directory'
+        FIXTURE.mkdir(mode=0o700)
+        phase='child_exec'
+        os.execve(ROOT/'pristine-setup',[str(ROOT/'pristine-setup'),'--exact',PARENT_SELECTOR,'--ignored','--nocapture','--test-threads=1'],
+                  {'PATH':'/usr/bin:/bin','TMPDIR':str(FIXTURE),'LANG':'C.UTF-8','RUST_BACKTRACE':'0'})
+    except BaseException:
+        emit_fixture_diagnostic({'version':1,'phase':phase,'reason':'Setup','next':0,'expected':0,
+                                 'process_cleanup':False,'root_cleanup':False})
+        raise SystemExit(1) from None
 
 def main():
     if sys.argv[1:]==['fixture-child']:fixture_child();return

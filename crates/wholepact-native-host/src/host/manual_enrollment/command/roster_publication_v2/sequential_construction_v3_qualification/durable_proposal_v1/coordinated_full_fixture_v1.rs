@@ -9,6 +9,9 @@ use delivery_admission_v2::OriginalDisclosureV2;
 
 pub(super) const READY_FILE: &str = "coordinated-financial-pre-v3-fixture-v1.json";
 const MAX_HANDOFF: usize = 1024 * 1024;
+// Container TMPDIR is longer than /tmp. Retain the same private parent and
+// random suffix, but leave room for native Unix-domain socket endpoints.
+const FULL_ROOT_PREFIX: &str = "f-";
 const PASSWORD: &[u8] = b"synthetic-recovery-review-password";
 const SOURCE_PASSWORD: &[u8] = b"PUBLIC-NEVER-FUNDED-BORN-ROSTER-QUALIFICATION";
 
@@ -337,34 +340,56 @@ fn coordinator_full_financial_fixture_parent() { run_full_fixture_parent(false);
 #[ignore = "Approved isolated disposable live original Witness operator fixture only"]
 fn coordinator_live_full_financial_fixture_parent() { run_full_fixture_parent(true); }
 
+// Only compile-time phase/reason tokens and bounded input counters leave this
+// parent. Never serialize an io::Error, transcript, challenge, or source record.
 fn run_full_fixture_parent(live_external_witness: bool) {
+    let mut phase = "core_policy";
+    let mut reason = String::from("Setup");
+    let mut next = 0usize;
+    let mut expected = 0usize;
+    let mut process_cleanup = false;
+    let mut root_cleanup = false;
     let result = (|| -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         process_containment_v1::require_and_report_core_policy()?;
+        phase = "wait_policy";
         owned_test_process_group_v1::require_default_child_wait_policy()?;
         // One cutoff precedes ALL source, TLS, birth, proof and native setup.
+        phase = "cutoff";
         let started = Instant::now();
         let cutoff_ns = monotonic_ns()?.checked_add(900_000_000_000)
             .ok_or_else(|| std::io::Error::other("full fixture cutoff overflow"))?;
         let deadline = started.checked_add(ORIGINAL_LIMIT)
             .ok_or_else(|| std::io::Error::other("full fixture cutoff overflow"))?;
+        phase = "parent_directory";
         let (base, base_handle) = parent_directory()?;
+        phase = "temporary_root";
         let root = owned_test_process_group_v1::PreSpawnTemporaryRootV1::new(
-            tempfile::Builder::new().prefix("full-original-")
+            tempfile::Builder::new().prefix(FULL_ROOT_PREFIX)
                 .permissions(std::fs::Permissions::from_mode(0o700)).tempdir_in(&base)?,
         );
+        phase = "tls_material";
         let tls = synthetic_provider_tls_v1::ChildTlsMaterialV1::prepare(root.path())?;
         let inputs = full_fixture_inputs();
+        phase = "child_stage";
+        expected = inputs.len();
         let mut stage = private_workspace_stage_v1(
             root.into_tempdir(), Some(&tls), if live_external_witness {PrivateWorkspaceStageV1::CoordinatedLiveFixture} else {PrivateWorkspaceStageV1::CoordinatedFixture},
             &inputs, deadline, cutoff_ns,
         )?;
         drop(tls);
+        next = stage.next;
+        expected = stage.expected;
+        reason = format!("{:?}", stage.failure_reason);
+        phase = "cleanup";
         let cleanup_verified = stage.process.verified();
         let root_removed = if let Some(root) = stage.root.take() {
             matches!(close_owned_temporary_root(root), TemporaryRootCleanupV1::ClosedAndAbsenceVerified)
         } else { false };
-        if !cleanup_verified || !root_removed || stage.child_pid == 0 { return Err(std::io::Error::other("full fixture cleanup unverified")); }
+        process_cleanup = cleanup_verified;
+        root_cleanup = root_removed;
+        if !cleanup_verified || !root_removed || stage.child_pid == 0 { reason = "CleanupUnverified".into(); return Err(std::io::Error::other("full fixture cleanup unverified")); }
+        phase = "cleanup_record";
         // The caller owns the parent directory and its inert ready pointer.
         // Do not remove an artifact if publication failed before ownership was
         // established. Its pointed-to actual child root is proven absent here.
@@ -379,13 +404,25 @@ fn run_full_fixture_parent(live_external_witness: bool) {
         write_new_private(&base.join("coordinated-financial-cleanup-v1.json"), &cleanup)
             .map_err(|_|std::io::Error::other("fixture cleanup evidence refused"))?;
         base_handle.sync_all()?;
-        println!("CI_FINANCIAL_FIXTURE_CLEANED version=1");
-        std::io::stdout().flush()?;
+        phase = "completion";
         if stage.outcome.is_err() || stage.next != stage.expected || Instant::now() >= deadline {
+            if stage.outcome.is_err() || stage.next != stage.expected { phase = "child_stage"; }
+            else { reason = "Deadline".into(); }
             return Err(std::io::Error::other("full fixture preparation or original lifetime failed"));
         }
+        println!("CI_FINANCIAL_FIXTURE_CLEANED version=1");
+        std::io::stdout().flush()?;
         Ok(())
     })();
+    if result.is_err() {
+        // A leading newline separates this marker from libtest's progress text.
+        println!("\nCI_FINANCIAL_FIXTURE_DIAGNOSTIC {}", serde_json::json!({
+            "version": 1, "phase": phase, "reason": reason,
+            "next": next, "expected": expected,
+            "process_cleanup": process_cleanup, "root_cleanup": root_cleanup,
+        }));
+        let _ = std::io::stdout().flush();
+    }
     assert!(result.is_ok(), "genuine full fixture parent failed");
 }
 
@@ -396,4 +433,56 @@ fn full_fixture_marker_requires_complete_inputs_and_one_complete_line() {
     assert!(ready_marker(&line, true, false).unwrap());
     assert!(ready_marker(&line, false, false).is_err());
     assert!(ready_marker(&(line.clone()+&line), true, true).is_err());
+}
+
+#[test]
+fn full_fixture_container_layout_fits_native_unix_socket_paths() {
+    use std::os::unix::ffi::OsStrExt;
+    let candidate = |outer: &str, inner: &str| {
+        Path::new("/ci-fixture/full-parent")
+            .join(format!("{outer}aaaaaa"))
+            .join(format!("{inner}bbbbbb"))
+            .join(format!("requests-{}.sock", hex::encode([0u8; 12])))
+    };
+    // Reproduce the exact prior layout; Linux sockaddr_un has 108 bytes,
+    // including the terminating NUL. This was not covered by /tmp-only tests.
+    assert_eq!(candidate("full-original-", "wholepact-born-manual-ipc-")
+        .as_os_str().as_bytes().len(), 116);
+    for inner in ["wholepact-born-manual-ipc-", "wholepact-born-stop-", ".tmp"] {
+        assert!(candidate(FULL_ROOT_PREFIX, inner).as_os_str().as_bytes().len() < 108);
+    }
+    assert!(full_fixture_inputs().len() <= 4096);
+}
+
+#[test]
+fn full_fixture_container_layout_bind_rejects_old_and_accepts_short_private_root() {
+    use std::os::unix::{fs::{DirBuilderExt, MetadataExt, PermissionsExt},
+        ffi::OsStrExt, net::UnixListener};
+    // Same byte length as the actual container base, without needing to create
+    // or weaken /ci-fixture locally. All directories are owned fresh and 0700.
+    let base = tempfile::Builder::new().prefix("wp-ci-binds-")
+        .permissions(std::fs::Permissions::from_mode(0o700)).tempdir_in("/tmp").unwrap();
+    assert_eq!(base.path().as_os_str().as_bytes().len(),
+        Path::new("/ci-fixture/full-parent").as_os_str().as_bytes().len());
+    for (prefix, should_bind) in [("full-original-", false), (FULL_ROOT_PREFIX, true)] {
+        let endpoint = base.path().join(format!("{prefix}aaaaaa"))
+            .join("wholepact-born-manual-ipc-bbbbbb");
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&endpoint).unwrap();
+        for directory in [endpoint.as_path(), endpoint.parent().unwrap(), base.path()] {
+            let metadata = std::fs::symlink_metadata(directory).unwrap();
+            assert!(metadata.is_dir());
+            assert_eq!(metadata.mode() & 0o777, 0o700);
+            assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        }
+        let socket = endpoint.join(format!("requests-{}.sock", hex::encode([0u8; 12])));
+        let result = UnixListener::bind(&socket);
+        if should_bind {
+            let listener = result.expect("short private fixture layout must support native pathname sockets");
+            assert_eq!(listener.local_addr().unwrap().as_pathname(), Some(socket.as_path()));
+            assert_eq!(std::fs::symlink_metadata(&socket).unwrap().uid(), unsafe { libc::geteuid() });
+            drop(listener);
+        } else {
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
 }

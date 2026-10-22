@@ -120,11 +120,23 @@ jobs:
         run: |
           echo 'Historical CI70 seven bootstrap reap/lifetime prerequisites were reused only after exact source/Cargo/script closure and original job checks. They were not rerun on this image. The new foundation and isolated actual UI gate passed. CI70 remains failed at image installation. The eight packet/credential fault results are historical individual CI69 evidence, not rerun or current-image qualification; CI69 remains failed. One unfunded synthetic fixture was reused for cancel, blur/refocus and at most one authenticated synthetic journal append. Historical CI64 financial evidence is unchanged, not revalidated. No public-chain settlement, deployment, funded wallet or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
       - name: Fresh isolated two-signer financial UI (external pre-V3 native Witness)
+        id: financial
         if: steps.mode.outputs.gate == 'financial-ui'
         timeout-minutes: 200
         shell: bash
         working-directory: source
         run: bash scripts/ci-financial-linux.sh
+      - name: Preserve exact credential-free compiled financial bundle
+        if: always() && steps.mode.outputs.gate == 'financial-ui' && steps.financial.outputs.artifact_bundle_ready == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: financial-build-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/wholepact-financial-build-${{ github.run_id }}-${{ github.run_attempt }}/build.tar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 1
+          overwrite: false
+          include-hidden-files: false
       - name: Verify financial containers, temporary images and build cache removed
         if: always() && steps.mode.outputs.gate == 'financial-ui'
         timeout-minutes: 5
