@@ -237,6 +237,17 @@ def fixture_child():
                                  'process_cleanup':False,'root_cleanup':False})
         raise SystemExit(1) from None
 
+def emit_cached_progress_failure(flow):
+    # Only called on failure. No fresh observation or private record is emitted.
+    # A rejected diagnostic must not replace the original failure result.
+    if flow is None:return
+    try:
+        value=C.cached_progress_diagnostic(flow.records,flow.expected_profile)
+        encoded=json.dumps(C.validate_progress_diagnostic(value),separators=(',',':'))
+    except Exception:return
+    print('CI_FINANCIAL_PROGRESS_DIAGNOSTIC '+encoded,flush=True)
+
+
 def main():
     if sys.argv[1:]==['fixture-child']:fixture_child();return
     C.require(not sys.argv[1:],'contract')
@@ -262,10 +273,11 @@ def main():
     except BaseException as error:
         code=getattr(error,'code','process')
         flow=getattr(session,'flow',None)
-        # LOCATION is the last validated nonterminal observation only; omit it
+        # LOCATION is the last validated main-loop nonterminal checkpoint only; omit it
         # when none was observed. It does not identify the terminal cause.
         if flow is not None and flow.location is not None:
             print('CI_FINANCIAL_LOCATION '+json.dumps(flow.location,separators=(',',':')),flush=True)
+        emit_cached_progress_failure(flow)
         # No raw exception/path/Host output escapes. Outer owner destroys whole
         # isolated namespace on failure; never report rescue cleanup as normal.
         print('CI_FINANCIAL_RESULT '+json.dumps(OUT.failure(code),separators=(',',':')),flush=True)

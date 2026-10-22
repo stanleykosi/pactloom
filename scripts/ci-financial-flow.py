@@ -236,7 +236,7 @@ class FullFlow:
     def run(self):
         while True:
             s=self.snapshot();phase=s['phase'];owner=s['owner'];target=self.current_owner()
-            # Failure LOCATION is the last validated nonterminal observation,
+            # Failure LOCATION is the last validated main-loop nonterminal checkpoint,
             # not the current terminal state or an attribution of its cause.
             if phase not in ('Revoked','Finished'):
                 self.location={'phase':phase,'subphase':s['subphase'],'owner':owner}

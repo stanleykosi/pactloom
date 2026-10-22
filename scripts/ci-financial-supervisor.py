@@ -646,7 +646,7 @@ FIXTURE_REASONS = frozenset(('Setup','Unclassified','Deadline','ChildObservation
 
 
 class RuntimeRecords:
-    def __init__(self,mode):self.mode,self.first_failure,self.result,self.location,self.fixture_diagnostic=mode,None,None,None,None
+    def __init__(self,mode):self.mode,self.first_failure,self.result,self.location,self.fixture_diagnostic=mode,None,None,None,None;self.progress_diagnostic=None
     def __call__(self,line):
         require(type(line) is bytes and 0<len(line)<=8192 and self.result is None,'projection','result_records')
         if line.startswith(b'CI_FINANCIAL_LOCATION '):
@@ -668,16 +668,26 @@ class RuntimeRecords:
                     and type(value['process_cleanup']) is bool and type(value['root_cleanup']) is bool,
                     'projection','result_schema')
             self.fixture_diagnostic=value;emit('FIXTURE_DIAGNOSTIC',value)
+        elif line.startswith(b'CI_FINANCIAL_PROGRESS_DIAGNOSTIC '):
+            require(self.progress_diagnostic is None,'projection','result_schema')
+            value=loads(line[len(b'CI_FINANCIAL_PROGRESS_DIAGNOSTIC '):])
+            try:P.C.validate_progress_diagnostic(value)
+            except Exception:raise Failure('projection','result_schema') from None
+            # Hold until a failed RESULT; never publish this as success evidence.
+            self.progress_diagnostic=value
         elif line.startswith(b'CI_FINANCIAL_CANDIDATE '):
             value=loads(line[len(b'CI_FINANCIAL_CANDIDATE '):])
             expected=dict(schema=1,profile=P.C.EXTERNAL_PROFILE,native_oracle_verified=True,
                           fixture_cleaned=True,display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)
             require(type(value) is dict and value==expected and all(type(value[k]) is type(v) for k,v in expected.items())
-                    and self.first_failure is None and self.location is None and self.fixture_diagnostic is None,'projection','result_schema');self.result=value
+                    and self.first_failure is None and self.location is None and self.fixture_diagnostic is None
+                    and self.progress_diagnostic is None,'projection','result_schema');self.result=value
         elif line.startswith(b'CI_FINANCIAL_RESULT '):
             value=loads(line[len(b'CI_FINANCIAL_RESULT '):])
             require(type(value) is dict and value==P.failure(value.get('code')),'projection','result_schema')
-            self.first_failure=value;self.result=value;emit('FAILURE',value)
+            self.first_failure=value;self.result=value
+            if self.progress_diagnostic is not None:emit('PROGRESS_DIAGNOSTIC',self.progress_diagnostic)
+            emit('FAILURE',value)
         else:raise Failure('projection','result_records')
     def finish(self,status):
         require(self.result is not None,'projection','result_records')

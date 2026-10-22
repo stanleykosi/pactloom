@@ -161,3 +161,46 @@ def validate_record(record, expected_profile=PROFILE):
     else:
         raise Rejected('record_shape')
     return record
+
+# Failure-only diagnostic, not oracle evidence. Array order is fixed by these
+# tuples; 2 means at least two observations, never two successful operations.
+# Missing counts describe the last cached observation only, not nonexecution.
+# Phase counts are frame observations only: no order, duration or cause.
+DIAGNOSTIC_PHASES=tuple(sorted(PHASES))
+NORMAL_DIAGNOSTIC_STEPS=('NormalFinishAdmitted','PtyHeld','PtyReleased','NormalFinished')
+
+def validate_progress_diagnostic(value):
+    exact(value,('version','signer_counts','host_counts','normal_counts','phase_counts'))
+    require(type(value['version']) is int and value['version']==1,'record_shape')
+    rows=value['signer_counts']
+    require(type(rows) is list and len(rows)==2,'record_shape')
+    for row,size in [(rows[0],len(SIGNER_STEPS)),(rows[1],len(SIGNER_STEPS)),
+                     (value['host_counts'],len(HOST_STEPS)),
+                     (value['normal_counts'],len(NORMAL_DIAGNOSTIC_STEPS)),
+                     (value['phase_counts'],len(DIAGNOSTIC_PHASES))]:
+        require(type(row) is list and len(row)==size and
+                all(type(count) is int and 0<=count<=2 for count in row),'record_shape')
+    return value
+
+def cached_progress_diagnostic(records,expected_profile):
+    """Project only validated cached records; no reads, waits or clock changes."""
+    require(expected_profile in (PROFILE,EXTERNAL_PROFILE),'record_shape')
+    require(type(records) is list and len(records)<=MAX_RECORDS,'record_limit')
+    value={'version':1,'signer_counts':[[0]*len(SIGNER_STEPS) for _ in range(2)],
+           'host_counts':[0]*len(HOST_STEPS),'normal_counts':[0]*len(NORMAL_DIAGNOSTIC_STEPS),
+           'phase_counts':[0]*len(DIAGNOSTIC_PHASES)}
+    for record in records:
+        validate_record(record,expected_profile)
+        kind,facts=record['kind'],record['facts']
+        if kind=='SignerMilestone':
+            row=value['signer_counts'][('Signer1','Signer2').index(facts['owner'])]
+            index=SIGNER_STEPS.index(facts['step'])
+        elif kind=='HostMilestone':
+            row=value['host_counts'];index=HOST_STEPS.index(facts['step'])
+        elif kind=='UiSnapshot':
+            row=value['phase_counts'];index=DIAGNOSTIC_PHASES.index(facts['phase'])
+        elif kind in NORMAL_DIAGNOSTIC_STEPS:
+            row=value['normal_counts'];index=NORMAL_DIAGNOSTIC_STEPS.index(kind)
+        else:continue
+        row[index]=min(2,row[index]+1)
+    return validate_progress_diagnostic(value)
