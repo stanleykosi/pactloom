@@ -82,8 +82,35 @@ class FullFlow:
         self.startup_focus_seen=False;self.startup_focus_waits=0
         self.host_occurrences=H.HostOccurrences();self.pending_occurrence=None;self.host_rejection=None;self.host_stage='Unobserved';self.host_visibility_steps=0;self.host_deferred=None;self.host_ignored=None;self.host_prepared=None;self.host_coverage_context=None;self.host_coverage_steps=0
         self.last_phase=None;self.search_direction='up';self.search_geometry=None
+        self.host_action='Unobserved';self.host_observed=None
+        self.host_capture_outcome='Unobserved';self.host_capture_context=None
+    def cache_host_observation(self,h):
+        # Called only after existing validated snapshot/capture operations.
+        # No text, paths, geometry or input values are retained here.
+        view=h['view']
+        coverage='Unavailable' if view is None else ('WholeRetained' if view['nonws']==h['nonws_end'] else 'TailSuffix')
+        self.host_observed=(h['entry'],h['context_valid'],(h['revision'],h['nonws_end']),coverage)
+    def host_diagnostic(self):
+        # Failure-only projection of LAST VALIDATED observations, never current
+        # native state or proof of acceptance. No new observation or I/O.
+        cached=self.host_observed;pending=self.pending_occurrence
+        observed_context=None if cached is None else cached[2]
+        pending_context=('Unobserved' if cached is None else 'NoPending' if pending is None
+                         else 'Same' if observed_context==(pending[2],pending[1]) else 'Changed')
+        capture_context=('Unobserved' if observed_context is None or self.host_capture_context is None
+                         else 'Same' if observed_context==self.host_capture_context else 'Changed')
+        return dict(version=2,category=self.host_rejection or 'none',startup_stage=self.host_stage,
+            attempted_lines=self.host_lines,boundary=dict(action=self.host_action,startup_index=self.startup_index,
+                issued_index=-1 if self.startup_issued is None else self.startup_issued,
+                pending_index=-1 if self.pending_startup is None else self.pending_startup,
+                pending_host=self.pending_host is not None,input_attempted=self.startup_input_attempted,
+                waiting=self.startup_waiting),observation=dict(entry='Unobserved' if cached is None else cached[0],
+                context_valid=None if cached is None else cached[1],pending_context=pending_context,
+                coverage='Unobserved' if cached is None else cached[3],capture_outcome=self.host_capture_outcome,
+                capture_context=capture_context))
     def snapshot(self):
         self.fixture.check();snapshot=self.native.snapshot()
+        self.cache_host_observation(snapshot['host_observation'])
         # next_snapshot may observe later records while awaiting a fresh frame.
         # Refresh AFTER that read: Finished is not normal-completion proof, and
         # the exact native proof guard must not receive a pre-frame record set.
@@ -350,10 +377,14 @@ class FullFlow:
                 C.require(not self.startup_input_attempted,'replay')
                 self.startup_input_attempted=True
             kind,value=self.pending_host
+            self.host_action='TypingRequested'
             if kind=='secret':self.native.protected_input(s['phase'],s['owner'],'HostEditor',self.fixture.secret('host'),occurrence)
             else:self.native.public_host_line(s['phase'],s['owner'],value,occurrence)
+            self.host_action='TypingReturned'
             fresh=self.snapshot()
+            self.host_action='SubmitRequested'
             self.press(fresh,'HostSubmit',None,ordinal=self.host_lines)
+            self.host_action='SubmitReturned'
             if self.pending_startup is not None:self.startup_submitted()
             self.pending_host=None;self.pending_occurrence=None;return True
         if self.startup_waiting:
@@ -372,6 +403,7 @@ class FullFlow:
             self.controller.wait_render_progress();return True
         if s['secret_input']:return False
         if not h['context_valid'] or h['entry']!='Idle':return False
+        self.host_action='NoPending'
         if self.host_prepared is not None:
             occurrence,line=self.host_prepared
             C.require(context==(occurrence[2],occurrence[1]),'input_phase')
@@ -382,7 +414,9 @@ class FullFlow:
             self.host_occurrences.latch(occurrence)
             self.pending_host=line;self.pending_occurrence=occurrence;self.host_prepared=None
             if self.startup_index<len(HOST_STARTUP):self.pending_startup=self.startup_index
-            self.press(s,'BeginHostLine',None,ordinal=self.host_lines);return True
+            self.host_action='BeginRequested'
+            self.press(s,'BeginHostLine',None,ordinal=self.host_lines)
+            self.host_action='BeginReturned';return True
         # Source review navigation must not be stolen by stale or already
         # inspected nonprompt output. Readiness cannot renew consumed bytes.
         if h['nonws_end']<=self.host_occurrences.frontier:return False
@@ -408,13 +442,17 @@ class FullFlow:
             self.last_ocr=time.monotonic_ns()
             try:text,observed=self.native.capture_host(s['phase'],s['owner'],self.ocr)
             except C.Rejected:
-                self.host_rejection='capture_guard';raise
+                self.host_rejection='capture_guard'
+                self.host_capture_outcome='capture_guard';self.host_capture_context=None
+                raise
+            self.cache_host_observation(observed)
+            self.host_capture_context=(observed['revision'],observed['nonws_end'])
             digest=(observed['revision'],observed['nonws_end'],hashlib.sha256(text.encode()).digest())
             self.ocr_delay=min(8_000_000_000,self.ocr_delay*2) if digest==self.last_capture else 1_000_000_000
             self.last_capture=digest
             try:occurrence,suffix=self.host_occurrences.inspect(text,observed)
             except H.HostContextRejected as error:
-                self.host_rejection=error.code
+                self.host_rejection=error.code;self.host_capture_outcome=error.code
                 if error.code in ('host_occurrence_replay','host_capture_grammar'):
                     self.host_ignored=(observed['revision'],observed['nonws_end'],observed['view']['nonws'])
                     if (error.code=='host_capture_grammar' and observed['view']['nonws']<observed['nonws_end']
@@ -425,6 +463,7 @@ class FullFlow:
                         return self.seek_host_coverage(s)
                     return False
                 raise C.Rejected('snapshot') from None
+            self.host_capture_outcome='Accepted';self.host_rejection=None
             self.host_coverage_context=None
             self.host_deferred=(occurrence,suffix)
         self.host_stage=H.stage(suffix)

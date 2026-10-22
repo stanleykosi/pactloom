@@ -232,10 +232,27 @@ def cached_progress_diagnostic(records,expected_profile):
 # Failure-only harness observations, never native milestones or success evidence.
 HOST_DIAGNOSTIC_CATEGORIES=frozenset(('none','tail_not_visible','capture_guard','host_context','host_capture_changed','host_capture_count','host_capture_grammar','host_occurrence_replay','host_entry_changed','host_capture_limit'))
 HOST_DIAGNOSTIC_STAGES=frozenset(('Unobserved','Profile','Workspace','Storage','Financial','Enrollment','Commands','Operational','Approval'))
+HOST_DIAGNOSTIC_ACTIONS=frozenset(('Unobserved','NoPending','BeginRequested','BeginReturned','TypingRequested','TypingReturned','SubmitRequested','SubmitReturned'))
+HOST_DIAGNOSTIC_ENTRIES=frozenset(('Unobserved','Idle','Editing','Writing','Closed'))
+HOST_DIAGNOSTIC_COVERAGE=frozenset(('Unobserved','Unavailable','TailSuffix','WholeRetained'))
 def validate_host_diagnostic(value):
-    exact(value,('version','category','startup_stage','attempted_lines'))
-    require(type(value['version']) is int and value['version']==1)
+    require(type(value) is dict and type(value.get('version')) is int and value['version'] in (1,2))
+    keys=('version','category','startup_stage','attempted_lines')
+    exact(value,keys if value['version']==1 else (*keys,'boundary','observation'))
     require(type(value['category']) is str and value['category'] in HOST_DIAGNOSTIC_CATEGORIES)
     require(type(value['startup_stage']) is str and value['startup_stage'] in HOST_DIAGNOSTIC_STAGES)
     require(integer(value['attempted_lines'],0,128))
+    if value['version']==2:
+        b=value['boundary'];o=value['observation']
+        exact(b,('action','startup_index','issued_index','pending_index','pending_host','input_attempted','waiting'))
+        exact(o,('entry','context_valid','pending_context','coverage','capture_outcome','capture_context'))
+        require(type(b['action']) is str and b['action'] in HOST_DIAGNOSTIC_ACTIONS)
+        require(integer(b['startup_index'],0,13) and integer(b['issued_index'],-1,12) and integer(b['pending_index'],-1,12))
+        require(all(type(b[k]) is bool for k in ('pending_host','input_attempted','waiting')))
+        require(type(o['entry']) is str and o['entry'] in HOST_DIAGNOSTIC_ENTRIES)
+        require(o['context_valid'] is None if o['entry']=='Unobserved' else type(o['context_valid']) is bool)
+        require(type(o['pending_context']) is str and o['pending_context'] in ('Unobserved','NoPending','Same','Changed'))
+        require(type(o['coverage']) is str and o['coverage'] in HOST_DIAGNOSTIC_COVERAGE)
+        require(type(o['capture_outcome']) is str and o['capture_outcome'] in (HOST_DIAGNOSTIC_CATEGORIES|{'Unobserved','Accepted'}))
+        require(type(o['capture_context']) is str and o['capture_context'] in ('Unobserved','Same','Changed'))
     return value
