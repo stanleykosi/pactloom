@@ -699,3 +699,167 @@ if __name__=='__main__':unittest.main()
 
 
 
+
+class PairedAdmissionTests(unittest.TestCase):
+    def test_both_native_review_sides_precede_either_arm_for_each_owner(self):
+        from unittest import mock
+        native=(ROOT.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
+        self.assertIn('consent.read == [true; 2] && consent.acknowledged == [true; 2]',native)
+        self.assertIn('both && !self.signer_arm_sent',native)
+        self.assertIn('both && !self.witness_arm_sent',native)
+        for owner in ('Signer1','Signer2'):
+            with self.subTest(owner=owner):
+                flow=F.FullFlow(mock.Mock(),mock.Mock(),mock.Mock(),None)
+                flow.startup_index=len(F.HOST_STARTUP) # paired admission is post-startup
+                flow.pump_host=lambda s:False
+                ack=[False,False];reads=[0,0];events=[];frames=[0]
+                arms=('ArmSigner','ArmWitness');acks=('SignerReviewAcknowledgement','WitnessReviewAcknowledgement')
+                bodies=('SignerReviewBody','WitnessReviewBody')
+                class End(Exception):pass
+                def snapshot():
+                    frames[0]+=1
+                    if frames[0]>24 or all(x in events for x in arms):raise End()
+                    enabled=all(ack) and reads[0]>=2 and reads[1]>=3
+                    return dict(phase='AdmissionReview',subphase='None',owner=owner,focused=True,secret_input=False,host_input=False,
+                        widgets=[dict(tag=t,owner=owner,enabled=enabled if t in arms else True) for t in (*acks,*bodies,*arms)])
+                def press(s,tag,role,**kw):
+                    self.assertEqual(role,owner)
+                    if tag in arms:self.assertTrue(all(ack) and reads[0]>=2 and reads[1]>=3,'no early arm')
+                    else:ack[acks.index(tag)]=True
+                    self.assertNotIn(tag,events);events.append(tag)
+                    flow.done.add(flow.key(s,tag,role)+(None,))
+                def scroll(s,body,role,*args):
+                    self.assertEqual(role,owner);reads[bodies.index(body)]+=1;events.append(body);return True
+                flow.snapshot=snapshot;flow.press=press;flow.scroll=scroll
+                with self.assertRaises(End):flow.run()
+                self.assertEqual(events,[*acks,bodies[0],bodies[1],bodies[0],bodies[1],bodies[0],bodies[1],*arms])
+
+    def test_missing_wrong_owner_ack_is_sought_not_armed(self):
+        from unittest import mock
+        flow=F.FullFlow(mock.Mock(),mock.Mock(),mock.Mock(),None)
+        s=dict(phase='AdmissionReview',subphase='None',owner='Signer1',widgets=[
+            dict(tag='SignerReviewAcknowledgement',owner='Signer2',enabled=True)])
+        flow.seek=mock.Mock();flow.press=mock.Mock();flow.scroll=mock.Mock()
+        flow.paired_admission(s,'Signer1')
+        flow.seek.assert_called_once_with(s,'SignerReviewAcknowledgement','Signer1')
+        flow.press.assert_not_called();flow.scroll.assert_not_called()
+    def test_disabled_arm_never_sent_and_review_bound_not_renewed(self):
+        from unittest import mock
+        flow=F.FullFlow(mock.Mock(),mock.Mock(),mock.Mock(),None)
+        owner='Signer2';s=dict(phase='AdmissionReview',subphase='None',owner=owner,
+            widgets=[dict(tag=t,owner=owner,enabled=False) for t in ('ArmSigner','ArmWitness')])
+        for tag in ('SignerReviewAcknowledgement','WitnessReviewAcknowledgement'):
+            flow.done.add(flow.key(s,tag,owner)+(None,))
+        flow.scrolls[('AdmissionReview','None','paired-review',owner)]=256
+        flow.press=mock.Mock();flow.scroll=mock.Mock()
+        with self.assertRaises(F.C.Rejected):flow.paired_admission(s,owner)
+        flow.press.assert_not_called();flow.scroll.assert_not_called()
+    def test_consumed_arms_not_repeated(self):
+        from unittest import mock
+        flow=F.FullFlow(mock.Mock(),mock.Mock(),mock.Mock(),None)
+        owner='Signer1';s=dict(phase='AdmissionReview',subphase='None',owner=owner,widgets=[])
+        for tag in ('SignerReviewAcknowledgement','WitnessReviewAcknowledgement','ArmSigner','ArmWitness'):
+            flow.done.add(flow.key(s,tag,owner)+(None,))
+        flow.press=mock.Mock();flow.scroll=mock.Mock();flow.seek=mock.Mock()
+        flow.paired_admission(s,owner)
+        flow.press.assert_not_called();flow.scroll.assert_not_called();flow.seek.assert_not_called()
+
+    def test_disjoint_arm_and_body_crops_complete_pending_scroll_before_reseeking_arm(self):
+        from unittest import mock
+        flow=F.FullFlow(mock.Mock(),mock.Mock(),mock.Mock(),None)
+        owner='Signer1';view=['arm'];reads=[0,0];events=[]
+        bodies=('SignerReviewBody','WitnessReviewBody');arms=('ArmSigner','ArmWitness')
+        base=dict(phase='AdmissionReview',subphase='None',owner=owner)
+        for tag in ('SignerReviewAcknowledgement','WitnessReviewAcknowledgement'):
+            flow.done.add(flow.key(base,tag,owner)+(None,))
+        def seek(s,tag,role):view[0]='arm' if tag in arms else tag;events.append('seek:'+tag);return False
+        def scroll(s,body,role):
+            if view[0]!=body:return False
+            reads[bodies.index(body)]+=1;events.append('scroll:'+body);return True
+        def press(s,tag,role):
+            self.assertTrue(all(reads));events.append(tag);flow.done.add(flow.key(s,tag,role)+(None,))
+        flow.seek=seek;flow.scroll=scroll;flow.press=press
+        for _ in range(20):
+            widgets=([dict(tag=t,owner=owner,enabled=all(reads)) for t in arms] if view[0]=='arm' else
+                     [dict(tag=view[0],owner=owner,enabled=True)])
+            flow.paired_admission(base|dict(widgets=widgets),owner)
+        self.assertEqual([e for e in events if e in arms],list(arms))
+        self.assertEqual(reads,[1,1])
+
+class ReviewViewportTests(unittest.TestCase):
+    def test_actual_body_scroll_completes_between_disjoint_action_crops(self):
+        from unittest import mock
+        for ack in ('ReviewAcknowledgement',None):
+            with self.subTest(ack=ack):
+                flow=F.FullFlow(mock.Mock(),mock.Mock(),mock.Mock(),None)
+                owner='Signer1';view=['action'];reads=[0];events=[]
+                base=dict(phase='ReturnReadReview',subphase='None',owner=owner,secret_input=False,host_input=False)
+                if ack:flow.done.add(flow.key(base,ack,owner)+(None,))
+                def seek(s,tag,role):view[0]='action' if tag=='ReturnRead' else 'body';events.append('seek:'+tag);return False
+                def scroll(s,body,role):
+                    if view[0]!='body':return False
+                    reads[0]+=1;events.append('scroll');return True
+                def press(s,tag,role):
+                    self.assertGreaterEqual(reads[0],2);events.append(tag)
+                    flow.done.add(flow.key(s,tag,role)+(None,))
+                flow.seek=seek;flow.scroll=scroll;flow.press=press
+                for _ in range(16):
+                    w=dict(tag='ReturnRead' if view[0]=='action' else 'ReviewBody',owner=owner,enabled=reads[0]>=2 if view[0]=='action' else True)
+                    flow.review(base|dict(widgets=[w]),'ReturnRead',owner,ack=ack)
+                self.assertEqual(reads,[2]);self.assertEqual(events.count('ReturnRead'),1)
+
+    def test_protected_context_never_seeks_scrolls_acknowledges_or_arms(self):
+        from unittest import mock
+        for protected in ('secret_input','host_input'):
+            flow=F.FullFlow(mock.Mock(),mock.Mock(),mock.Mock(),None)
+            s=dict(phase='ReturnReadReview',subphase='None',owner='Signer1',secret_input=False,host_input=False,widgets=[])
+            s[protected]=True;flow.scroll=mock.Mock();flow.seek=mock.Mock();flow.press=mock.Mock()
+            self.assertFalse(flow.review(s,'ReturnRead','Signer1'))
+            flow.scroll.assert_not_called();flow.seek.assert_not_called();flow.press.assert_not_called()
+    def test_pending_body_is_context_keyed_and_disabled_body_waits(self):
+        from unittest import mock
+        flow=F.FullFlow(mock.Mock(),mock.Mock(),mock.Mock(),None)
+        base=dict(phase='ReturnReadReview',subphase='None',owner='Signer1',secret_input=False,host_input=False)
+        action=dict(tag='ReturnRead',owner='Signer1',enabled=False)
+        flow.scroll=mock.Mock(return_value=False);flow.seek=mock.Mock();flow.press=mock.Mock()
+        flow.review(base|dict(widgets=[action]),'ReturnRead','Signer1',ack=None)
+        pending=('ReturnReadReview','None','review-scroll-pending','ReturnRead','Signer1','ReviewBody')
+        self.assertIn(pending,flow.scrolls)
+        flow.scroll.reset_mock();flow.seek.reset_mock()
+        body=dict(tag='ReviewBody',owner='Signer1',enabled=False)
+        self.assertFalse(flow.review(base|dict(widgets=[body]),'ReturnRead','Signer1',ack=None))
+        flow.scroll.assert_not_called();flow.seek.assert_not_called();flow.press.assert_not_called()
+        for changes in ({'phase':'SignReadReview'},{'subphase':'ReadReview'},{'owner':'Signer2'}):
+            changed=base|changes|dict(widgets=[]);flow.seek.reset_mock()
+            flow.review(changed,'ReturnRead',changed['owner'],ack=None)
+            flow.seek.assert_called_once_with(changed,'ReturnRead',changed['owner'])
+        self.assertIn(pending,flow.scrolls) # old context never interpreted as current work
+    def test_run_discards_pending_scrolls_when_context_changes(self):
+        from unittest import mock
+        for field,value in (('phase','SignReadReview'),('subphase','ReadReview'),('owner','Signer2')):
+            flow=F.FullFlow(mock.Mock(),mock.Mock(),mock.Mock(),None)
+            base=dict(phase='ReturnReadReview',subphase='None',owner='Signer1',secret_input=False,host_input=False,widgets=[])
+            flow.startup_index=len(F.HOST_STARTUP);base['focused']=True
+            snapshots=iter((base,base|{field:value}));flow.snapshot=lambda:next(snapshots)
+            flow.pump_host=lambda s:False;calls=[]
+            class End(Exception):pass
+            def review(s,action,owner):
+                if calls:
+                    self.assertEqual(flow.scrolls,{})
+                    raise End()
+                flow.scrolls[('old-context','pending')]=1;calls.append(s.copy())
+            flow.review=review
+            with self.assertRaises(End):flow.run()
+    def test_real_ack_attempt_precedes_body_scroll_and_enabled_action(self):
+        from unittest import mock
+        flow=F.FullFlow(mock.Mock(),mock.Mock(),mock.Mock(),None)
+        base=dict(phase='ReturnReadReview',subphase='None',owner='Signer1',secret_input=False,host_input=False)
+        events=[]
+        def press(s,tag,owner):
+            events.append(tag);flow.done.add(flow.key(s,tag,owner)+(None,))
+        flow.press=press;flow.seek=lambda s,t,o:events.append('seek:'+t)
+        flow.scroll=lambda s,b,o:events.append('scroll:'+b) or True
+        flow.review(base|dict(widgets=[dict(tag='ReviewAcknowledgement',owner='Signer1',enabled=True)]),'ReturnRead','Signer1')
+        flow.review(base|dict(widgets=[dict(tag='ReturnRead',owner='Signer1',enabled=False),dict(tag='ReviewBody',owner='Signer1',enabled=True)]),'ReturnRead','Signer1')
+        flow.review(base|dict(widgets=[dict(tag='ReturnRead',owner='Signer1',enabled=True)]),'ReturnRead','Signer1')
+        self.assertEqual(events,['ReviewAcknowledgement','scroll:ReviewBody','ReturnRead'])

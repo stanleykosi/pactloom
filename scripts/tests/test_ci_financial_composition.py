@@ -31,19 +31,21 @@ class ComposedStartupTests(unittest.TestCase):
         flow.controller.click.assert_not_called();flow.controller.scroll_up.assert_not_called()
         flow.controller.scroll_down.assert_not_called();self.assertEqual(flow.scrolls[key],63)
     def test_poststartup_writing_in_selecting_and_waiting_never_scrolls_captures_or_inputs(self):
-        for phase,owner in (('Selecting',None),('Waiting','Signer1'),('SetupNeeded','Signer1')):
+        for phase,owner in (('Selecting',None),('Waiting','Signer1'),('SetupNeeded','Signer1'),('AdmissionReview','Signer2')):
             with self.subTest(phase=phase):
                 flow=self.startup.flow();flow.startup_index=len(F.HOST_STARTUP)
                 flow.startup_focus_seen=True
                 base=dict(phase=phase,subphase='None',owner=owner,focused=True,secret_input=False,host_input=True,widgets=[])
                 flow.snapshot=mock.Mock(side_effect=[base]*100+[base|{'phase':'Revoked','host_input':False}])
                 flow.save_selector=mock.Mock(side_effect=AssertionError('source effect while Host Writing'))
+                flow.paired_admission=mock.Mock(side_effect=AssertionError('paired review while Host Writing'))
                 flow.idle_scan=mock.Mock(side_effect=AssertionError('scroll while Host Writing'))
                 flow.native.capture_host=mock.Mock(side_effect=AssertionError('capture while Host Writing'))
                 with self.assertRaises(F.C.Rejected) as error:flow.run()
                 self.assertEqual(error.exception.code,'source_failure')
                 self.assertEqual(flow.controller.wait_render_progress.call_count,100)
                 flow.save_selector.assert_not_called();flow.idle_scan.assert_not_called()
+                flow.paired_admission.assert_not_called()
                 flow.native.capture_host.assert_not_called();flow.controller.click.assert_not_called()
                 self.assertEqual(flow.actions,0);self.assertEqual(flow.scrolls,{})
     def test_source_password_branch_remains_separate_and_preserved(self):
@@ -59,6 +61,61 @@ class ComposedStartupTests(unittest.TestCase):
         flow.native.protected_input.assert_called_once_with('V3Password','Signer1','SourcePassword',secret)
         flow.press.assert_called_once_with(snapshot,'PasswordSubmit','Signer1')
         flow.controller.wait_render_progress.assert_not_called()
+    def test_unexpected_source_secret_flag_rejects_before_any_host_or_source_effect(self):
+        for phase,owner in (('Selecting',None),('Waiting','Signer1'),('AdmissionReview','Signer2'),('V3Configuring','Signer1')):
+            with self.subTest(phase=phase):
+                flow=self.startup.flow();flow.startup_index=len(F.HOST_STARTUP)
+                snapshot=dict(phase=phase,subphase='None',owner=owner,focused=True,
+                              secret_input=True,host_input=False,widgets=[])
+                flow.snapshot=mock.Mock(return_value=snapshot)
+                flow.pump_host=mock.Mock(side_effect=AssertionError('unexpected protected Host work'))
+                flow.idle_scan=mock.Mock();flow.review=mock.Mock();flow.paired_admission=mock.Mock()
+                with self.assertRaises(F.C.Rejected) as error:flow.run()
+                self.assertEqual(error.exception.code,'input_phase')
+                flow.pump_host.assert_not_called();flow.idle_scan.assert_not_called()
+                flow.review.assert_not_called();flow.paired_admission.assert_not_called()
+                self.assertEqual(flow.controller.mock_calls,[])
+                self.assertEqual(self.startup.fixture.secret_instances,[])
+
+    def test_native_source_entry_intent_frame_waits_only_after_exact_consumed_action(self):
+        native=(O.ROOT.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
+        finish=native.index('if crate::financial_ci::finish(')
+        self.assertIn('self.password.is_some() || matches!(self.intent, Some(Intent::PasswordV3 | Intent::EnterPassword))',native[finish:finish+400])
+        self.assertLess(finish,native.index('let intent = self.intent.take();',finish))
+        self.assertIn('Intent::PasswordV3 if self.phase == Phase::V3Confirm',native)
+        self.assertIn('Intent::EnterPassword if self.phase == Phase::EntryConfirm',native)
+        for phase,action,next_phase in (('V3Confirm','PasswordV3','V3Password'),('EntryConfirm','EnterPassword','Password')):
+            for owner in ('Signer1','Signer2'):
+                with self.subTest(phase=phase,owner=owner):
+                    flow=self.startup.flow();flow.startup_index=len(F.HOST_STARTUP)
+                    snapshot=dict(phase=phase,subphase='None',owner=owner,focused=True,secret_input=True,host_input=False,widgets=[])
+                    flow.done.add(flow.key(snapshot,action,owner)+(None,))
+                    entered=snapshot|{'phase':next_phase}
+                    flow.snapshot=mock.Mock(side_effect=[snapshot,entered,entered,entered|{'phase':'Revoked'}])
+                    flow.fixture=mock.Mock();secret=object();flow.fixture.secret.return_value=secret
+                    flow.native.protected_input=mock.Mock();flow.press=mock.Mock()
+                    flow.pump_host=mock.Mock();flow.idle_scan=mock.Mock()
+                    with self.assertRaises(F.C.Rejected) as error:flow.run()
+                    self.assertEqual(error.exception.code,'source_failure')
+                    flow.controller.wait_render_progress.assert_called_once_with()
+                    flow.native.protected_input.assert_called_once_with(next_phase,owner,'SourcePassword',secret)
+                    flow.press.assert_called_once_with(entered,'PasswordSubmit',owner)
+                    flow.pump_host.assert_not_called();flow.idle_scan.assert_not_called()
+    def test_unowned_or_mismatched_source_entry_protected_frame_fails_without_effects(self):
+        for phase,action in (('V3Confirm','PasswordV3'),('EntryConfirm','EnterPassword')):
+            for mismatch in ('unowned','owner','phase','subphase','action','host_overlap'):
+                with self.subTest(phase=phase,mismatch=mismatch):
+                    flow=self.startup.flow();flow.startup_index=len(F.HOST_STARTUP)
+                    old=dict(phase=phase,subphase='None',owner='Signer1',focused=True,secret_input=True,host_input=False,widgets=[])
+                    if mismatch!='unowned':flow.done.add(flow.key(old,'Read' if mismatch=='action' else action,'Signer1')+(None,))
+                    changes={'owner':{'owner':'Signer2'},'phase':{'phase':'Waiting'},'subphase':{'subphase':'ReadReview'},'host_overlap':{'host_input':True}}.get(mismatch,{})
+                    flow.snapshot=mock.Mock(return_value=old|changes)
+                    flow.pump_host=mock.Mock();flow.idle_scan=mock.Mock();flow.press=mock.Mock()
+                    with self.assertRaises(F.C.Rejected) as error:flow.run()
+                    self.assertEqual(error.exception.code,'input_phase')
+                    self.assertEqual(flow.controller.mock_calls,[])
+                    flow.pump_host.assert_not_called();flow.idle_scan.assert_not_called();flow.press.assert_not_called()
+
     def test_complete_reply_stream_and_exact_reviewer_path_use_balanced_bounded_batches(self):
         # Combine both authoritative synthetic fixture shapes without reading a token.
         reviewer=D.ReviewerArtifactTests();reviewer.setUp();self.addCleanup(reviewer.doCleanups)
@@ -75,7 +132,7 @@ class ComposedStartupTests(unittest.TestCase):
         with mock.patch.object(F.S.F,'ARTIFACT_PARENT',root.parent):
             flow=self.startup.flow();controller=B.RecordingController();flow.controller=controller
             flow.native.controller=controller
-            flow.native.stable=lambda *a,**kw:{'host_input':True,'secret_input':True}
+            flow.native.stable=lambda *a,**kw:{'host_input':True,'secret_input':False}
             flow.native.point=lambda *a:(100,100)
             expected=[]
             for index,prompt in enumerate(self.startup.PROMPTS):

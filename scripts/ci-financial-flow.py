@@ -152,6 +152,7 @@ class FullFlow:
         self.controller.click(*self.native.point(latest,tag,owner));self.controller.clear_field()
         self.controller.type_ascii(value);return False
     def review(self,s,action,owner,*,ack='ReviewAcknowledgement',body='ReviewBody'):
+        if s['secret_input'] or s['host_input']:return False
         if self.used(s,action,owner):return False
         checkbox=self.find(s,ack,owner) if ack else None
         if ack and not self.used(s,ack,owner):
@@ -159,14 +160,51 @@ class FullFlow:
                 self.press(s,ack,owner);return True
             if self.seek(s,ack,owner):return False
             return True
-        button=self.find(s,action,owner)
-        if button is not None and button['enabled']:
-            self.press(s,action,owner);return True
-        # A checkbox is not evidence of reading; actual C keeps action disabled
-        # until the complete native scroll review end has genuinely painted.
-        if button is None:return not self.seek(s,action,owner)
-        if self.scroll(s,body,owner):return True
+        pending=(s['phase'],s['subphase'],'review-scroll-pending',action,owner,body)
+        if pending not in self.scrolls:
+            button=self.find(s,action,owner)
+            if button is not None and button['enabled']:
+                self.press(s,action,owner);return True
+            if button is None:return not self.seek(s,action,owner)
+            self.scrolls[pending]=1
+        # Remember only an owed ordinary wheel gesture, not read completion.
+        # The disabled action and review body may occupy disjoint viewports.
+        # Re-seek the action only after the actual body scroll has completed.
+        observed_body=self.find(s,body,owner)
+        if observed_body is not None and not observed_body['enabled']:return False
+        if self.scroll(s,body,owner):
+            del self.scrolls[pending];return True
         return not self.seek(s,body,owner)
+    def paired_admission(self,s,owner):
+        # Native paired_approved requires BOTH complete reviews and BOTH
+        # acknowledgements before EITHER separate one-use arm is enabled.
+        sides=(('SignerReviewAcknowledgement','SignerReviewBody'),
+               ('WitnessReviewAcknowledgement','WitnessReviewBody'))
+        for ack,body in sides:
+            if not self.used(s,ack,owner):
+                checkbox=self.find(s,ack,owner)
+                if checkbox is not None and checkbox['enabled']:self.press(s,ack,owner)
+                else:self.seek(s,ack,owner)
+                return
+        for action in ('ArmSigner','ArmWitness'):
+            if self.used(s,action,owner):continue
+            pending=(s['phase'],s['subphase'],'paired-review-pending',owner,action)
+            key=(s['phase'],s['subphase'],'paired-review',owner)
+            if pending not in self.scrolls:
+                button=self.find(s,action,owner)
+                if button is None:self.seek(s,action,owner);return
+                if button['enabled']:self.press(s,action,owner);return
+                turn=self.scrolls.get(key,0);C.require(turn<256,'input_budget')
+                self.scrolls[pending]=turn
+            # Complete this ordinary body-wheel turn before re-seeking the arm:
+            # the button and body need not fit in the same actual viewport.
+            # This remembers work, never read completion or approval authority.
+            turn=self.scrolls[pending];body=sides[turn%2][1]
+            if self.scroll(s,body,owner):
+                self.scrolls[key]=turn+1;del self.scrolls[pending]
+            else:self.seek(s,body,owner)
+            return
+
     def save_selector(self,s,owner,kind):
         tag='Field:'+('ContinueSelectorPath' if kind=='continue' else 'ResultSelectorPath')
         action='SaveContinuationSelector' if kind=='continue' else 'SaveResultSelector'
@@ -346,6 +384,15 @@ class FullFlow:
                     self.native.protected_input(phase,owner,'SourcePassword',self.fixture.secret('source'))
                     fresh=self.snapshot();self.press(fresh,'PasswordSubmit',owner)
                 continue
+            if s['secret_input']:
+                # CI conservatively marks the entry-intent frame protected
+                # before its native tail changes V3Confirm/EntryConfirm phase.
+                # Observe only our exact already-consumed entry action; this
+                # latch grants no input, approval, or native completion evidence.
+                entering={'V3Confirm':'PasswordV3','EntryConfirm':'EnterPassword'}.get(phase)
+                C.require(not s['host_input'] and owner in ('Signer1','Signer2') and
+                          entering is not None and self.used(s,entering,owner),'input_phase')
+                self.controller.wait_render_progress();continue
             if self.operator is not None:
                 for role in ('Signer1','Signer2'):
                     audited=next((r for r in self.records if r['kind']=='SignerMilestone' and r['facts']=={'owner':role,'step':'AdmissionAudited'}),None)
@@ -376,8 +423,7 @@ class FullFlow:
             if phase in READ_ONLY:self.review(s,READ_ONLY[phase],owner,ack=None);continue
             if phase in CONFIRM:self.review(s,CONFIRM[phase],owner);continue
             if phase=='AdmissionReview':
-                if not self.used(s,'ArmSigner',owner):self.review(s,'ArmSigner',owner,ack='SignerReviewAcknowledgement',body='SignerReviewBody')
-                elif not self.used(s,'ArmWitness',owner):self.review(s,'ArmWitness',owner,ack='WitnessReviewAcknowledgement',body='WitnessReviewBody')
+                self.paired_admission(s,owner)
                 continue
             if phase=='WriterFlow' and s['subphase'] in ('SetupNeeded','SetupReview','ServiceReview','ReadReview','AcquireReview'):
                 self.review(s,'WriterAction',owner,ack=None if s['subphase']=='SetupNeeded' else 'ReviewAcknowledgement');continue
