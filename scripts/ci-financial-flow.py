@@ -460,6 +460,10 @@ class FullFlow:
                 return self.seek_host_tail(s)
             self.last_ocr=time.monotonic_ns()
             try:text,observed=self.native.capture_host(s['phase'],s['owner'],self.ocr)
+            except S.HostObservationChanged:
+                # No input was attempted and no text was admitted. Re-enter only
+                # through the outer fresh snapshot, never dispatch from stale s.
+                return True
             except C.Rejected:
                 self.host_rejection='capture_guard'
                 self.host_capture_outcome='capture_guard';self.host_capture_context=None

@@ -25,6 +25,9 @@ C=module('ci-financial-contract')
 F=module('ci-financial-fixture')
 K=module('ci-financial-controller')
 
+class HostObservationChanged(Exception):
+    """A read-only semantic Host bracket crossed a genuine source transition."""
+
 class NativeScenario:
     """One actual fixture and target; no retries, rebinding or renewed clocks."""
     def __init__(self,controller,fixture,next_snapshot,*,expected_profile=C.PROFILE,host_view=None,wait_ceiling=None):
@@ -135,10 +138,29 @@ class NativeScenario:
         C.require(occurrence is not None and h['context_valid'] and h['entry']=='Editing'
                   and e is not None and e['revision']==h['revision']==occurrence[2]
                   and h['nonws_end']==occurrence[1] and h['view'] is None,'input_phase')
+    @staticmethod
+    def _host_read_frames(frames,phase,owner):
+        # Validate every consumed frame before considering a harmless transition.
+        # Focus loss, protected input and terminal states never become deferrals.
+        for s in frames:
+            C.require(s['focused'] and s['phase'] not in ('Revoked','Finished'),'input_phase')
+            C.require(not(s['secret_input'] or s['host_input']),'sensitive_capture')
+        if any(s['phase']!=phase or s['owner']!=owner for s in frames):
+            raise HostObservationChanged()
     def host_stable(self,phase,owner):
         # Generic source actions keep legacy semantics; Host capture requires its
         # own stronger exact output/layout equality across genuine later frames.
-        first=self.stable(phase,owner);self.controller.wait_render_progress();second=self.snapshot()
+        semantic=self.expected_profile==C.SEMANTIC_PROFILE
+        if semantic:
+            # Passive capture may race a source action's genuine pre-tail frame.
+            # Effectful stable()/click()/typing retain their exact strict guards.
+            a=self.snapshot();self.controller.wait_render_progress();first=self.snapshot()
+            self._host_read_frames((a,first),phase,owner)
+            source_shape=lambda s:{k:v for k,v in s.items() if k not in ('view_generation','host_observation','host_view_id')}
+            C.require(source_shape(a)==source_shape(first),'snapshot')
+        else:first=self.stable(phase,owner)
+        self.controller.wait_render_progress();second=self.snapshot()
+        if semantic:self._host_read_frames((first,second),phase,owner)
         shape=lambda s:{k:v for k,v in s.items() if k!='view_generation'}
         C.require(shape(first)==shape(second),'snapshot')
         h=second['host_observation']
