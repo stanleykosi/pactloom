@@ -294,6 +294,152 @@ class FailureCheckpointTests(unittest.TestCase):
                 self.assertEqual(flow.location,expected)
                 controller.terminal_click.assert_called_once_with(20,20)
 
+
+class PrivateHostStartupProbeTests(unittest.TestCase):
+    PROMPTS=('Existing original Host profile directory (absolute):',
+             'Existing original dispatcher workspace directory (absolute):',
+             'Storage passphrase:', 'Exact immutable command keys JSON file',
+             'Exact coordinated reviewer selection JSON')
+    def flow(self, *, render=None, unfocused_until=0, bad=None, repeat=0):
+        from unittest import mock
+        controller=mock.Mock();fixture=mock.Mock();fixture.deadline_ns=123
+        fixture.top_path.side_effect=lambda key:'/synthetic/'+key
+        fixture.secret.return_value=object()
+        fixture.source.side_effect=AssertionError('no reviewer/source data')
+        state={'generation':0,'step':0,'editing':False,'captures':0,'typed':[],
+               'submissions':0,'remaining':repeat,'progress':0}
+        def progress():
+            state['progress']+=1
+            if state['progress']>F.S.K.MAX_PROGRESS:raise F.S.K.Rejected('limit')
+        controller.wait_render_progress.side_effect=progress
+        class Observer:
+            expected_profile=F.C.EXTERNAL_PROFILE
+            def read(self):return []
+            def next_snapshot(self,deadline):
+                state['generation']+=1
+                widgets=[dict(tag='ScrollRegion',owner=None,rect=[0,0,1280,800],enabled=True)]
+                for tag,y in (('HostEditor',100),('HostSubmit',150)) if state['editing'] else (('HostOutput',200),('BeginHostLine',250)):
+                    widgets.append(dict(tag=tag,owner=None,rect=[10,y,110,y+20],enabled=True))
+                value=dict(phase='Selecting',owner=None,subphase='None',view_generation=state['generation'],
+                    focused=state['generation']>unfocused_until,host_input=state['editing'],secret_input=False,
+                    pixels_per_point=1,viewport=[1280,800],widgets=widgets)
+                if bad:value.update(bad(state))
+                return value
+        def click(x,y):
+            if y==260:
+                self.assertFalse(state['editing']);self.assertLess(state['step'],4)
+                state['editing']=True
+            elif y==160:
+                self.assertTrue(state['editing']);self.assertEqual(len(state['typed']),state['step']+1)
+                state['editing']=False;state['step']+=1;state['submissions']+=1
+            else:raise AssertionError('unexpected native action')
+        controller.click.side_effect=click
+        flow=F.FullFlow(controller,fixture,Observer(),None)
+        def capture(*args):
+            self.assertFalse(state['editing']);state['captures']+=1
+            if render:return render(state)
+            if state['step'] and state['remaining']:
+                state['remaining']-=1
+                return self.PROMPTS[state['step']-1]
+            return '\n'.join(self.PROMPTS[:state['step']+1])
+        flow.native.capture_host=mock.Mock(side_effect=capture)
+        flow.native.public_host_line=mock.Mock(side_effect=lambda *args:state['typed'].append(('public',args[-1])))
+        flow.native.protected_input=mock.Mock(side_effect=lambda *args:state['typed'].append(('secret',None)))
+        flow.pump_host=mock.Mock(side_effect=AssertionError('full flow forbidden'))
+        flow.expected_host_line=mock.Mock(side_effect=AssertionError('reviewer generator forbidden'))
+        return flow,controller,state
+    def reject(self,flow,code):
+        import contextlib,io,itertools
+        from unittest import mock
+        output=io.StringIO();clock=itertools.count(10_000_000_000,1_000_000_000)
+        with contextlib.redirect_stdout(output),contextlib.redirect_stderr(output), \
+             mock.patch.object(F.time,'monotonic_ns',side_effect=lambda:next(clock)):
+            with self.assertRaises((F.C.Rejected,F.S.K.Rejected)) as error:flow.host_startup_probe()
+        self.assertEqual(error.exception.code,code);self.assertEqual(output.getvalue(),'')
+        flow.pump_host.assert_not_called();flow.expected_host_line.assert_not_called()
+        flow.fixture.source.assert_not_called();flow.controller.focus.assert_not_called()
+        flow.controller.terminal_click.assert_not_called()
+        self.assertEqual(flow.fixture.deadline_ns,123)
+    def test_exact_initial_sequence_stops_before_reviewer_json(self):
+        flow,controller,state=self.flow()
+        self.reject(flow,'missing_evidence')
+        self.assertEqual(state['typed'],[('public','/synthetic/profile'),('public','/synthetic/workspace'),
+                          ('secret',None),('public','/synthetic/session_commands_file')])
+        self.assertEqual(state['submissions'],4);self.assertEqual(flow.host_lines,4)
+        self.assertEqual(flow.actions,8);self.assertEqual(len(flow.done),8)
+        flow.fixture.secret.assert_called_once_with('host')
+        self.assertEqual(flow.location,dict(phase='Selecting',subphase='None',owner=None))
+    def test_delayed_startup_focus_observes_without_refocus(self):
+        flow,controller,state=self.flow(unfocused_until=3)
+        self.reject(flow,'missing_evidence')
+        self.assertEqual([c[0] for c in controller.mock_calls[:3]],['wait_render_progress']*3)
+        self.assertEqual(state['submissions'],4)
+    def test_never_focused_no_input_or_capture(self):
+        flow,controller,state=self.flow(unfocused_until=1000)
+        self.reject(flow,'input_budget');controller.click.assert_not_called()
+        flow.native.capture_host.assert_not_called();self.assertEqual(state['generation'],64)
+    def test_repeated_previous_prompt_is_not_resubmitted(self):
+        flow,controller,state=self.flow(repeat=3)
+        self.reject(flow,'missing_evidence');self.assertEqual(state['submissions'],4)
+        self.assertEqual(flow.host_lines,4);self.assertGreater(state['captures'],5)
+    def test_stale_earlier_prompt_never_establishes_stop(self):
+        flow,controller,state=self.flow(render=lambda s:self.PROMPTS[0])
+        self.reject(flow,'input_budget');self.assertEqual(state['submissions'],1)
+        self.assertEqual(flow.host_lines,1)
+    def test_future_or_reviewer_prompt_cannot_skip_any_prerequisite(self):
+        for reached in range(4):
+            for future in range(reached+1,5):
+                with self.subTest(reached=reached,future=future):
+                    flow,controller,state=self.flow(render=lambda s,r=reached,f=future:self.PROMPTS[f if s['step']==r else s['step']])
+                    self.reject(flow,'input_phase');self.assertEqual(state['submissions'],reached)
+    def test_reviewer_followed_by_newer_earlier_marker_does_not_stop(self):
+        flow,controller,state=self.flow(render=lambda s: '\n'.join(self.PROMPTS) if s['step']<4 else self.PROMPTS[4]+' '+self.PROMPTS[0])
+        self.reject(flow,'input_phase');self.assertEqual(state['submissions'],0)
+        flow,controller,state=self.flow(render=lambda s:self.PROMPTS[s['step']] if s['step']<4 else self.PROMPTS[4]+' '+self.PROMPTS[0])
+        self.reject(flow,'input_budget');self.assertEqual(state['submissions'],4)
+    def test_unknown_output_is_bounded_and_never_typed(self):
+        flow,controller,state=self.flow(render=lambda s:'private output must never escape')
+        self.reject(flow,'input_budget');controller.click.assert_not_called()
+    def test_bad_terminal_secret_or_unowned_protected_state_fails_closed(self):
+        for change in ({'phase':'Finished'},{'phase':'Revoked'},{'phase':'V3Configuring'},
+                       {'owner':'Signer1'},{'subphase':'Idle'},{'secret_input':True},{'host_input':True}):
+            with self.subTest(change=change):
+                flow,controller,state=self.flow(bad=lambda s,c=change:c)
+                self.reject(flow,'input_phase');controller.click.assert_not_called()
+                flow.native.capture_host.assert_not_called()
+    def test_focus_loss_after_seen_fails_and_never_retries(self):
+        flow,controller,state=self.flow(bad=lambda s:{'focused':False} if s['generation']>3 else {})
+        self.reject(flow,'input_phase');self.assertEqual(controller.click.call_count,1)
+    def test_bad_post_typing_snapshot_prevents_submit(self):
+        flow,controller,state=self.flow(bad=lambda s:{'phase':'Finished'} if s['typed'] else {})
+        self.reject(flow,'input_phase');self.assertEqual(state['submissions'],0)
+        self.assertEqual(len(state['typed']),1);self.assertEqual(controller.click.call_count,1)
+    def test_begin_without_editor_never_retries_or_types(self):
+        flow,controller,state=self.flow(bad=lambda s:{'host_input':False} if s['editing'] else {})
+        self.reject(flow,'limit');self.assertEqual(controller.click.call_count,1)
+        self.assertEqual(state['typed'],[]);self.assertEqual(state['captures'],1)
+    def test_owned_submitted_slot_waits_without_capture_or_resubmit(self):
+        flow,controller,state=self.flow(bad=lambda s:{'host_input':True} if s['submissions'] else {})
+        self.reject(flow,'limit');self.assertEqual(controller.click.call_count,2)
+        self.assertEqual(state['submissions'],1);self.assertEqual(state['captures'],1)
+    def test_delayed_writing_to_idle_does_not_exhaust_startup_bound(self):
+        remaining={'waits':100}
+        def delay(s):
+            if s['submissions']==1 and remaining['waits']:
+                self.assertEqual(s['captures'],1) # no OCR during legitimate Writing
+                remaining['waits']-=1
+                return {'host_input':True}
+            return {}
+        flow,controller,state=self.flow(bad=delay,repeat=3)
+        self.reject(flow,'missing_evidence')
+        self.assertEqual(remaining['waits'],0);self.assertEqual(state['submissions'],4)
+        self.assertGreater(state['progress'],100);self.assertEqual(flow.host_lines,4)
+    def test_container_routes_only_private_host_probe(self):
+        source=(ROOT/'ci-financial-container.py').read_text()
+        self.assertIn('self.flow.host_startup_probe()',source)
+        self.assertNotIn('self.flow.run()',source)
+        self.assertNotIn('self.flow.initial_selection_probe()',source)
+
 if __name__=='__main__':unittest.main()
 
 

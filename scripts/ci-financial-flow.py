@@ -233,6 +233,89 @@ class FullFlow:
         if line is None:return False
         self.host_lines+=1;C.require(self.host_lines<=128,'input_budget')
         self.pending_host=line;self.press(s,'BeginHostLine',None,ordinal=self.host_lines);return True
+    def host_startup_probe(self):
+        """PRIVATE failure-only OCR discriminator; never selects a Source/reviewer.
+
+        Only four initial Host lines may be submitted, in native prompt order.
+        Seeing the next reviewer prompt after those submissions deliberately
+        fails missing_evidence, not normal completion or a native milestone.
+        Initial focus may lag startup; once seen, focus loss remains fatal.
+        Startup focus/search is capped at64 observations, OCR at64 captures.
+        Asynchronous Writing/reply waits use real render progress, bounded by
+        the unchanged controller progress budget and original fixture deadline.
+        """
+        markers=('Existing original Host profile directory (absolute):',
+                 'Existing original dispatcher workspace directory (absolute):',
+                 'Storage passphrase:', 'Exact immutable command keys JSON file',
+                 'Exact coordinated reviewer selection JSON',
+                 'Exact copied native continuation selector JSON file',
+                 'Exact copied native AwaitingReturn result selector JSON file',
+                 'Type APPROVE ')
+        submitted=0;pending=None;awaiting_clear=False;focus_seen=False;search_attempts=0
+        startup_observations=0;captures=0
+        def check(s):
+            C.require(s['phase']=='Selecting' and s['owner'] is None and
+                      s['subphase']=='None' and not s['secret_input'],'input_phase')
+        while True:
+            C.require(startup_observations<64,'input_budget')
+            s=self.snapshot()
+            if s['phase'] not in ('Revoked','Finished'):
+                self.location={k:s[k] for k in ('phase','subphase','owner')}
+            check(s)
+            if not s['focused']:
+                C.require(not focus_seen and not s['host_input'] and pending is None and
+                          not awaiting_clear,'input_phase')
+                startup_observations+=1
+                self.controller.wait_render_progress();continue
+            focus_seen=True
+            if pending is not None:
+                if not s['host_input']:
+                    self.controller.wait_render_progress();continue
+                kind,value=pending
+                if kind=='secret':
+                    self.native.protected_input('Selecting',None,'HostEditor',self.fixture.secret('host'))
+                else:self.native.public_host_line('Selecting',None,value)
+                fresh=self.snapshot();check(fresh)
+                C.require(fresh['focused'] and fresh['host_input'],'input_phase')
+                self.press(fresh,'HostSubmit',None,ordinal=self.host_lines)
+                submitted+=1;pending=None;awaiting_clear=True
+                continue
+            if s['host_input']:
+                # Only the just-submitted, still-draining owned slot may remain.
+                C.require(awaiting_clear,'input_phase')
+                self.controller.wait_render_progress();continue
+            awaiting_clear=False
+            button=self.find(s,'BeginHostLine',None)
+            if button is None or not button['enabled'] or self.find(s,'HostOutput',None) is None:
+                startup_observations+=1
+                C.require(self.scroll(s,'ScrollRegion',None,'up' if search_attempts<8 else 'down'),'input_widget')
+                search_attempts+=1;continue
+            now=time.monotonic_ns()
+            if now-self.last_ocr<self.ocr_delay:
+                self.controller.wait_render_progress();continue
+            C.require(captures<64,'input_budget');captures+=1;self.last_ocr=now
+            text=' '.join(self.native.capture_host('Selecting',None,self.ocr).split())
+            digest=hashlib.sha256(text.encode()).digest()
+            self.ocr_delay=min(8_000_000_000,self.ocr_delay*2) if digest==self.last_capture else 1_000_000_000
+            self.last_capture=digest
+            positions=[(text.rfind(marker),index) for index,marker in enumerate(markers) if marker in text]
+            if not positions:
+                self.controller.wait_render_progress();continue
+            current=max(positions)[1]
+            C.require(current<=submitted,'input_phase')
+            if current<submitted:
+                # Old/wrapped/repeated output cannot consume a line twice or stop.
+                self.controller.wait_render_progress();continue
+            if current==4:
+                raise C.Rejected('missing_evidence')
+            C.require(submitted<4,'input_phase')
+            if current==2:pending=('secret',None)
+            else:
+                key=('profile','workspace',None,'session_commands_file')[current]
+                pending=('public',self.fixture.top_path(key))
+            self.host_lines+=1
+            self.press(s,'BeginHostLine',None,ordinal=self.host_lines)
+
     def run(self):
         while True:
             s=self.snapshot();phase=s['phase'];owner=s['owner'];target=self.current_owner()

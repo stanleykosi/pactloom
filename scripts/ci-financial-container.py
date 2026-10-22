@@ -215,7 +215,7 @@ class NativeSession:
     def run(self):
         ocr=S.PinnedLocalOcr('/usr/bin/tesseract',OCR_SHA)
         self.flow=FLOW.FullFlow(self.controller,self.fixture,self.observer,ocr,self.operator)
-        self.flow.run()
+        self.flow.host_startup_probe()
         status=self.product.wait(timeout=max(.001,(self.deadline-time.monotonic_ns())/1e9))
         return self.observer.read(final=True),self.product.pid,status
     def finish_display(self):
