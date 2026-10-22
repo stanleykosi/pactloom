@@ -334,13 +334,13 @@ class Controller:
 
     def _ack(self, op):
         h, payload = self._read()
-        expected_input = self._sequence if op in (FOCUS, MOVE, BUTTON, KEY, SCROLL_DOWN, CLOSE_WINDOW) else self._receipt.input_sequence
+        expected_input = self._sequence if op in (FOCUS, MOVE, BUTTON, KEY, SCROLL_DOWN, SCROLL_UP, CLOSE_WINDOW) else self._receipt.input_sequence
         if (h[3] != ACK or payload or h[7:11] != (0, 0, 0, 0) or
                 h[5] < self._receipt.commit or h[6] < self._receipt.frame or
                 h[11] != expected_input):
             self._reject('protocol')
         self._receipt = Receipt(h[2], h[5], h[6], h[11])
-        if op in (FOCUS, MOVE, BUTTON, KEY, SCROLL_DOWN, CLOSE_WINDOW):
+        if op in (FOCUS, MOVE, BUTTON, KEY, SCROLL_DOWN, SCROLL_UP, CLOSE_WINDOW):
             self._last_input_commit = h[5]
         return self._receipt
 

@@ -47,4 +47,67 @@ class CollectorTests(unittest.TestCase):
         (self.directory/'100.jsonl').symlink_to(target)
         with self.assertRaises(Exception):self.collector.read()
 
+
+# Pure transport regression: native input ACKs are exercised without a socket,
+# compositor, product process, pixels, fixture, or credentials.
+spec=importlib.util.spec_from_file_location('financial_scroll_controller_tested',ROOT/'ci-financial-controller.py')
+K=importlib.util.module_from_spec(spec);sys.modules[spec.name]=K;spec.loader.exec_module(K)
+
+class NativeAckTransport:
+    def __init__(self, mutate=None):
+        self.commands=[];self.closed=False;self.mutate=mutate
+    def settimeout(self, value):pass
+    def send(self, packet, flags):
+        command=K.COMMAND.unpack(packet);self.commands.append(command)
+        sequence,op=command[2:4]
+        # module.c's input handler sets input_sequence = sequence before ack().
+        self.header=[K.MAGIC,K.VERSION,sequence,K.ACK,0,10+sequence,20+sequence,0,0,0,0,sequence]
+        if self.mutate and op==K.SCROLL_UP:self.mutate(self.header)
+        return len(packet)
+    def recvmsg(self, size, ancillary_size, flags):
+        return K.HEADER.pack(*self.header),[],0,None
+    def close(self):self.closed=True
+
+class NativeScrollAckTests(unittest.TestCase):
+    def controller(self, mutate=None):
+        transport=NativeAckTransport(mutate)
+        controller=K.Controller(transport,1_000_000_000,1_000_000_000,_clock=lambda:1)
+        controller._ready=controller._bound=True
+        self.addCleanup(controller.close)
+        return controller,transport
+    def test_upward_scan_accepts_exact_native_input_ack_and_advances_barrier(self):
+        controller,transport=self.controller()
+        receipt=controller.scroll_up(100,200)
+        self.assertEqual([c[3] for c in transport.commands],[K.MOVE,K.SCROLL_UP])
+        self.assertEqual(receipt,K.Receipt(2,12,22,2))
+        self.assertEqual(controller._last_input_commit,12)
+        self.assertFalse(transport.closed)
+    def test_downward_scan_keeps_same_input_ack_contract(self):
+        controller,transport=self.controller()
+        self.assertEqual(controller.scroll_down(100,200),K.Receipt(2,12,22,2))
+        self.assertEqual(controller._last_input_commit,12)
+    def test_upward_scan_rejects_stale_future_or_mismatched_ack(self):
+        for field,value in ((11,1),(11,3),(2,1),(3,K.READY),(5,10),(6,20),(7,1)):
+            with self.subTest(field=field,value=value):
+                controller,transport=self.controller(lambda h:h.__setitem__(field,value))
+                with self.assertRaises(K.Rejected) as error:controller.scroll_up(100,200)
+                self.assertEqual(error.exception.code,'protocol')
+                self.assertTrue(transport.closed)
+                self.assertEqual(controller.receipt,K.Receipt(1,11,21,1))
+                self.assertEqual(controller._last_input_commit,11)
+    def test_non_input_ack_must_not_advance_input_sequence(self):
+        controller,transport=self.controller()
+        controller._sequence=2
+        controller._receipt=K.Receipt(1,11,21,1)
+        transport.header=[K.MAGIC,K.VERSION,2,K.ACK,0,12,22,0,0,0,0,1]
+        self.assertEqual(controller._ack(K.PROGRESS),K.Receipt(2,12,22,1))
+        transport.header[11]=2
+        with self.assertRaises(K.Rejected):controller._ack(K.PROGRESS)
+    def test_native_scroll_directions_share_sequence_advancing_handler(self):
+        source=(ROOT/'ci-financial-weston-module.c').read_text()
+        start=source.index('} else if ((op == SCROLL_DOWN || op == SCROLL_UP)')
+        end=source.index('c->input_sequence = c->sequence;',start)
+        self.assertIn('.value = op == SCROLL_UP ? -120.0 : 120.0',source[start:end])
+        self.assertIn('(void)ack(c);',source[end:end+80])
+
 if __name__=='__main__':unittest.main()
