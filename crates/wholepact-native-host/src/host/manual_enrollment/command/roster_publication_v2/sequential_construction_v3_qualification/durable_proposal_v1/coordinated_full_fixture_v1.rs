@@ -9,6 +9,122 @@ use delivery_admission_v2::OriginalDisclosureV2;
 
 pub(super) const READY_FILE: &str = "coordinated-financial-pre-v3-fixture-v1.json";
 const MAX_HANDOFF: usize = 1024 * 1024;
+
+// Diagnostic-only tokens; neither a readiness marker nor native permission.
+const POST_INPUT_PREFIX: &[u8] = b"SYNTHETIC_COORDINATED_POST_INPUT_PHASE=";
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) enum PostInputPhase {
+    FinalInspection,
+    InputEntry,
+    AnchorDrain,
+    SourceOneOpen,
+    SourceOneMetadata,
+    SourceOnePreserve,
+    SourceTwoOpen,
+    SourceTwoMetadata,
+    SourceTwoPreserve,
+    SignerShutdown,
+    HostFence,
+    WitnessDescriptor,
+    HandoffWrite,
+    ExternalControls,
+    ExternalBootstrap,
+    Ready,
+}
+impl PostInputPhase {
+    pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) fn label(self) -> &'static str {
+        match self {
+            Self::FinalInspection => "post_final_inspection",
+            Self::InputEntry => "post_input_entry",
+            Self::AnchorDrain => "post_anchor_drain",
+            Self::SourceOneOpen => "post_source_one_open",
+            Self::SourceOneMetadata => "post_source_one_metadata",
+            Self::SourceOnePreserve => "post_source_one_preserve",
+            Self::SourceTwoOpen => "post_source_two_open",
+            Self::SourceTwoMetadata => "post_source_two_metadata",
+            Self::SourceTwoPreserve => "post_source_two_preserve",
+            Self::SignerShutdown => "post_signer_shutdown",
+            Self::HostFence => "post_host_fence",
+            Self::WitnessDescriptor => "post_witness_descriptor",
+            Self::HandoffWrite => "post_handoff_write",
+            Self::ExternalControls => "post_external_controls",
+            Self::ExternalBootstrap => "post_external_bootstrap",
+            Self::Ready => "post_ready",
+        }
+    }
+    fn parse(value: &[u8]) -> Option<Self> {
+        match value {
+            b"post_final_inspection" => Some(Self::FinalInspection),
+            b"post_input_entry" => Some(Self::InputEntry),
+            b"post_anchor_drain" => Some(Self::AnchorDrain),
+            b"post_source_one_open" => Some(Self::SourceOneOpen),
+            b"post_source_one_metadata" => Some(Self::SourceOneMetadata),
+            b"post_source_one_preserve" => Some(Self::SourceOnePreserve),
+            b"post_source_two_open" => Some(Self::SourceTwoOpen),
+            b"post_source_two_metadata" => Some(Self::SourceTwoMetadata),
+            b"post_source_two_preserve" => Some(Self::SourceTwoPreserve),
+            b"post_signer_shutdown" => Some(Self::SignerShutdown),
+            b"post_host_fence" => Some(Self::HostFence),
+            b"post_witness_descriptor" => Some(Self::WitnessDescriptor),
+            b"post_handoff_write" => Some(Self::HandoffWrite),
+            b"post_external_controls" => Some(Self::ExternalControls),
+            b"post_external_bootstrap" => Some(Self::ExternalBootstrap),
+            b"post_ready" => Some(Self::Ready),
+            _ => None,
+        }
+    }
+}
+pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) fn post_input_phase(terminal: &crate::terminal::Terminal, phase: PostInputPhase) -> Result<()> {
+    terminal.message(&format!("\nSYNTHETIC_COORDINATED_POST_INPUT_PHASE={}\n", phase.label()))
+}
+
+/// Retains only a fixed candidate marker and a typed phase, never arbitrary
+/// transcript lines. Malformed, repeated, backwards, or partial markers withhold
+/// attribution. They do not change workflow result, authority, or cleanup.
+pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) struct PostInputCapture {
+    candidate: zeroize::Zeroizing<[u8; 96]>,
+    length: usize,
+    ignored: bool,
+    invalid: bool,
+    latest: Option<PostInputPhase>,
+}
+impl Default for PostInputCapture {
+    fn default() -> Self {
+        Self { candidate: zeroize::Zeroizing::new([0; 96]), length: 0,
+            ignored: false, invalid: false, latest: None }
+    }
+}
+impl PostInputCapture {
+    pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) fn append(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if byte == b'\n' {
+                if !self.ignored && self.length != 0 && self.length < POST_INPUT_PREFIX.len() {
+                    self.invalid = true;
+                } else if !self.ignored && self.length >= POST_INPUT_PREFIX.len() {
+                    let mut line = &self.candidate[POST_INPUT_PREFIX.len()..self.length];
+                    if line.last() == Some(&b'\r') { line = &line[..line.len()-1]; }
+                    match PostInputPhase::parse(line) {
+                        Some(phase) if self.latest.is_none_or(|previous| phase > previous) => self.latest = Some(phase),
+                        _ => self.invalid = true,
+                    }
+                }
+                self.candidate.fill(0); self.length = 0; self.ignored = false;
+            } else if !self.ignored {
+                if self.length < POST_INPUT_PREFIX.len() && byte != POST_INPUT_PREFIX[self.length] {
+                    self.candidate.fill(0); self.length = 0; self.ignored = true;
+                } else if self.length == self.candidate.len() {
+                    self.invalid = true; self.candidate.fill(0); self.length = 0; self.ignored = true;
+                } else {
+                    self.candidate[self.length] = byte; self.length += 1;
+                }
+            }
+        }
+    }
+    pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) fn finish(&self) -> Option<PostInputPhase> {
+        if self.invalid || (!self.ignored && self.length != 0) { None } else { self.latest }
+    }
+}
+
 // Container TMPDIR is longer than /tmp. Retain the same private parent and
 // random suffix, but leave room for native Unix-domain socket endpoints.
 const FULL_ROOT_PREFIX: &str = "f-";
@@ -51,12 +167,14 @@ pub(super) fn preserve_completed_originals(
     choices: crate::host::financial::durable_delivery_admission_v2::DeliveryChoicesV2,
     wallet_setup_json: String, live_external_witness: bool,
 ) -> Result<()> {
+    post_input_phase(&terminal, PostInputPhase::InputEntry)?;
     let cutoff = private_fixed_v2::child_original_cutoff()?;
     if disclosures.len() != 2 || wallet_setup_json.is_empty() || Instant::now() >= cutoff {
         return Err(Error::Authentication);
     }
     // Last shared signer TempDir may only be kept after the actual unused
     // anchor and both opened sources have drained, never from caller paths.
+    post_input_phase(&terminal, PostInputPhase::AnchorDrain)?;
     original.signers.send(C::DropUnselectedAnchor(0)).map_err(|_| Error::Authentication)?;
     done(&original.signers, 0)?;
     let mut sources = Vec::with_capacity(2);
@@ -64,11 +182,13 @@ pub(super) fn preserve_completed_originals(
     for index in 1..=2 {
         let account = &original.born[index];
         let captured = disclosures.iter().find(|d| d.account_id == account.account_id).ok_or(Error::Authentication)?;
+        post_input_phase(&terminal, if index == 1 { PostInputPhase::SourceOneOpen } else { PostInputPhase::SourceTwoOpen })?;
         original.signers.send(C::OpenDelivery(index, proposal.clone())).map_err(|_| Error::Authentication)?;
         match original.signers.receive().map_err(|_| Error::Authentication)? {
             R::DurablePeer { index: actual, .. } if actual == index => (),
             _ => return Err(Error::Authentication),
         }
+        post_input_phase(&terminal, if index == 1 { PostInputPhase::SourceOneMetadata } else { PostInputPhase::SourceTwoMetadata })?;
         original.signers.send(C::ReadDeliverySourceMetadata(index)).map_err(|_| Error::Authentication)?;
         let metadata: SourceMetadata = match original.signers.receive().map_err(|_| Error::Authentication)? {
             R::DeliverySourceMetadata { index: actual, json } if actual == index && json.len() <= 16 * 1024 => serde_json::from_str(&json)?,
@@ -79,6 +199,7 @@ pub(super) fn preserve_completed_originals(
             return Err(Error::Authentication);
         }
         metadata.witness.validate().map_err(|_| Error::Authentication)?;
+        post_input_phase(&terminal, if index == 1 { PostInputPhase::SourceOnePreserve } else { PostInputPhase::SourceTwoPreserve })?;
         original.signers.send(C::PreserveDelivery(index)).map_err(|_| Error::Authentication)?;
         let selector = match original.signers.receive().map_err(|_| Error::Authentication)? {
             R::DeliveryPreserved { index: actual, original } if actual == index => original,
@@ -110,25 +231,29 @@ pub(super) fn preserve_completed_originals(
             }
         }));
     }
+    post_input_phase(&terminal, PostInputPhase::SignerShutdown)?;
     original.signers.shutdown().map_err(|_| Error::Authentication)?;
     if !preserved_container || Instant::now() >= cutoff { return Err(Error::Authentication); }
     // Host retains only original files after an explicit fence revocation and
     // drop; no private vault owner remains when the full original root opens.
+    post_input_phase(&terminal, PostInputPhase::HostFence)?;
     host.authority.fence.revoke()?;
     drop(host);
     if original.host.is_some() { return Err(Error::Authentication); }
     let account_ids = [original.born[1].account_id.clone(), original.born[2].account_id.clone()];
+    post_input_phase(&terminal, PostInputPhase::WitnessDescriptor)?;
     let (witness_bytes, mut live_witness) = if live_external_witness {
         let mut witness = original.witness;
-        let bytes = witness.describe_coordinated_pre_v3_originals_v1().map_err(|_|Error::Authentication)?;
+        let bytes = witness.describe_coordinated_pre_v3_originals_v1(&account_ids).map_err(|_|Error::Authentication)?;
         (bytes, Some(witness))
     } else {
-        (original.witness.preserve_coordinated_pre_v3_originals_v1().map_err(|_|Error::Authentication)?, None)
+        (original.witness.preserve_coordinated_pre_v3_originals_v1(&account_ids).map_err(|_|Error::Authentication)?, None)
     };
     let witness: serde_json::Value = serde_json::from_slice(&witness_bytes)?;
     if witness_bytes.len() > MAX_HANDOFF || witness.get("purpose").and_then(|v| v.as_str()) != Some(if live_external_witness {"coordinated-pre-v3-live-originals-v1"} else {"coordinated-pre-v3-originals-v1"}) {
         return Err(Error::Authentication);
     }
+    post_input_phase(&terminal, PostInputPhase::HandoffWrite)?;
     let root = PathBuf::from(std::env::var_os("TMPDIR").ok_or(Error::Invalid)?);
     if !root.is_absolute() || Instant::now() >= cutoff { return Err(Error::Permission); }
     let host_password = root.join("coordinated-fixture-host-password.private");
@@ -179,6 +304,7 @@ pub(super) fn preserve_completed_originals(
     if let Some(witness) = live_witness.as_mut() {
         super::coordinated_external_witness_v1::run(&terminal, witness, &account_ids, &root, cutoff)?;
     } else {
+        post_input_phase(&terminal, PostInputPhase::Ready)?;
         terminal.message("SYNTHETIC_COORDINATED_PRE_V3_ORIGINALS_READY=1\n")?;
     }
     // Keep the same actual Host TempDir and live finite mock provider. This is
@@ -204,6 +330,7 @@ mod tests {
 }
 
 const READY_MARKER: &str = "SYNTHETIC_COORDINATED_PRE_V3_ORIGINALS_READY=1";
+const PUBLIC_READY_LINE: &str = "\nCI_FINANCIAL_FIXTURE_READY version=1";
 const PARENT_READY: &str = "coordinated-financial-ready-v1.json";
 const ORIGINAL_LIMIT: std::time::Duration = std::time::Duration::from_secs(900);
 
@@ -281,7 +408,7 @@ fn hold_ready_fixture(
     write_new_private(&parent.join(PARENT_READY), &ready)
         .map_err(|_| std::io::Error::other("full fixture ready publication refused"))?;
     parent_handle.sync_all()?;
-    println!("CI_FINANCIAL_FIXTURE_READY version=1");
+    println!("{PUBLIC_READY_LINE}");
     std::io::stdout().flush()?;
     let mut line = Vec::with_capacity(7);
     loop {
@@ -406,7 +533,9 @@ fn run_full_fixture_parent(live_external_witness: bool) {
         base_handle.sync_all()?;
         phase = "completion";
         if stage.outcome.is_err() || stage.next != stage.expected || Instant::now() >= deadline {
-            if stage.outcome.is_err() || stage.next != stage.expected { phase = "child_stage"; }
+            if stage.outcome.is_err() || stage.next != stage.expected {
+                phase = stage.coordinated_post_input_phase.map_or("child_stage", PostInputPhase::label);
+            }
             else { reason = "Deadline".into(); }
             return Err(std::io::Error::other("full fixture preparation or original lifetime failed"));
         }
@@ -485,4 +614,44 @@ fn full_fixture_container_layout_bind_rejects_old_and_accepts_short_private_root
             assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
         }
     }
+}
+
+#[test]
+fn full_fixture_public_ready_line_is_separate_from_libtest_progress() {
+    let emitted = format!("test fixture ... {PUBLIC_READY_LINE}\n");
+    assert_eq!(emitted.lines().last(), Some("CI_FINANCIAL_FIXTURE_READY version=1"));
+    assert_eq!(emitted.lines().count(), 2);
+}
+
+#[test]
+fn full_fixture_post_input_capture_handles_every_split_and_terminal_drain() {
+    let bytes = b"private output ignored\nSYNTHETIC_COORDINATED_POST_INPUT_PHASE=post_final_inspection\r\nSYNTHETIC_COORDINATED_POST_INPUT_PHASE=post_input_entry\nSYNTHETIC_COORDINATED_POST_INPUT_PHASE=post_witness_descriptor\n";
+    for split in 0..=bytes.len() {
+        let mut capture = PostInputCapture::default();
+        capture.append(&bytes[..split]);
+        // The same append method is used by the final, verified post-reap drain.
+        capture.append(&bytes[split..]);
+        assert_eq!(capture.finish(), Some(PostInputPhase::WitnessDescriptor));
+    }
+}
+
+#[test]
+fn full_fixture_post_input_capture_withholds_malformed_or_unordered_markers() {
+    let first = b"SYNTHETIC_COORDINATED_POST_INPUT_PHASE=post_input_entry\n";
+    for tail in [
+        b"SYNTHETIC_COORDINATED_POST_INPUT_PHASE=private-value\n".as_slice(),
+        b"SYNTHETIC_COORDINATED_POST_INPUT_PHASE=post_input_entry\n".as_slice(),
+        b"SYNTHETIC_COORDINATED_POST_INPUT_PHASE=post_final_inspection\n".as_slice(),
+        b"SYNTHETIC_COORDINATED_POST_INPUT_PHASE=post_witness_descriptor".as_slice(),
+        b"SYNTHETIC_COORDINATED_POST_\n".as_slice(),
+    ] {
+        let mut capture = PostInputCapture::default();
+        capture.append(first); capture.append(tail);
+        assert_eq!(capture.finish(), None);
+    }
+    let mut capture = PostInputCapture::default();
+    capture.append(first); capture.append(POST_INPUT_PREFIX); capture.append(&[b'x'; 4096]);
+    capture.append(b"\nSYNTHETIC_COORDINATED_POST_INPUT_PHASE=post_ready\n");
+    assert_eq!(capture.finish(), None);
+    assert_eq!(capture.candidate.len(), 96);
 }

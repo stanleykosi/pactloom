@@ -37,7 +37,8 @@ READY=b'CI_FINANCIAL_FIXTURE_READY version=1'
 CLEANED=b'CI_FINANCIAL_FIXTURE_CLEANED version=1'
 DIAGNOSTIC=b'CI_FINANCIAL_FIXTURE_DIAGNOSTIC '
 FIXTURE_PHASES=frozenset(('child_identity','child_directory','child_exec','core_policy','wait_policy',
-    'cutoff','parent_directory','temporary_root','tls_material','child_stage','cleanup','cleanup_record','completion'))
+    'cutoff','parent_directory','temporary_root','tls_material','child_stage','cleanup','cleanup_record','completion',
+    'post_final_inspection','post_input_entry','post_anchor_drain','post_source_one_open','post_source_one_metadata','post_source_one_preserve','post_source_two_open','post_source_two_metadata','post_source_two_preserve','post_signer_shutdown','post_host_fence','post_witness_descriptor','post_handoff_write','post_external_controls','post_external_bootstrap','post_ready'))
 FIXTURE_REASONS=frozenset(('Setup','Unclassified','Deadline','ChildObservation','ChildExit','PollIo','ReadIo',
     'OutputLimit','IncompleteUtf8','InvalidUtf8','MultilineInput','WriteIo','FlushIo','MissingPathMarker',
     'InvalidPath','InvalidChallenge','OutcomeRead','CleanupUnverified','FinancialPhaseDeadline','FinancialProgressInvalid'))

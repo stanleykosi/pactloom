@@ -27,11 +27,56 @@ fn require_drained(handles:usize,join_failed:bool)->Result<()> {
     if handles!=0||join_failed {return Err(AuthorityError::Permission);}
     Ok(())
 }
+// The original fixture contains one unused Single anchor and exactly two
+// selected V2 roster accounts. Selection is compared with the retained original
+// birth map; it cannot manufacture an account, history, native grant or owner.
+fn require_selected_original_accounts(
+    originals: &std::collections::BTreeMap<String, Vec<u8>>,
+    selected: &[String; 2],
+) -> Result<()> {
+    for account in selected { crate::hash(account)?; }
+    if originals.len() != 3 || selected[0] == selected[1]
+        || !selected.iter().all(|account| originals.contains_key(account)) {
+        return Err(AuthorityError::InvalidBinding);
+    }
+    Ok(())
+}
+
+// Full authenticated replay is performed by the caller before this additional
+// role-exact baseline check. Both roles retain their original four events and
+// no prospective delivery/payment/financial admission is accepted.
+fn require_pre_v3_original_history(ledger: &crate::policy::Ledger, selected_roster: bool) -> Result<()> {
+    if ledger.snapshot.head.sequence != 4 || ledger.operations.len() != 4
+        || ledger.selected_durable_payment_admission_v1()?.is_some()
+        || ledger.selected_durable_delivery_admission_v2()?.is_some()
+        || ledger.selected_financial_continuation_v1()?.is_some() {
+        return Err(AuthorityError::CorruptHistory);
+    }
+    if selected_roster {
+        ledger.require_supported_durable_payment_history_v1()?;
+        let attempt = ledger.latest_manual_roster_attempt_v2()?;
+        if attempt.sequence != 1 || attempt.continuation.is_some() || attempt.admission.is_none() {
+            return Err(AuthorityError::CorruptHistory);
+        }
+    } else {
+        // latest_manual_attempt explicitly refuses roster extensions and checks
+        // the original Single admission against its actual extension.
+        ledger.require_supported_manual_history()?;
+        let attempt = ledger.latest_manual_attempt()?;
+        if attempt.sequence != 1 || attempt.continuation.is_some()
+            || !matches!(attempt.admission, Some(crate::manual_session_continuation::ManualEnrollmentAdmissionEvidence::First { .. })) {
+            return Err(AuthorityError::CorruptHistory);
+        }
+    }
+    Ok(())
+}
+
 impl EphemeralNativeWitnessV1 {
     /// Consume the actual synthetic owner only after its original servers and
     /// all borrowers were dropped. No prospective request, completion DTO,
     /// private credential bytes, new account or review grant is accepted.
-    pub fn preserve_coordinated_pre_v3_originals_v1(mut self)->Result<Vec<u8>> {
+    pub fn preserve_coordinated_pre_v3_originals_v1(mut self, selected_accounts: &[String; 2])->Result<Vec<u8>> {
+        require_selected_original_accounts(&self.durable_delivery.original_signed_births, selected_accounts)?;
         require_drained(self.listener.server_handles.load(Ordering::Acquire),
             self.listener.server_join_failed.load(Ordering::Acquire))?;
         if self.durable_delivery.historical_only
@@ -55,7 +100,7 @@ impl EphemeralNativeWitnessV1 {
             let head={
                 let connection=journal.connection.lock().map_err(|_|AuthorityError::Storage)?;
                 let ledger=crate::journal::load(connection.connection())?;
-                ledger.require_supported_durable_payment_history_v1()?;
+                require_pre_v3_original_history(&ledger, selected_accounts.contains(&account_id))?;
                 let birth=crate::pending_birth_storage::read(connection.connection(),&ledger.policy)?
                     .ok_or(AuthorityError::RecoveryRequired)?;
                 if verified.request()!=&birth.request
@@ -115,3 +160,121 @@ mod tests {
 
 #[path = "coordinated_live_pre_v3_v1.rs"]
 mod live_pre_v3_v1;
+
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+    use crate::policy::Ledger;
+
+    fn roster_original() -> Ledger {
+        use wholepact_core::manual_roster_v2::{
+            HostRosterAppendBindingV2, HostRosterPredecessorV2,
+        };
+        let (birth, inner, _, _) = crate::manual_session_continuation::tests::continued_fixture();
+        let extension = crate::manual_roster_extension_v2::ManualRosterEnrollmentExtensionV2 {
+            version: 2,
+            roster: HostRosterAppendBindingV2 {
+                version: 2,
+                generation_id: inner.terms.host.generation_id.clone(),
+                store_destination_identity: inner.terms.host.store_destination_identity.clone(),
+                roster_sequence: 2,
+                predecessor: HostRosterPredecessorV2::InitialPublicationV2 {
+                    audit_digest: "d".repeat(64),
+                },
+            },
+            signer_roster_record_digest: "e".repeat(64),
+            account_extension: inner,
+        };
+        extension.validate_original_birth(&birth).unwrap();
+        let mut ledger = Ledger::new(birth.request.policy.clone()).unwrap();
+        let mut events = vec![crate::manual_roster_witness_v2::tests::extension_event(
+            &ledger, &extension,
+        )];
+        ledger.apply(&events[0]).unwrap();
+        crate::manual_roster_witness_v2::tests::bootstrap(
+            &birth,
+            &extension,
+            &mut ledger,
+            &mut events,
+            5000,
+            crate::session::session_id(&[0x55; 32]),
+        );
+        // Exercise maintained complete event replay, not a synthetic snapshot.
+        let mut replay = Ledger::new(birth.request.policy).unwrap();
+        for event in events {
+            replay.apply(&event).unwrap();
+        }
+        replay
+    }
+
+    #[test]
+    fn pre_v3_single_anchor_requires_its_actual_initial_admitted_history() {
+        let (birth, _, events, _) = crate::manual_enrollment::tests::bootstrap_events();
+        let mut replay = Ledger::new(birth.request.policy).unwrap();
+        for event in events {
+            replay.apply(&event).unwrap();
+        }
+        assert_eq!(replay.snapshot.head.sequence, 4);
+        assert_eq!(replay.operations.len(), 4);
+        // This is the exact prior bug: the real Single original is not a roster.
+        assert!(replay
+            .require_supported_durable_payment_history_v1()
+            .is_err());
+        assert!(require_pre_v3_original_history(&replay, false).is_ok());
+        assert!(require_pre_v3_original_history(&replay, true).is_err());
+    }
+
+    #[test]
+    fn pre_v3_roster_cannot_be_relabelled_as_unused_single_anchor() {
+        let replay = roster_original();
+        assert!(require_pre_v3_original_history(&replay, true).is_ok());
+        assert!(require_pre_v3_original_history(&replay, false).is_err());
+    }
+
+    #[test]
+    fn pre_v3_incomplete_or_changed_original_history_is_refused() {
+        let (birth, _, events, _) = crate::manual_enrollment::tests::bootstrap_events();
+        for length in 0..events.len() {
+            let mut replay = Ledger::new(birth.request.policy.clone()).unwrap();
+            for event in events.iter().take(length) {
+                replay.apply(event).unwrap();
+            }
+            assert!(require_pre_v3_original_history(&replay, false).is_err());
+            assert!(require_pre_v3_original_history(&replay, true).is_err());
+        }
+        let mut roster = roster_original();
+        roster.snapshot.head.sequence += 1;
+        assert!(require_pre_v3_original_history(&roster, true).is_err());
+    }
+
+    #[test]
+    fn pre_v3_roles_require_two_distinct_selected_originals_and_one_anchor() {
+        let selected = ["a".repeat(64), "b".repeat(64)];
+        let mut originals = std::collections::BTreeMap::from([
+            (selected[0].clone(), vec![1]),
+            (selected[1].clone(), vec![2]),
+            ("c".repeat(64), vec![3]),
+        ]);
+        assert!(require_selected_original_accounts(&originals, &selected).is_ok());
+        assert!(require_selected_original_accounts(
+            &originals,
+            &[selected[0].clone(), selected[0].clone()]
+        )
+        .is_err());
+        assert!(require_selected_original_accounts(
+            &originals,
+            &[selected[0].clone(), "d".repeat(64)]
+        )
+        .is_err());
+        assert!(require_selected_original_accounts(
+            &originals,
+            &[selected[0].clone(), "invalid".into()]
+        )
+        .is_err());
+        originals.remove(&"c".repeat(64));
+        assert!(require_selected_original_accounts(&originals, &selected).is_err());
+        originals.insert("c".repeat(64), vec![3]);
+        originals.insert("d".repeat(64), vec![4]);
+        assert!(require_selected_original_accounts(&originals, &selected).is_err());
+    }
+}

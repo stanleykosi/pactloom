@@ -87,13 +87,21 @@ fn request(controls:&Controls,index:usize,account:&str)->Result<OwnerControlRequ
 
 pub(super) fn run(terminal:&crate::terminal::Terminal,witness:&mut EphemeralNativeWitnessV1,account_ids:&[String;2],_root:&Path,original_cutoff:Instant)->Result<()> {
     if account_ids[0]==account_ids[1]{return Err(Error::Authentication)}
+    super::coordinated_full_fixture_v1::post_input_phase(terminal,
+        super::coordinated_full_fixture_v1::PostInputPhase::ExternalControls)?;
     let mut controls=Controls::open(original_cutoff)?;
     for index in 0..2 {
         if index==1 {controls.wait_command("v3-start-owner2",b"start\n")?;}
         controls.check()?;
+        if index==0 { super::coordinated_full_fixture_v1::post_input_phase(terminal,
+            super::coordinated_full_fixture_v1::PostInputPhase::ExternalBootstrap)?; }
         let history=authority(witness.serve_original_delivery_bootstrap_history_v2(&account_ids[index]))?;
         controls.observe(index,Event::BootstrapServing)?;
-        if index==0 {terminal.message("SYNTHETIC_COORDINATED_PRE_V3_ORIGINALS_READY=1\n")?;}
+        if index==0 {
+            super::coordinated_full_fixture_v1::post_input_phase(terminal,
+                super::coordinated_full_fixture_v1::PostInputPhase::Ready)?;
+            terminal.message("SYNTHETIC_COORDINATED_PRE_V3_ORIGINALS_READY=1\n")?;
+        }
         let actual_request=request(&controls,index,&account_ids[index])?;
         drop(history); // actual history thread join and journal/listener clone drop
         authority(witness.release_original_listener_when_idle_v1())?;

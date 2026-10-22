@@ -4,7 +4,8 @@ use super::*;
 impl EphemeralNativeWitnessV1 {
     /// Inspect actual original births/journals without consuming the original
     /// native owner or creating any prospective request or native permission.
-    pub fn describe_coordinated_pre_v3_originals_v1(&mut self)->Result<Vec<u8>> {
+    pub fn describe_coordinated_pre_v3_originals_v1(&mut self, selected_accounts: &[String; 2])->Result<Vec<u8>> {
+        require_selected_original_accounts(&self.durable_delivery.original_signed_births, selected_accounts)?;
         require_drained(self.listener.server_handles.load(Ordering::Acquire),
             self.listener.server_join_failed.load(Ordering::Acquire))?;
         if self.durable_delivery.historical_only
@@ -29,7 +30,7 @@ impl EphemeralNativeWitnessV1 {
             let head={
                 let connection=journal.connection.lock().map_err(|_|AuthorityError::Storage)?;
                 let ledger=crate::journal::load(connection.connection())?;
-                ledger.require_supported_durable_payment_history_v1()?;
+                require_pre_v3_original_history(&ledger, selected_accounts.contains(&account_id))?;
                 let birth=crate::pending_birth_storage::read(connection.connection(),&ledger.policy)?
                     .ok_or(AuthorityError::RecoveryRequired)?;
                 if verified.request()!=&birth.request

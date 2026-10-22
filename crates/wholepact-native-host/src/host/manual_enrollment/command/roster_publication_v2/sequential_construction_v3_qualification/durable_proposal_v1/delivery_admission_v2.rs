@@ -1318,6 +1318,11 @@ pub(super) fn continue_completed_original(
                     PASSWORD,
                 )
             })?;
+            if coordinated_pre_v3_fixture {
+                super::coordinated_full_fixture_v1::post_input_phase(
+                    &terminal, super::coordinated_full_fixture_v1::PostInputPhase::FinalInspection,
+                )?;
+            }
             let identity = {
                 let owner = host.original_delivery_admission_owner_v2(&workspace)?;
                 let inspected = owner
@@ -1991,6 +1996,7 @@ mod tests {
         transcript.enable_delivery_first_failure();
         transcript.append(marker, Path::new("/tmp/owned")).unwrap();
         PrivateWorkspaceStageResultV1 {
+            coordinated_post_input_phase: None,
             child_pid: 0, // Failed-child pure-test sentinel, never a runtime cleanup proof.
             pristine_first_failure: None,
             financial_progress_failure: None,

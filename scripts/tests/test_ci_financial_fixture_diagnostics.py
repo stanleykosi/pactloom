@@ -55,6 +55,7 @@ class FixtureDiagnostics(unittest.TestCase):
         self.assertEqual(reasons|{'Setup'},set(M.FIXTURE_REASONS))
         source=next((ROOT.parent/'crates/wholepact-native-host/src').rglob('coordinated_full_fixture_v1.rs')).read_text()
         phases=set(re.findall(r'phase = "([a-z_]+)"',source))
+        phases.update(re.findall(r'=> "(post_[a-z_]+)"',source))
         self.assertEqual(phases|{'child_identity','child_directory','child_exec'},set(M.FIXTURE_PHASES))
 
     def test_every_closed_phase_and_reason(self):
@@ -87,6 +88,33 @@ class FixtureDiagnostics(unittest.TestCase):
         self.assertEqual(out.getvalue().strip(),line.decode())
         self.assertNotIn('private-child-output',out.getvalue())
         self.assertNotIn('private-trailer',out.getvalue())
+    def test_supervisor_accepts_exact_same_closed_phase_set(self):
+        spec=importlib.util.spec_from_file_location('fixture_supervisor_tested',ROOT/'ci-financial-supervisor.py')
+        supervisor=importlib.util.module_from_spec(spec);spec.loader.exec_module(supervisor)
+        self.assertEqual(supervisor.FIXTURE_PHASES,M.FIXTURE_PHASES)
+        for phase in M.FIXTURE_PHASES:
+            records=supervisor.RuntimeRecords('full')
+            value=self.value()|{'phase':phase}
+            with contextlib.redirect_stdout(io.StringIO()):
+                records(b'CI_FINANCIAL_FIXTURE_DIAGNOSTIC '+json.dumps(value).encode())
+            self.assertEqual(records.fixture_diagnostic,value)
+
+    def test_public_ready_marker_is_framed_after_libtest_prefix(self):
+        source=next((ROOT.parent/'crates/wholepact-native-host/src').rglob('coordinated_full_fixture_v1.rs')).read_text()
+        literal=re.search(r'const PUBLIC_READY_LINE: &str = "([^"\n]+)";',source).group(1)
+        line=literal.encode().decode('unicode_escape').encode()
+        self.assertEqual(line,b'\n'+M.READY)
+        parent=M.FixtureParent.__new__(M.FixtureParent)
+        parent.deadline=100;parent.pending=bytearray();parent.total=0;parent.diagnostic=None
+        parent.process=mock.Mock();parent.process.stdout.fileno.return_value=42
+        selector=mock.MagicMock();selector.__enter__.return_value=selector;selector.select.return_value=[True]
+        out=io.StringIO()
+        with mock.patch.object(M.selectors,'DefaultSelector',return_value=selector), \
+             mock.patch.object(M.time,'monotonic_ns',return_value=0), \
+             mock.patch.object(M.os,'read',return_value=b'test fixture ... '+line+b'\n'),contextlib.redirect_stdout(out):
+            parent.wait_marker(M.READY)
+        self.assertEqual(out.getvalue(),'')
+
     def test_malformed_diagnostic_emits_nothing(self):
         out=io.StringIO()
         with contextlib.redirect_stdout(out),self.assertRaises(Exception):

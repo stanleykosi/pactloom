@@ -1289,6 +1289,7 @@ impl PrivateWorkspaceStageV1 {
     feature = "synthetic-born-joined-qualification"
 ))]
 struct PrivateWorkspaceStageResultV1 {
+    coordinated_post_input_phase: Option<durable_proposal_v1::coordinated_full_fixture_v1::PostInputPhase>,
     child_pid: u32,
     pristine_first_failure: Option<pristine_diagnostics_v1::Failure>,
     financial_progress_failure: Option<financial_progress_v1::Failure>,
@@ -1492,6 +1493,9 @@ fn private_workspace_stage_v1(
         child_temporary_root.into_tempdir(),
     );
 
+    let mut coordinated_post_input = matches!(stage,
+        PrivateWorkspaceStageV1::CoordinatedFixture | PrivateWorkspaceStageV1::CoordinatedLiveFixture)
+        .then(durable_proposal_v1::coordinated_full_fixture_v1::PostInputCapture::default);
     let mut next = 0;
     let mut marker_seen = false;
     let mut outcome = (|| -> std::io::Result<()> {
@@ -1552,6 +1556,7 @@ fn private_workspace_stage_v1(
             if length == 0 {
                 continue;
             }
+            if let Some(capture) = coordinated_post_input.as_mut() { capture.append(&chunk[..length]); }
             harness_transcript(
                 &mut failure_reason,
                 transcript.append(&chunk[..length], child.temporary_root()),
@@ -1703,11 +1708,13 @@ fn private_workspace_stage_v1(
         let drained = private_workspace_terminal_drain_v1(
             &mut master,
             &mut transcript,
+            coordinated_post_input.as_mut(),
             finished
                 .root_for_explicit_close
                 .as_ref()
                 .map(|root| root.path()),
         );
+        if drained.is_err() { coordinated_post_input = None; }
         if outcome.is_ok() {
             if let Err(error) = drained {
                 failure_reason = HarnessFailureReason::ReadIo;
@@ -1785,7 +1792,11 @@ fn private_workspace_stage_v1(
     } else {
         None
     };
+    let coordinated_post_input_phase = if process.verified() && next == inputs.len() {
+        coordinated_post_input.as_ref().and_then(|capture| capture.finish())
+    } else { None };
     Ok(PrivateWorkspaceStageResultV1 {
+        coordinated_post_input_phase,
         child_pid,
         // Preserve the original finite cause even when cleanup is uncertain.
         // It is not permission to transfer the retained root in that case.
@@ -1813,6 +1824,7 @@ fn private_workspace_stage_v1(
 fn private_workspace_terminal_drain_v1(
     master: &mut File,
     transcript: &mut rolling_transcript_v1::Transcript<'_>,
+    mut coordinated_post_input: Option<&mut durable_proposal_v1::coordinated_full_fixture_v1::PostInputCapture>,
     root: Option<&std::path::Path>,
 ) -> std::io::Result<()> {
     let root = root.ok_or_else(|| std::io::Error::other("verified root unavailable"))?;
@@ -1839,9 +1851,11 @@ fn private_workspace_terminal_drain_v1(
                     .finish_text()
                     .map_err(|_| std::io::Error::other("terminal utf8 incomplete"));
             }
-            Ok(length) => transcript
-                .append(&chunk[..length], root)
-                .map_err(|_| std::io::Error::other("terminal bounded append failed"))?,
+            Ok(length) => {
+                if let Some(capture) = coordinated_post_input.as_mut() { capture.append(&chunk[..length]); }
+                transcript.append(&chunk[..length], root)
+                    .map_err(|_| std::io::Error::other("terminal bounded append failed"))?;
+            }
             Err(error) if error.raw_os_error() == Some(libc::EIO) => {
                 return transcript
                     .finish_text()
