@@ -170,5 +170,131 @@ class CompletionSnapshotTests(unittest.TestCase):
         self.assertEqual(flow.fixture.deadline_ns,123)
         controller.terminal_click.assert_not_called()
 
+
+class DeferredHostPromptTests(unittest.TestCase):
+    PROMPTS=(('Exact coordinated reviewer selection JSON','reviewer_index'),
+             ('Exact copied native continuation selector JSON file','continue_index'),
+             ('Exact copied native AwaitingReturn result selector JSON file','result_index'))
+    def setUp(self):
+        from unittest import mock
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.directory=pathlib.Path(self.temp.name)
+        self.collector=O.ObserverFiles(self.directory,time.monotonic_ns()+10_000_000_000,F.C.EXTERNAL_PROFILE)
+        self.path=self.directory/'100.jsonl'
+        self.birth=dict(schema=1,profile=F.C.EXTERNAL_PROFILE,role='Host',sequence=1,
+                        elapsed_ns=0,kind='Birth',facts=dict(pid=100,parent_pid=99,parent_role='Coordinator'))
+        self.path.write_text(json.dumps(self.birth)+'\n');self.path.chmod(0o600)
+        self.selection=self.directory.parent/(self.directory.name+'-selection')
+        self.addCleanup(self.selection.unlink,missing_ok=True)
+        self.fixture=mock.Mock()
+        self.fixture.source.return_value={'original_capture':{'scope':{'participant_id':'synthetic'}},
+                                          'entry_selection':{'account_id':'synthetic'}}
+        self.fixture._data={'delivery_choices':{}}
+        self.fixture.source_path.return_value=str(self.selection)
+    def flow(self,index=1):
+        from unittest import mock
+        observer=mock.Mock();observer.expected_profile=F.C.EXTERNAL_PROFILE
+        flow=F.FullFlow(mock.Mock(),self.fixture,observer,None)
+        flow.records=self.collector.read()
+        flow.reviewer_index=flow.continue_index=flow.result_index=index
+        return flow
+    def append_ready(self):
+        record=self.birth|dict(sequence=2,elapsed_ns=1,kind='HostMilestone',facts={'step':'Owner1SigningRetired'})
+        with self.path.open('a') as stream:stream.write(json.dumps(record)+'\n')
+    def test_identical_prompts_wait_for_observed_milestone_then_consume_only_once(self):
+        flows=[(self.flow(),prompt,counter) for prompt,counter in self.PROMPTS]
+        self.selection.write_text('{}')
+        for flow,prompt,counter in flows:
+            for _ in range(3):
+                self.assertIsNone(flow.expected_host_line(prompt))
+                self.assertEqual(getattr(flow,counter),1)
+                self.assertEqual(flow.actions,0);self.assertEqual(flow.host_lines,0)
+            flow.controller.click.assert_not_called()
+        self.append_ready()
+        for flow,prompt,counter in flows:
+            with self.subTest(counter=counter):
+                flow.records=self.collector.read() # real append-only collector update
+                self.assertIsNotNone(flow.expected_host_line(prompt))
+                self.assertEqual(getattr(flow,counter),2)
+                for _ in range(3):self.assertIsNone(flow.expected_host_line(prompt))
+                self.assertEqual(getattr(flow,counter),2)
+                flow.controller.click.assert_not_called()
+    def test_selector_still_waits_for_existing_file_after_milestone(self):
+        self.append_ready()
+        for prompt,counter in self.PROMPTS[1:]:
+            with self.subTest(counter=counter):
+                self.selection.unlink(missing_ok=True)
+                flow=self.flow()
+                for _ in range(3):self.assertIsNone(flow.expected_host_line(prompt))
+                self.assertEqual(getattr(flow,counter),1)
+                self.selection.write_text('{}')
+                self.assertIsNotNone(flow.expected_host_line(prompt))
+                self.assertEqual(getattr(flow,counter),2)
+                self.fixture.source_path.assert_called_with('Signer2',
+                    'continuation_output_file' if counter=='continue_index' else 'result_output_file',must_exist=True)
+                self.assertIsNone(flow.expected_host_line(prompt))
+    def test_terminal_counters_never_reopen_on_changed_or_identical_prompts(self):
+        self.append_ready();self.selection.write_text('{}')
+        for prompt,counter in self.PROMPTS:
+            with self.subTest(counter=counter):
+                flow=self.flow(index=2)
+                for text in (prompt,prompt,prompt+' synthetic suffix'):
+                    self.assertIsNone(flow.expected_host_line(text))
+                self.assertEqual(getattr(flow,counter),2)
+                self.assertEqual(flow.actions,0)
+    def test_first_owner_does_not_require_second_owner_gate(self):
+        self.selection.write_text('{}')
+        for prompt,counter in self.PROMPTS:
+            with self.subTest(counter=counter):
+                flow=self.flow(index=0)
+                self.assertIsNotNone(flow.expected_host_line(prompt))
+                self.assertEqual(getattr(flow,counter),1)
+                self.assertIsNone(flow.expected_host_line(prompt))
+                self.assertEqual(getattr(flow,counter),1)
+
+
+class FailureCheckpointTests(unittest.TestCase):
+    def flow(self,phases,proof=False):
+        kinds=('NormalFinishAdmitted','PtyHeld','PtyReleased','NormalFinished') if proof else ()
+        flow,controller,_=CompletionSnapshotTests.flow(self,kinds)
+        original=flow.native.next_snapshot;pending=list(phases)
+        def next_snapshot(deadline):
+            snapshot=original(deadline)
+            if pending:
+                phase,subphase,owner=pending.pop(0)
+                snapshot.update(phase=phase,subphase=subphase,owner=owner)
+            return snapshot
+        flow.native.next_snapshot=next_snapshot
+        return flow,controller
+    def test_terminal_first_omits_location_and_keeps_actual_failure_code(self):
+        for phase,code in (('Revoked','source_failure'),('Finished','normal_finish')):
+            with self.subTest(phase=phase):
+                flow,controller=self.flow([(phase,'None',None)])
+                with self.assertRaises(F.C.Rejected) as error:flow.run()
+                self.assertEqual(error.exception.code,code)
+                self.assertIsNone(flow.location)
+                controller.terminal_click.assert_not_called()
+    def test_actual_last_nonterminal_phase_subphase_owner_survives_terminal_failure(self):
+        for phase,code in (('Revoked','source_failure'),('Finished','normal_finish')):
+            with self.subTest(phase=phase):
+                flow,controller=self.flow([('Waiting','None',None),('WriterFlow','Idle','Signer2'),(phase,'None',None)])
+                with self.assertRaises(F.C.Rejected) as error:flow.run()
+                self.assertEqual(error.exception.code,code)
+                self.assertEqual(flow.location,{'phase':'WriterFlow','subphase':'Idle','owner':'Signer2'})
+                controller.terminal_click.assert_not_called()
+    def test_normal_success_keeps_proof_guard_and_emits_no_diagnostic(self):
+        import contextlib,io
+        for prefix,expected in (([],None),([('WriterFlow','Idle','Signer2')],
+             {'phase':'WriterFlow','subphase':'Idle','owner':'Signer2'})):
+            with self.subTest(prefix=prefix):
+                flow,controller=self.flow(prefix+[('Finished','None',None)],proof=True)
+                output=io.StringIO()
+                with contextlib.redirect_stdout(output):flow.run()
+                self.assertEqual(output.getvalue(),'')
+                self.assertEqual(flow.location,expected)
+                controller.terminal_click.assert_called_once_with(20,20)
+
 if __name__=='__main__':unittest.main()
+
+
 

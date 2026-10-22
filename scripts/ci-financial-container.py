@@ -262,6 +262,8 @@ def main():
     except BaseException as error:
         code=getattr(error,'code','process')
         flow=getattr(session,'flow',None)
+        # LOCATION is the last validated nonterminal observation only; omit it
+        # when none was observed. It does not identify the terminal cause.
         if flow is not None and flow.location is not None:
             print('CI_FINANCIAL_LOCATION '+json.dumps(flow.location,separators=(',',':')),flush=True)
         # No raw exception/path/Host output escapes. Outer owner destroys whole
