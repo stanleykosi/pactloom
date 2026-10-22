@@ -30,7 +30,7 @@ DIAGNOSTIC_REASONS=frozenset(('api_pin','archive_redirect','download_deadline','
  'zip_entries','zip_bundle_digest','api_file_changed','producer_job','producer_upload',
  'output_location','token','plan_schema','plan_version','producer_pin','harness_pin',
  'artifact_pins','artifact_id','artifact_digest','api_pins','api_digest','reviewed_change_set',
- 'closure','closure_path','closure_digest'))
+ 'closure','closure_path','closure_digest','artifact_list','artifact_selection','artifact_origin'))
 DIAGNOSTIC_STAGE='plan'
 DIAGNOSTIC_HTTP_STATUS=0
 
@@ -78,6 +78,34 @@ def bounded_read(response,limit,deadline,destination=None):
  return b''.join(chunks) if destination is None else count
 
 
+def listed_artifact(api,base,plan,token,deadline):
+ # Pins were reviewed from this authenticated run LIST representation, not
+ # the potentially different single-artifact representation. Never relax pins.
+ rows=[];total=None
+ for page in range(1,11):
+  path='runs/'+str(L.V.PRODUCER['run_id'])+'/artifacts?per_page=100&page='+str(page)
+  request=urllib.request.Request(base+path,headers=api_headers(token))
+  with api.open(request,timeout=30) as response:raw=bounded_read(response,8*1024*1024,deadline)
+  value=json.loads(raw,object_pairs_hook=L.V.A.pairs)
+  L.V.require(type(value) is dict and type(value.get('total_count')) is int and
+   0<=value['total_count']<=1000 and type(value.get('artifacts')) is list,'artifact_list')
+  if total is None:total=value['total_count']
+  L.V.require(value['total_count']==total and len(value['artifacts'])==min(100,total-len(rows)), 'artifact_list')
+  rows.extend(value['artifacts'])
+  if len(rows)==total:break
+ L.V.require(len(rows)==total and all(type(row) is dict and type(row.get('id')) is int and row['id']>0 for row in rows),'artifact_list')
+ L.V.require(len({row['id'] for row in rows})==len(rows),'artifact_selection')
+ selected=[row for row in rows if row['id']==plan['artifact_pins']['artifact_id']]
+ L.V.require(len(selected)==1,'artifact_selection');artifact=selected[0]
+ origin=artifact.get('workflow_run');producer=L.V.PRODUCER
+ name='financial-build-'+str(producer['run_id'])+'-'+str(producer['attempt'])+'-'+producer['source']
+ L.V.require(artifact.get('name')==name and artifact.get('expired') is False and
+  type(origin) is dict and type(origin.get('id')) is int and origin['id']==producer['run_id'] and
+  origin.get('head_sha')==producer['source'] and
+  artifact.get('digest')=='sha256:'+plan['artifact_pins']['archive_sha256'],'artifact_origin')
+ return artifact
+
+
 def acquire(plan,output,token):
  global DIAGNOSTIC_STAGE,DIAGNOSTIC_HTTP_STATUS
  L.validate_plan(plan)
@@ -87,9 +115,12 @@ def acquire(plan,output,token):
         'job':'jobs/'+str(L.V.JOB_ID),'artifact':'artifacts/'+str(plan['artifact_pins']['artifact_id'])}
  for name,path in paths.items():
   DIAGNOSTIC_STAGE='api_'+name
-  request=urllib.request.Request(base+path,headers=api_headers(token))
-  with api.open(request,timeout=30) as response:raw=bounded_read(response,8*1024*1024,deadline)
-  value=json.loads(raw,object_pairs_hook=L.V.A.pairs);canonical=L.V.A.canonical(value)
+  if name=='artifact':value=listed_artifact(api,base,plan,token,deadline)
+  else:
+   request=urllib.request.Request(base+path,headers=api_headers(token))
+   with api.open(request,timeout=30) as response:raw=bounded_read(response,8*1024*1024,deadline)
+   value=json.loads(raw,object_pairs_hook=L.V.A.pairs)
+  canonical=L.V.A.canonical(value)
   L.V.require(hashlib.sha256(canonical).hexdigest()==plan['api_pins'][name],'api_pin')
   (output/(name+'.json')).write_bytes(canonical)
  DIAGNOSTIC_STAGE='archive_redirect'

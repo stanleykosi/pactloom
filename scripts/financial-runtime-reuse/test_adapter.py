@@ -155,7 +155,7 @@ class TrackedAcquisitionDiagnosticTests(unittest.TestCase):
   for name in L.HELPERS:shutil.copy2(here/name,self.source/name)
   shutil.copytree(here/'cleanup_snapshot',self.source/'cleanup_snapshot')
   self.job=dict(id=L.V.JOB_ID,run_id=L.V.PRODUCER['run_id'],name='synthetic-only',status='completed',conclusion='failure',steps=[dict(name='Preserve exact credential-free compiled financial bundle',status='completed',conclusion='success')])
-  self.bodies=dict(run=self.fixture.run,job=self.job,artifact=self.fixture.artifact)
+  self.bodies=dict(run=self.fixture.run,job=self.job,artifact={**self.fixture.artifact,'node_id':'raw-api-node-id'})
   self.plan=AdapterTests.plan(self);self.plan['artifact_pins']=self.fixture.pins
   self.plan['api_pins']={k:L.V.A.canonical(v) for k,v in self.bodies.items()}
   self.plan['api_pins']={k:__import__('hashlib').sha256(v).hexdigest() for k,v in self.plan['api_pins'].items()}
@@ -170,11 +170,28 @@ class TrackedAcquisitionDiagnosticTests(unittest.TestCase):
  def exercise(self,case):
   import urllib.request,urllib.error
   target=self.root/('wholepact-financial-reuse-download-'+case);output=io.StringIO();owner=self
+  requested=[]
   secret='DO_NOT_LEAK_BODY https://secret.invalid/private?signature=DO_NOT_LEAK_URL'
   class API:
    def open(self,request,timeout):
-    url=request.full_url
+    url=request.full_url;requested.append(url)
     if case=='http':raise urllib.error.HTTPError(url,403,secret,{'Secret':secret},io.BytesIO(secret.encode()))
+    if '/artifacts?per_page=100&page=' in url:
+     value=owner.bodies['artifact']
+     if case=='pin_artifact':value={**value,'hostile_body':secret}
+     if case=='projected_artifact':value={k:v for k,v in value.items() if k!='node_id'}
+     if case=='wrong_name':value={**value,'name':'wrong'}
+     if case=='wrong_run':value={**value,'workflow_run':{**value['workflow_run'],'id':1}}
+     if case=='wrong_sha':value={**value,'workflow_run':{**value['workflow_run'],'head_sha':'a'*40}}
+     if case=='expired':value={**value,'expired':True}
+     if case=='wrong_digest':value={**value,'digest':'sha256:'+'0'*64}
+     if case=='bool_id':value={**value,'id':True}
+     rows=[] if case=='missing' else [value,value] if case=='duplicate' else [value]
+     envelope=dict(total_count=len(rows),artifacts=rows)
+     if case=='incomplete':envelope['total_count']=2
+     if case=='bool_count':envelope['total_count']=True
+     if case=='pagination':envelope=dict(total_count=101,artifacts=[{'id':1000+i} for i in range(100)] if url.endswith('page=1') else [value])
+     return io.BytesIO(L.V.A.canonical(envelope))
     for suffix,key in [('runs/'+str(L.V.PRODUCER['run_id']),'run'),('jobs/'+str(L.V.JOB_ID),'job'),('artifacts/'+str(owner.fixture.pins['artifact_id']),'artifact')]:
      if url.endswith('/'+suffix):
       if case=='size':return io.BytesIO(b'x'*(8*1024*1024+1))
@@ -191,19 +208,28 @@ class TrackedAcquisitionDiagnosticTests(unittest.TestCase):
    if case=='deadline':
     with patch('time.monotonic',side_effect=[0,301]):
      with self.assertRaises(Exception):self.launcher.main()
-   elif case=='success':self.assertEqual(self.launcher.main(),0)
+   elif case in ('success','pagination'):self.assertEqual(self.launcher.main(),0)
    else:
     with self.assertRaises(Exception):self.launcher.main()
   raw=output.getvalue()
   for forbidden in ('DO_NOT_LEAK','secret.invalid','signature=','Authorization'):self.assertNotIn(forbidden,raw)
-  if case=='success':
-   self.assertNotIn('ACQUISITION_DIAGNOSTIC',raw);self.assertIn('"verified":true',raw);self.assertTrue(target.exists());return
+  if case in ('success','pagination'):
+   self.assertNotIn('ACQUISITION_DIAGNOSTIC',raw);self.assertIn('"verified":true',raw);self.assertTrue(target.exists())
+   base='https://api.github.com/repos/stanleykosi/pactloom/actions/'
+   expected_urls=[base+'runs/'+str(L.V.PRODUCER['run_id']),base+'jobs/'+str(L.V.JOB_ID),base+'runs/'+str(L.V.PRODUCER['run_id'])+'/artifacts?per_page=100&page=1']
+   if case=='pagination':expected_urls.append(base+'runs/'+str(L.V.PRODUCER['run_id'])+'/artifacts?per_page=100&page=2')
+   expected_urls.extend([base+'artifacts/'+str(owner.fixture.pins['artifact_id'])+'/zip','https://recorded.blob.core.windows.net/fixture.zip'])
+   self.assertEqual(requested,expected_urls);return
   self.assertFalse(target.exists())
   lines=[line for line in raw.splitlines() if line.startswith('CI_FINANCIAL_REUSE_ACQUISITION_DIAGNOSTIC ')]
   self.assertEqual(len(lines),1);value=json.loads(lines[0].split(' ',1)[1])
   self.assertEqual(set(value),{'version','stage','category','api_pin','http_status'})
   expected={'http':('api_run','http',403),'redirect':('archive_redirect','archive_redirect',302),'size':('api_run','download_size',0),'deadline':('api_run','download_deadline',0),'digest':('archive_verify','archive_digest',0)}
-  if case.startswith('pin_'):self.assertEqual((value['stage'],value['category'],value['api_pin'],value['http_status']),('api_'+case[4:],'api_pin',case[4:],0))
+  for item in ('missing','duplicate'):expected[item]=('api_artifact','artifact_selection',0)
+  for item in ('bool_id','incomplete','bool_count'):expected[item]=('api_artifact','artifact_list',0)
+  for item in ('wrong_name','wrong_run','wrong_sha','expired','wrong_digest'):expected[item]=('api_artifact','artifact_origin',0)
+  if case=='projected_artifact':self.assertEqual((value['stage'],value['category'],value['api_pin']),('api_artifact','api_pin','artifact'))
+  elif case.startswith('pin_'):self.assertEqual((value['stage'],value['category'],value['api_pin'],value['http_status']),('api_'+case[4:],'api_pin',case[4:],0))
   else:self.assertEqual((value['stage'],value['category'],value['http_status']),expected[case]);self.assertEqual(value['api_pin'],'none')
  def test_tracked_main_failure_paths_and_secret_noninterference(self):
   for case in ('http','pin_run','pin_job','pin_artifact','redirect','size','deadline','digest'):
@@ -232,5 +258,13 @@ class TrackedAcquisitionDiagnosticTests(unittest.TestCase):
    network.assert_not_called()
   self.assertEqual(marker.read_text(),'owned elsewhere')
   value=json.loads(output.getvalue().split(' ',1)[1]);self.assertEqual((value['stage'],value['category']),('directory','internal'))
+
+ def test_raw_metadata_retains_node_id_and_projected_metadata_is_rejected(self):
+  self.exercise('projected_artifact');self.exercise('success')
+ def test_list_selection_rejects_missing_duplicate_malformed_and_wrong_provenance(self):
+  for case in ('missing','duplicate','bool_id','incomplete','bool_count','wrong_name','wrong_run','wrong_sha','expired','wrong_digest'):
+   with self.subTest(case=case):self.exercise(case)
+ def test_complete_pagination_selects_pinned_artifact_and_preserves_archive_endpoint(self):
+  self.exercise('pagination')
 
 if __name__=='__main__':unittest.main()
