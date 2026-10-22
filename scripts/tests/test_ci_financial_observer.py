@@ -294,6 +294,85 @@ class FailureCheckpointTests(unittest.TestCase):
                 self.assertEqual(flow.location,expected)
                 controller.terminal_click.assert_called_once_with(20,20)
 
+
+class PrivateInitialSelectionProbeTests(unittest.TestCase):
+    def flow(self, *, reveal_after=12, enabled=True, transition='V3Configuring',
+             owner='Signer1', protected=False):
+        from unittest import mock
+        controller=mock.Mock()
+        state={'down':0,'clicked':False,'generation':0}
+        def down(*point):state['down']+=1
+        def click(*point):
+            self.assertGreaterEqual(state['down'],reveal_after)
+            self.assertTrue(enabled)
+            self.assertFalse(state['clicked'])
+            state['clicked']=True
+        controller.scroll_down.side_effect=down
+        controller.click.side_effect=click
+        class Observer:
+            expected_profile=F.C.EXTERNAL_PROFILE
+            def read(self):return []
+            def next_snapshot(self,deadline):
+                state['generation']+=1
+                widgets=[dict(tag='ScrollRegion',owner=None,rect=[0,0,1280,800],enabled=True)]
+                if state['down']>=reveal_after:
+                    widgets.append(dict(tag='ConfigureV3',owner='Signer1',rect=[20,600,200,630],enabled=enabled))
+                # Until discovery every snapshot has exactly identical tagged
+                # geometry, as with untagged/clipped content crossing a viewport.
+                return dict(phase=transition if state['clicked'] else 'Selecting',
+                    subphase='None',owner=owner if state['clicked'] and transition=='V3Configuring' else None,
+                    view_generation=state['generation'],focused=True,secret_input=False,
+                    host_input=protected,pixels_per_point=1,viewport=[1280,800],widgets=widgets)
+        fixture=mock.Mock();fixture.deadline_ns=123
+        fixture.secret.side_effect=AssertionError('probe must not access credentials')
+        flow=F.FullFlow(controller,fixture,Observer(),None)
+        flow.pump_host=mock.Mock(side_effect=AssertionError('probe must not pump Host'))
+        return flow,controller,state
+    def run_rejected(self,flow,code):
+        with self.assertRaises(F.C.Rejected) as error:flow.initial_selection_probe()
+        self.assertEqual(error.exception.code,code)
+        flow.pump_host.assert_not_called();flow.fixture.secret.assert_not_called()
+        flow.controller.type_ascii.assert_not_called()
+        flow.controller.terminal_click.assert_not_called()
+        flow.controller.focus.assert_not_called()
+        self.assertEqual(flow.fixture.deadline_ns,123)
+    def test_unchanged_clipped_geometry_does_not_reverse_search(self):
+        flow,controller,state=self.flow()
+        self.run_rejected(flow,'missing_evidence')
+        self.assertEqual(controller.scroll_up.call_count,8)
+        self.assertEqual(controller.scroll_down.call_count,12)
+        controller.click.assert_called_once_with(110,615)
+        self.assertEqual(flow.location,dict(phase='V3Configuring',subphase='None',owner='Signer1'))
+        self.assertEqual(flow.actions,1)
+        self.assertEqual(len(flow.done),1)
+    def test_absent_or_disabled_control_never_clicked(self):
+        for options in ({'reveal_after':1000},{'reveal_after':0,'enabled':False}):
+            with self.subTest(options=options):
+                flow,controller,state=self.flow(**options)
+                self.run_rejected(flow,'input_budget')
+                controller.click.assert_not_called()
+                self.assertEqual(controller.scroll_up.call_count+controller.scroll_down.call_count,64)
+    def test_no_transition_never_retries_click(self):
+        flow,controller,state=self.flow(reveal_after=0,transition='Selecting')
+        self.run_rejected(flow,'input_budget')
+        controller.click.assert_called_once_with(110,615)
+        controller.scroll_up.assert_not_called();controller.scroll_down.assert_not_called()
+    def test_wrong_or_terminal_transition_never_counts_as_probe_progress(self):
+        for options in ({'transition':'Finished'},{'transition':'Revoked'},
+                        {'transition':'Waiting'},{'owner':'Signer2'}):
+            with self.subTest(options=options):
+                flow,controller,state=self.flow(reveal_after=0,**options)
+                self.run_rejected(flow,'input_phase')
+                self.assertEqual(controller.click.call_count,1)
+    def test_host_protected_boundary_is_rejected_without_any_input(self):
+        flow,controller,state=self.flow(reveal_after=0,protected=True)
+        self.run_rejected(flow,'input_phase')
+        self.assertEqual(controller.mock_calls,[])
+    def test_container_uses_failure_only_probe_not_full_success_path(self):
+        source=(ROOT/'ci-financial-container.py').read_text()
+        self.assertIn('self.flow.initial_selection_probe()',source)
+        self.assertNotIn('self.flow.run()',source)
+
 if __name__=='__main__':unittest.main()
 
 
