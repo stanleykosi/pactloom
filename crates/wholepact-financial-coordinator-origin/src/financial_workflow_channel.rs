@@ -673,3 +673,89 @@ mod tests {
 #[cfg(test)]mod financial_setup_route_tests {use super::*;#[test]fn financial_setup_is_only_original_role_downstream_data(){let p=Packet::FinancialSetupSelection{role:Target::Signer1,selection:crate::financial_setup_selection_data::tests::selection()};assert!(check_direction(Role::Coordinator,Role::Host,&p).is_ok());assert!(check_direction(Role::Host,Role::Signer1,&p).is_ok());assert!(check_direction(Role::Signer1,Role::Host,&p).is_err());assert!(check_direction(Role::Host,Role::Signer2,&p).is_err());}}
 #[cfg(test)]mod sign_route_tests{use super::*;#[test]fn exact_sign_packets_have_only_fixed_edges(){let p=Packet::SignReadDisplay{presentation:crate::signer_sign_data::tests::read()};assert!(check_direction(Role::Signer1,Role::Host,&p).is_ok());assert!(check_direction(Role::Signer2,Role::Host,&p).is_err());let p=Packet::SignExactFinal{role:Target::Signer1,presentation_digest:"ab".repeat(32)};assert!(check_direction(Role::Coordinator,Role::Host,&p).is_ok());assert!(check_direction(Role::Signer1,Role::Host,&p).is_err());}}
 #[cfg(test)]mod return_route_tests{use super::*;#[test]fn return_uses_fixed_original_actor_edges(){let p=Packet::ReturnReadDisplay{presentation:crate::signer_return_data::tests::read()};assert!(check_direction(Role::Signer1,Role::Host,&p).is_ok());assert!(check_direction(Role::Signer2,Role::Host,&p).is_err());let p=Packet::ReturnExactFinal{role:Target::Signer1,presentation_digest:"ab".repeat(32)};assert!(check_direction(Role::Host,Role::Signer1,&p).is_ok());assert!(check_direction(Role::Signer1,Role::Host,&p).is_err());}}
+
+#[cfg(test)]
+mod v3_delivery_packet_roundtrip_tests {
+    use super::*;
+    fn roundtrip_and_closed_schema(packet: Packet, kind: &str, nested: &str) {
+        assert!(packet.target().unwrap() == Some(Target::Signer1));
+        assert!(check_direction(Role::Signer1, Role::Host, &packet).is_ok());
+        let bytes = payload(&packet).unwrap();
+        assert!(bytes.len() + 8 <= MAX_PACKET);
+        let decoded: Packet = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("{kind} receive grammar failed: {e}"));
+        assert!(decoded.target().unwrap() == Some(Target::Signer1));
+        assert!(check_direction(Role::Signer1, Role::Host, &decoded).is_ok());
+        assert!(check_direction(Role::Host, Role::Coordinator, &decoded).is_ok());
+        assert!(check_direction(Role::Signer2, Role::Host, &decoded).is_err());
+        assert!(check_direction(Role::Host, Role::Signer1, &decoded).is_err());
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), serde_json::to_value(&packet).unwrap());
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["kind"], kind);
+        let mut extra = value.clone();
+        extra["unexpected_authority"] = true.into();
+        assert!(serde_json::from_slice::<Packet>(&serde_json::to_vec(&extra).unwrap()).is_err());
+        let mut nested_extra = value.clone();
+        nested_extra[nested]["unexpected_authority"] = true.into();
+        assert!(serde_json::from_slice::<Packet>(&serde_json::to_vec(&nested_extra).unwrap()).is_err());
+        let mut unknown = value;
+        unknown["kind"] = "V3ReceiveUnknown".into();
+        assert!(serde_json::from_slice::<Packet>(&serde_json::to_vec(&unknown).unwrap()).is_err());
+        let duplicate = format!("{{\"kind\":\"{}\",{}", kind, std::str::from_utf8(&bytes).unwrap().strip_prefix('{').unwrap());
+        assert!(serde_json::from_slice::<Packet>(duplicate.as_bytes()).is_err());
+    }
+    #[test]
+    fn prepared_packet_roundtrip_and_denials() {
+        let data = crate::signer_v3_delivery_data::tests::prepared();
+        roundtrip_and_closed_schema(Packet::V3Prepared { role: Target::Signer1, data: data.clone() }, "V3Prepared", "data");
+        let mut bad = data;
+        bad.read_session_digest = "ff".repeat(32);
+        let bytes = payload(&Packet::V3Prepared { role: Target::Signer1, data: bad }).unwrap();
+        let decoded: Packet = serde_json::from_slice(&bytes).unwrap();
+        assert!(decoded.target().is_err());
+        assert!(check_direction(Role::Signer1, Role::Host, &decoded).is_err());
+    }
+    #[test]
+    fn receive_display_packet_roundtrip_and_denials() {
+        let presentation = crate::signer_v3_delivery_data::tests::receive();
+        roundtrip_and_closed_schema(Packet::V3ReceiveDisplay { presentation: presentation.clone() }, "V3ReceiveDisplay", "presentation");
+        let mut bad = presentation;
+        bad.facts.payload_bytes += 1;
+        let bytes = payload(&Packet::V3ReceiveDisplay { presentation: bad }).unwrap();
+        let decoded: Packet = serde_json::from_slice(&bytes).unwrap();
+        assert!(decoded.target().is_err());
+        assert!(check_direction(Role::Signer1, Role::Host, &decoded).is_err());
+    }
+    #[test]
+    fn received_packet_roundtrip_and_denials() {
+        let p = crate::signer_v3_delivery_data::tests::receive();
+        let data = crate::SignerV3ReceivedV1 {
+            receive_presentation_digest: p.presentation_digest,
+            prepare_read_presentation_digest: p.facts.prepare_read_presentation_digest,
+            source_identity_digest: p.facts.source_identity_digest,
+            owner_service_digest: p.facts.owner_service_digest,
+            recipient_intent_digest: "ab".repeat(32),
+            payload_digest: p.facts.payload_digest,
+            fixed_identity_digest: p.facts.fixed_identity_digest,
+            payload_bytes: p.facts.payload_bytes,
+        };
+        roundtrip_and_closed_schema(Packet::V3Received { role: Target::Signer1, data: data.clone() }, "V3Received", "data");
+        let mut bad = data;
+        bad.payload_bytes = 0;
+        let bytes = payload(&Packet::V3Received { role: Target::Signer1, data: bad }).unwrap();
+        let decoded: Packet = serde_json::from_slice(&bytes).unwrap();
+        assert!(decoded.target().is_err());
+        assert!(check_direction(Role::Signer1, Role::Host, &decoded).is_err());
+    }
+    #[test]
+    fn admit_read_display_packet_roundtrip_and_denials() {
+        let presentation = crate::signer_v3_admit_read_data::tests::presentation();
+        roundtrip_and_closed_schema(Packet::V3AdmitReadDisplay { presentation: presentation.clone() }, "V3AdmitReadDisplay", "presentation");
+        let mut bad = presentation;
+        bad.facts.received.payload_bytes = 0;
+        let bytes = payload(&Packet::V3AdmitReadDisplay { presentation: bad }).unwrap();
+        let decoded: Packet = serde_json::from_slice(&bytes).unwrap();
+        assert!(decoded.target().is_err());
+        assert!(check_direction(Role::Signer1, Role::Host, &decoded).is_err());
+    }
+}

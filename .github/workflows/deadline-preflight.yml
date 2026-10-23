@@ -1,14 +1,14 @@
-name: Deadline identity preflight only
+name: Delivery packet preflight only
 on:
   push:
-    branches: [checkpoint/deadline-preflight-p44]
+    branches: [checkpoint/packet-preflight-p45]
 permissions: {}
 concurrency:
-  group: deadline-preflight-p44
+  group: packet-preflight-p45
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/deadline-preflight-p44' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/packet-preflight-p45' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -104,12 +104,14 @@ jobs:
           exe = executables[0]
           prefix = 'financial_workflow_clock::tests::'
           names = [prefix+n for n in ['fixed_full_workflow_clocks_share_one_original_epoch', 'full_offsets_shorten_and_never_restart_at_receive', 'full_cleanup_is_capped_without_action_extension', 'original_cleanup_retention_never_renews_and_floor_only_crosses_edges']]
-          assert len(names) == 4
+          packet_prefix = 'financial_workflow_channel::v3_delivery_packet_roundtrip_tests::'
+          names += [packet_prefix+n for n in ['prepared_packet_roundtrip_and_denials', 'receive_display_packet_roundtrip_and_denials', 'received_packet_roundtrip_and_denials', 'admit_read_display_packet_roundtrip_and_denials']]
+          assert len(names) == 8
           for name in names:
               listing = run([exe, '--list', '--exact', name], env=env, timeout=30)
               assert [line for line in listing.splitlines() if line.endswith(': test')] == [name+': test'], name
               result = run([exe, '--exact', name, '--test-threads=1'], env=env, timeout=30)
               assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in result, name
               print(name+': passed')
-          print('Four clock tests and four source-extracted inert-carrier regressions passed. Compiler/API preflight only; not authority-flow, native/full qualification, deployment or settlement.')
+          print('Four clock, four actual packet round-trip tests, and four source-extracted inert-carrier regressions passed. Compiler/API preflight only; not authority-flow, native/full qualification, deployment or settlement.')
           PY
