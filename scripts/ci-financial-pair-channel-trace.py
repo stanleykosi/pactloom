@@ -5,7 +5,7 @@ The exact original epoch-offset, wall-cap, shared-wall and constructor bodies ar
 extracted. This checks arithmetic/control flow, not genuine approval, process
 custody, DTO authentication, scheduling, sockets, or clock-provider behavior.
 """
-import argparse, hashlib, json, os, re, subprocess
+import argparse, hashlib, json, os, re, subprocess, sys
 from pathlib import Path
 
 
@@ -104,7 +104,12 @@ def main():
         exe=out/'pair-channel-trace'
         for command,timeout,log in [([os.environ.get('RUSTC','rustc'),'--edition=2021','--test',str(generated),'-o',str(exe)],60,'compile.log'),([str(exe),'--list'],10,'list.log'),([str(exe),'--test-threads=1'],30,'tests.log')]:
             result=subprocess.run(command,text=True,capture_output=True,timeout=timeout);(out/log).write_text(result.stdout+result.stderr)
-            if result.returncode:raise SystemExit(f'{log} failed: {result.returncode}')
+            if result.returncode:
+                # Source-extracted compiler/test output only, never private runtime.
+                diagnostic=(result.stdout+result.stderr)[-16_384:]
+                print(f'{log} diagnostic (last 16384 characters):',file=sys.stderr)
+                print(diagnostic,file=sys.stderr)
+                raise SystemExit(f'{log} failed: {result.returncode}')
             if log=='list.log':assert sorted(re.findall(r'^(\w+): test$',result.stdout,re.M))==sorted(EXPECTED)
             if log=='tests.log':assert 'test result: ok. 12 passed; 0 failed;' in result.stdout
         binding['executed']=True;record.write_text(json.dumps(binding,indent=2)+'\n')

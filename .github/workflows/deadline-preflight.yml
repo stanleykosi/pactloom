@@ -1,14 +1,14 @@
 name: Preparation response framing preflight only
 on:
   push:
-    branches: [checkpoint/framing-preflight-p49b]
+    branches: [checkpoint/framing-preflight-p49c]
 permissions: {}
 concurrency:
-  group: framing-preflight-p49b
+  group: framing-preflight-p49c
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/framing-preflight-p49b' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/framing-preflight-p49c' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -151,7 +151,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/framing-preflight-p49b' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/framing-preflight-p49c' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

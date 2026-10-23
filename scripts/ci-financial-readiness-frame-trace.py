@@ -158,7 +158,7 @@ HELPER_TESTS = r'''
 
 MAPPER_PREFIX = r'''
 mod host_mapper {
- use super::readiness_helper::CoordinatedAdmissionFailureStageV1;
+ pub(crate) use super::readiness_helper::CoordinatedAdmissionFailureStageV1;
  use crate::real_std::cell::RefCell;
  #[derive(Debug,PartialEq,Eq)]pub enum BridgeError{Binding,Conflict,Missing,Uncertain,Limit,Permission,RecoveryRequired,CompleteOriginRecoveryUnavailable,Verification,SignerOriginUnavailable,Journal(String),Authority(String),Wallet(String),Ipc}
  mod wholepact_signer_origin{pub(super) mod framing{pub(crate) use crate::FrameReadCause;}}
