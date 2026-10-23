@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 
 def block(source, marker):
@@ -389,6 +390,12 @@ def main():
             result = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
             (out / log).write_text(result.stdout + result.stderr)
             if result.returncode:
+                # Only this source-extracted test/compiler output is surfaced;
+                # no product actor, fixture secret or private runtime is run.
+                # Retain the full local log, but bound the workflow diagnostic.
+                diagnostic = (result.stdout + result.stderr)[-16_384:]
+                print(f'{log} diagnostic (last 16384 characters):', file=sys.stderr)
+                print(diagnostic, file=sys.stderr)
                 raise SystemExit(f'{log} failed: {result.returncode}')
             if log == 'list.log':
                 names = re.findall(r'^(\w+(?:::\w+)*): test$', result.stdout, re.M)
