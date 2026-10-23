@@ -2386,3 +2386,65 @@ class HostExitDiagnosticTests(unittest.TestCase):
             with mock.patch.object(O.time,'sleep') as sleep:
                 with self.assertRaises(O.C.Rejected) as e:o.next_snapshot(o.deadline_ns)
             self.assertEqual(str(e.exception),'observer_failure');sleep.assert_not_called();self.assertIsNone(o._failure_drain_deadline)
+
+class InputBudgetDiagnosticTests(unittest.TestCase):
+    def test_exact_guard_and_absent_consumed_inventory(self):
+        flow,c,state=BoundedIdleSweepTests.model(self,target_at=20000)
+        s=flow.snapshot();flow.done.add(('Selecting','None','ConfigureV3','Signer1',None))
+        flow.cache_input_checkpoint(s,'Signer1')
+        i=F.C.INPUT_WIDGET_TAGS.index('ConfigureV3')
+        self.assertEqual(flow.input_checkpoint['widget_states'][1][i],5)
+        for _ in range(64):flow.idle_scan(s)
+        with self.assertRaises(F.C.Rejected) as e:flow.idle_scan(s)
+        self.assertEqual(e.exception.code,'input_budget')
+        self.assertEqual(e.exception.input_budget,dict(site='idle_sweep',count=64,limit=64))
+        self.assertEqual(len(state['directions']),64);c.click.assert_not_called()
+        value=dict(version=1,budget=e.exception.input_budget,last_main_loop=flow.input_checkpoint)
+        self.assertEqual(F.C.validate_input_diagnostic(value),value)
+        self.assertLess(len(json.dumps(value)),8192)
+    def test_all_guard_metadata_and_strict_schema(self):
+        import copy
+        for site,limit in F.C.INPUT_BUDGET_LIMITS.items():
+            count=limit+int(site in ('actions','host_lines','fixture_preflight'))
+            F.C.input_budget(True,site,count-1)
+            with self.assertRaises(F.C.Rejected) as e:F.C.input_budget(False,site,count)
+            value=dict(version=1,budget=e.exception.input_budget,last_main_loop=None)
+            F.C.validate_input_diagnostic(value)
+            for key,bad in [('site','private/path'),('count',True),('limit',limit+1)]:
+                invalid=copy.deepcopy(value);invalid['budget'][key]=bad
+                with self.assertRaises(F.C.Rejected):F.C.validate_input_diagnostic(invalid)
+        invalid=dict(version=1,budget=dict(site='idle_sweep',count=64,limit=64),last_main_loop=None,raw='private')
+        with self.assertRaises(F.C.Rejected):F.C.validate_input_diagnostic(invalid)
+    def test_checkpoint_uses_default_ordinal_only_and_freezes(self):
+        flow,c,state=BoundedIdleSweepTests.model(self,target_at=0)
+        s=flow.snapshot();flow.done.add(('Selecting','None','ConfigureV3','Signer1',99))
+        flow.cache_input_checkpoint(s,'Signer1');i=F.C.INPUT_WIDGET_TAGS.index('ConfigureV3')
+        self.assertEqual(flow.input_checkpoint['widget_states'][1][i],2)
+        flow.done.add(('Selecting','None','ConfigureV3','Signer1',None));s['widgets']=[]
+        self.assertEqual(flow.input_checkpoint['widget_states'][1][i],2)
+    def test_diagnostic_metadata_failure_keeps_original_rejection(self):
+        from unittest import mock
+        with mock.patch.dict(F.C.INPUT_BUDGET_LIMITS,{},clear=True):
+            with self.assertRaises(F.C.Rejected) as e:F.C.input_budget(False,'idle_sweep',64)
+        self.assertEqual(e.exception.code,'input_budget')
+        self.assertFalse(hasattr(e.exception,'input_budget'))
+    def test_inventory_validation_rejects_extra_text_bool_and_bad_dimensions(self):
+        import copy
+        flow,c,state=BoundedIdleSweepTests.model(self);flow.cache_input_checkpoint(flow.snapshot(),'Signer1')
+        value=dict(version=1,budget=dict(site='idle_sweep',count=64,limit=64),last_main_loop=flow.input_checkpoint)
+        for mutation in ('extra','bool','rows','columns','state','owner','site_boundary'):
+            v=copy.deepcopy(value)
+            if mutation=='extra':v['last_main_loop']['text']='private'
+            elif mutation=='bool':v['last_main_loop']['widget_states'][0][0]=True
+            elif mutation=='rows':v['last_main_loop']['widget_states'].pop()
+            elif mutation=='columns':v['last_main_loop']['widget_states'][0].pop()
+            elif mutation=='state':v['last_main_loop']['widget_states'][0][0]=6
+            elif mutation=='owner':v['last_main_loop']['owner']='private'
+            else:v['budget']=dict(site='actions',count=512,limit=512)
+            with self.assertRaises(F.C.Rejected):F.C.validate_input_diagnostic(v)
+    def test_maximum_closed_projection_fits_supervisor_line_limit(self):
+        value=dict(version=1,budget=dict(site='fixture_preflight',count=1<<30,limit=F.C.MAX_NATIVE_COMMANDS),
+                   last_main_loop=dict(phase=max(F.C.PHASES,key=len),subphase=max(F.C.SUBPHASES,key=len),owner='Signer2',target='Signer2',
+                                      widget_states=[[5]*len(F.C.INPUT_WIDGET_TAGS) for _ in range(3)]))
+        F.C.validate_input_diagnostic(value)
+        self.assertLess(len('CI_FINANCIAL_INPUT_DIAGNOSTIC '+json.dumps(value,separators=(',',':'))),8192)

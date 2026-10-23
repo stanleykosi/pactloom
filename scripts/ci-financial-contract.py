@@ -465,3 +465,37 @@ def validate_host_diagnostic(value):
         require(type(o['capture_outcome']) is str and o['capture_outcome'] in (HOST_DIAGNOSTIC_CATEGORIES|{'Unobserved','Accepted'}))
         require(type(o['capture_context']) is str and o['capture_context'] in ('Unobserved','Same','Changed'))
     return value
+
+
+# Failure-only Python guard attribution; never native authority or success proof.
+INPUT_BUDGET_LIMITS={'actions':512,'scroll':128,'idle_sweep':64,'paired_review':256,
+ 'challenges':96,'host_tail':128,'host_coverage':128,'host_lines':128,'startup_focus':64,
+ 'fixture_preflight':MAX_NATIVE_COMMANDS}
+INPUT_WIDGET_TAGS=tuple(sorted(WIDGETS))
+def input_budget(ok,site,count):
+    if not ok:
+        error=Rejected('input_budget')
+        try:error.input_budget={'site':site,'count':count,'limit':INPUT_BUDGET_LIMITS[site]}
+        except Exception:pass  # Attribution must not replace the original rejection.
+        raise error
+
+def validate_input_diagnostic(value):
+    exact(value,('version','budget','last_main_loop'))
+    require(type(value['version']) is int and value['version']==1)
+    b=value['budget'];exact(b,('site','count','limit'))
+    require(type(b['site']) is str and b['site'] in INPUT_BUDGET_LIMITS)
+    require(type(b['limit']) is int and b['limit']==INPUT_BUDGET_LIMITS[b['site']])
+    require(integer(b['count'],b['limit']+int(b['site'] in ('actions','host_lines','fixture_preflight')),1<<30))
+    s=value['last_main_loop']
+    if s is not None:
+        exact(s,('phase','subphase','owner','target','widget_states'))
+        require(type(s['phase']) is str and s['phase'] in PHASES and type(s['subphase']) is str and s['subphase'] in SUBPHASES)
+        require(s['owner'] in (None,'Signer1','Signer2') and s['target'] in (None,'Signer1','Signer2'))
+        rows=s['widget_states']
+        # Rows: None, Signer1, Signer2. Columns: INPUT_WIDGET_TAGS.
+        # 0 absent, 1 disabled, 2 enabled; 3/4 disabled/enabled + default-ordinal latch; 5 absent + default-ordinal latch.
+        require(type(rows) is list and len(rows)==3)
+        for row in rows:
+            require(type(row) is list and len(row)==len(INPUT_WIDGET_TAGS))
+            require(all(integer(v,0,5) for v in row))
+    return value

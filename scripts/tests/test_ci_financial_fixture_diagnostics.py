@@ -445,3 +445,40 @@ class ObservationTimingProjectionTests(unittest.TestCase):
 if __name__=='__main__':unittest.main()
 
 
+
+class InputDiagnosticProjectionTests(unittest.TestCase):
+    def setUp(self):
+        spec=importlib.util.spec_from_file_location('input_supervisor_tested',ROOT/'ci-financial-supervisor.py')
+        self.S=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.S)
+    def value(self):return dict(version=1,budget=dict(site='idle_sweep',count=64,limit=64),last_main_loop=None)
+    def line(self,v):return b'CI_FINANCIAL_INPUT_DIAGNOSTIC '+json.dumps(v,separators=(',',':')).encode()
+    def test_failure_only_forwarding_and_duplicate_rejection(self):
+        records=self.S.RuntimeRecords('external');out=io.StringIO()
+        with contextlib.redirect_stdout(out):records(self.line(self.value()))
+        self.assertEqual(out.getvalue(),'')
+        with self.assertRaises(Exception):records(self.line(self.value()))
+        with contextlib.redirect_stdout(out):records(b'CI_FINANCIAL_RESULT '+json.dumps(self.S.P.failure('input_budget')).encode())
+        self.assertIn('CI_FINANCIAL_INPUT_DIAGNOSTIC ',out.getvalue())
+    def test_wrong_failure_and_candidate_rejected(self):
+        for result in [self.S.P.failure('input_phase'),dict(schema=1,profile=M.C.EXTERNAL_PROFILE,native_oracle_verified=True,fixture_cleaned=True,display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)]:
+            records=self.S.RuntimeRecords('external');records(self.line(self.value()))
+            prefix=b'CI_FINANCIAL_RESULT ' if 'code' in result else b'CI_FINANCIAL_CANDIDATE '
+            with self.assertRaises(Exception):records(prefix+json.dumps(result).encode())
+    def test_emitter_uses_only_cached_state_and_preserves_unknown_error(self):
+        error=M.C.Rejected('input_budget');error.input_budget=self.value()['budget']
+        flow=mock.Mock(input_checkpoint=None);out=io.StringIO()
+        with contextlib.redirect_stdout(out):M.emit_cached_input_failure(flow,error)
+        self.assertEqual(json.loads(out.getvalue().split(' ',1)[1]),self.value());flow.assert_not_called()
+        out=io.StringIO()
+        with contextlib.redirect_stdout(out):M.emit_cached_input_failure(None,ValueError('private'))
+        self.assertEqual(out.getvalue(),'')
+    def test_diagnostic_output_failure_preserves_original_runtime_result(self):
+        records=self.S.RuntimeRecords('external');records(self.line(self.value()))
+        failure=self.S.P.failure('input_budget');seen=[]
+        def emit(kind,value):
+            if kind=='INPUT_DIAGNOSTIC':raise BrokenPipeError('private')
+            seen.append((kind,value))
+        with mock.patch.object(self.S,'emit',side_effect=emit):
+            records(b'CI_FINANCIAL_RESULT '+json.dumps(failure).encode())
+        self.assertEqual(records.first_failure,failure);self.assertEqual(records.result,failure)
+        self.assertEqual(seen,[('FAILURE',failure)])

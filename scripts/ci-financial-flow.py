@@ -87,7 +87,7 @@ class FullFlow:
         self.commands_instruction_observed=False;self.commands_instruction_context=None
         self.startup_focus_seen=False;self.startup_focus_waits=0
         self.host_occurrences=H.HostOccurrences();self.pending_occurrence=None;self.host_rejection=None;self.host_stage='Unobserved';self.host_visibility_steps=0;self.host_deferred=None;self.host_ignored=None;self.host_prepared=None;self.host_coverage_context=None;self.host_coverage_steps=0
-        self.last_phase=None;self.search_direction='up';self.search_geometry=None
+        self.input_checkpoint=None;self.last_phase=None;self.search_direction='up';self.search_geometry=None
         self.host_action='Unobserved';self.host_observed=None
         self.host_capture_outcome='Unobserved';self.host_capture_context=None
         self._startup_ceiling=None
@@ -153,14 +153,14 @@ class FullFlow:
         latest=self.native.stable(s['phase'],s['owner'],protected=s['secret_input'] or s['host_input'])
         C.require(latest['subphase']==s['subphase'],'input_phase')
         w=self.find(latest,tag,owner);C.require(w is not None and w['enabled'],'input_disabled')
-        self.done.add(key);self.actions+=1;C.require(self.actions<=512,'input_budget')
+        self.done.add(key);self.actions+=1;C.input_budget(self.actions<=512,'actions',self.actions)
         self.controller.click(*self.native.point(latest,tag,owner));self.controller.wait_render_progress()
     def used(self,s,tag,owner):return self.key(s,tag,owner)+(None,) in self.done
     def scroll(self,s,body,owner,direction='down'):
         w=self.find(s,body,owner)
         if w is None:return False
         key=(s['phase'],s['subphase'],body,owner,direction)
-        count=self.scrolls.get(key,0);C.require(count<128,'input_budget');self.scrolls[key]=count+1
+        count=self.scrolls.get(key,0);C.input_budget(count<128,'scroll',count);self.scrolls[key]=count+1
         action=self.controller.scroll_up if direction=='up' else self.controller.scroll_down
         point=self.native.point(s,body,owner)
         if body=='ScrollRegion':
@@ -183,7 +183,7 @@ class FullFlow:
         # One finite up-then-down sweep per actual phase/subphase/owner; the
         # existing native scroll/input/deadline guards remain authoritative.
         key=(s['phase'],s['subphase'],'idle_sweep',s['owner'])
-        count=self.scrolls.get(key,0);C.require(count<64,'input_budget')
+        count=self.scrolls.get(key,0);C.input_budget(count<64,'idle_sweep',count)
         self.scrolls[key]=count+1
         return self.scroll(s,'ScrollRegion',None,'up' if count<8 else 'down')
     def field(self,s,tag,owner,value):
@@ -238,7 +238,7 @@ class FullFlow:
                 button=self.find(s,action,owner)
                 if button is None:self.seek(s,action,owner);return
                 if button['enabled']:self.press(s,action,owner);return
-                turn=self.scrolls.get(key,0);C.require(turn<256,'input_budget')
+                turn=self.scrolls.get(key,0);C.input_budget(turn<256,'paired_review',turn)
                 self.scrolls[pending]=turn
             # Complete this ordinary body-wheel turn before re-seeking the arm:
             # the button and body need not fit in the same actual viewport.
@@ -406,14 +406,14 @@ class FullFlow:
         if matches:
             challenge=matches[-1]
             if challenge in self.challenges:return None
-            C.require(len(self.challenges)<96,'input_budget');self.challenges.add(challenge)
+            C.input_budget(len(self.challenges)<96,'challenges',len(self.challenges));self.challenges.add(challenge)
             return ('public',challenge)
         return None
     def seek_host_tail(self,s):
         # Explore both nested and outer visibility, never infer a tail from
         # motion, equality, time or a wheel count. Only native metadata admits.
         C.require(not s['host_input'] and not s['secret_input'],'sensitive_capture')
-        C.require(self.host_visibility_steps<128,'input_budget')
+        C.input_budget(self.host_visibility_steps<128,'host_tail',self.host_visibility_steps)
         step=self.host_visibility_steps;self.host_visibility_steps+=1
         latest=self.native.stable(s['phase'],s['owner'])
         if step%2==0:return self.scroll(latest,'HostOutput',None,'down')
@@ -426,7 +426,7 @@ class FullFlow:
             return False
         coverage_step=self.host_coverage_steps;self.host_coverage_steps+=1
         C.require(not s['host_input'] and not s['secret_input'],'sensitive_capture')
-        C.require(self.host_visibility_steps<128,'input_budget')
+        C.input_budget(self.host_visibility_steps<128,'host_coverage',self.host_visibility_steps)
         step=self.host_visibility_steps;self.host_visibility_steps+=1
         latest=self.native.stable(s['phase'],s['owner'])
         return self.scroll(latest,'ScrollRegion',None,'up' if coverage_step<8 else 'down')
@@ -488,7 +488,7 @@ class FullFlow:
             button=self.find(s,'BeginHostLine',None)
             if button is None:return not self.seek(s,'BeginHostLine',None)
             if not button['enabled']:return False
-            self.host_lines+=1;C.require(self.host_lines<=128,'input_budget')
+            self.host_lines+=1;C.input_budget(self.host_lines<=128,'host_lines',self.host_lines)
             self.host_occurrences.latch(occurrence)
             self.pending_host=line;self.pending_occurrence=occurrence;self.host_prepared=None
             if self.startup_index<len(HOST_STARTUP):self.pending_startup=self.startup_index
@@ -556,9 +556,19 @@ class FullFlow:
         # input against that stale pre-capture snapshot; re-observe normally.
         if context!=(occurrence[2],occurrence[1]):return True
         return self.pump_host(s)
+    def cache_input_checkpoint(self,s,target):
+        # Only already-validated main-loop observations. No raw values or geometry.
+        rows=[[5 if self.used(s,tag,role) else 0 for tag in C.INPUT_WIDGET_TAGS]
+              for role in (None,'Signer1','Signer2')]
+        for w in s['widgets']:
+            row=(None,'Signer1','Signer2').index(w['owner'])
+            rows[row][C.INPUT_WIDGET_TAGS.index(w['tag'])]=1+int(w['enabled'])+2*int(self.used(s,w['tag'],w['owner']))
+        self.input_checkpoint=dict(phase=s['phase'],subphase=s['subphase'],owner=s['owner'],target=target,widget_states=rows)
+
     def run(self):
         while True:
             s=self.snapshot();phase=s['phase'];owner=s['owner'];target=self.current_owner()
+            self.cache_input_checkpoint(s,target)
             # Failure LOCATION is the last validated main-loop nonterminal checkpoint,
             # not the current terminal state or an attribution of its cause.
             if phase not in ('Revoked','Finished'):
@@ -579,7 +589,7 @@ class FullFlow:
                 # the original deadline, and reject any later focus loss.
                 C.require(not self.startup_focus_seen and phase=='Selecting' and owner is None and
                           s['subphase']=='None' and not(s['secret_input'] or s['host_input']),'input_phase')
-                self.startup_focus_waits+=1;C.require(self.startup_focus_waits<64,'input_budget')
+                self.startup_focus_waits+=1;C.input_budget(self.startup_focus_waits<64,'startup_focus',self.startup_focus_waits)
                 self.controller.wait_render_progress();continue
             self.startup_focus_seen=True
             if not self.host_startup_complete:
