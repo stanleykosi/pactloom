@@ -354,5 +354,5 @@ class Fixture:
         lengths=sum(len(value) for owner in ('Signer1','Signer2') for kind in ('v3','owner','financial','witness') for value in self.form(owner,kind).values())
         # Worst-case US keyboard shift/down/up plus rendering progress commands.
         cost=lengths*4+32768
-        C.require(cost<=C.MAX_NATIVE_COMMANDS,'input_budget')
+        C.input_budget(cost<=C.MAX_NATIVE_COMMANDS,'fixture_preflight',cost)
         return cost

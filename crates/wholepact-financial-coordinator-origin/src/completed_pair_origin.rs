@@ -74,8 +74,10 @@ struct SetupBinding {
 impl SetupBinding {
     fn source_current(&self)->Result<()> {
         self.core.action()?; require_time(self.source_ceiling)?;
-        let wall=state::wall_ms()?;let old=self.last_wall.fetch_max(wall,Ordering::AcqRel);
-        if wall<old||self.wire.original.owners.iter().any(|o|wall>=o.source_expires_at_ms) {
+        let wall = state::observe_shared_wall(
+            &self.last_wall, self.source_ceiling.min(self.core.clocks.supervision()), state::wall_ms,
+        )?.ok_or_else(|| rejected("completed pair original source clock"))?;
+        if self.wire.original.owners.iter().any(|o|wall>=o.source_expires_at_ms) {
             return Err(rejected("completed pair original source clock"));
         } Ok(())
     }
@@ -90,8 +92,10 @@ impl ReviewBinding {
     // Completed Setup approval is NOT an ancestor of the service lifetime.
     fn service_current(&self)->Result<()> {
         self.setup.source_current()?;require_time(self.service_ceiling)?;
-        let wall=state::wall_ms()?;let old=self.last_wall.fetch_max(wall,Ordering::AcqRel);
-        if wall<old||wall<self.data.valid_from_ms||wall>=self.data.valid_until_ms {
+        let wall = state::observe_shared_wall(
+            &self.last_wall, self.service_ceiling.min(self.setup.source_ceiling).min(self.setup.core.clocks.supervision()), state::wall_ms,
+        )?.ok_or_else(|| rejected("completed pair original service clock"))?;
+        if wall<self.data.valid_from_ms||wall>=self.data.valid_until_ms {
             return Err(rejected("completed pair original service clock"));
         } Ok(())
     }

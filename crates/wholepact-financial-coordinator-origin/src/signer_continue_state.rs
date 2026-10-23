@@ -597,3 +597,122 @@ mod normal_completion_tests {
  #[test]fn revoke_during_actual_root_reaps_prevents_normal_completion(){let p=Phases::new();for i in 0..4{p.normal_step(i,i+1).unwrap();}p.revoke();assert!(p.normal_step(4,5).is_err());assert_eq!(p.normal_phase(),4);}
  #[test]fn normal_state_is_independent_of_pair_and_signed_bits(){let p=Phases::new();p.step(0,0,73).unwrap();p.step(1,0,73).unwrap();p.signing_step(0,0,6).unwrap();p.signing_step(1,0,6).unwrap();p.pair_step(0,4).unwrap();for i in 0..5{p.normal_step(i,i+1).unwrap();}assert_eq!(p.phase(0),73);assert_eq!(p.signing_phase(1),6);assert_eq!(p.pair_phase(),4);assert_eq!(p.normal_phase(),5);}
 }
+
+// Concurrent lifetime owners must order the wall sample after the publication
+// they compare against. A delayed earlier sample is not a clock rollback. This
+// private sampler creates no authority and never renews the original deadline.
+pub(crate) fn observe_shared_wall(
+    last_wall: &AtomicU64,
+    deadline: Instant,
+    mut wall_ms: impl FnMut() -> Result<u64>,
+) -> Result<Option<u64>> {
+    loop {
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        let prior = last_wall.load(Ordering::Acquire);
+        let wall = wall_ms()?;
+        if wall < prior || Instant::now() >= deadline {
+            return Ok(None);
+        }
+        if last_wall
+            .compare_exchange(prior, wall, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Ok((Instant::now() < deadline).then_some(wall));
+        }
+        // Another observer published after our load. Resample, rather than
+        // rejecting a stale sample or accepting it against a newer high-water.
+    }
+}
+#[cfg(test)]
+mod shared_wall_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn reordered_monotonic_samples_resample_without_false_rollback() {
+        let last = Arc::new(AtomicU64::new(99));
+        let sampled = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let first = {
+            let last = Arc::clone(&last);
+            let sampled = Arc::clone(&sampled);
+            let release = Arc::clone(&release);
+            std::thread::spawn(move || {
+                let mut initial = true;
+                observe_shared_wall(&last, deadline, || {
+                    if std::mem::take(&mut initial) {
+                        sampled.wait();
+                        release.wait();
+                        Ok(100)
+                    } else {
+                        Ok(101)
+                    }
+                })
+            })
+        };
+        sampled.wait();
+        assert_eq!(observe_shared_wall(&last, deadline, || Ok(101)).unwrap(), Some(101));
+        release.wait();
+        assert_eq!(first.join().unwrap().unwrap(), Some(101));
+        assert_eq!(last.load(Ordering::Acquire), 101);
+    }
+
+    #[test]
+    fn genuine_rollback_and_wall_error_are_not_retried() {
+        let last = AtomicU64::new(101);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut calls = 0;
+        assert_eq!(observe_shared_wall(&last, deadline, || {
+            calls += 1;
+            Ok(100)
+        }).unwrap(), None);
+        assert_eq!(calls, 1);
+        assert_eq!(last.load(Ordering::Acquire), 101);
+        assert!(observe_shared_wall(&last, deadline, || Err(rejected("wall unavailable"))).is_err());
+        assert_eq!(last.load(Ordering::Acquire), 101);
+    }
+
+    #[test]
+    fn equal_samples_and_repeated_contention_keep_original_high_water() {
+        let last = AtomicU64::new(100);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        assert_eq!(observe_shared_wall(&last, deadline, || Ok(100)).unwrap(), Some(100));
+        let mut calls = 0;
+        assert_eq!(observe_shared_wall(&last, deadline, || {
+            calls += 1;
+            let sample = 100 + calls;
+            if calls < 4 {
+                // An independently published later sample wins this attempt.
+                last.store(sample + 1, Ordering::Release);
+            }
+            Ok(sample)
+        }).unwrap(), Some(104));
+        assert_eq!(calls, 4);
+        assert_eq!(last.load(Ordering::Acquire), 104);
+    }
+
+    #[test]
+    fn expired_original_bound_never_samples_or_publishes() {
+        let last = AtomicU64::new(100);
+        assert_eq!(observe_shared_wall(&last, Instant::now(), || panic!("expired sample")).unwrap(), None);
+        assert_eq!(last.load(Ordering::Acquire), 100);
+    }
+
+    #[test]
+    fn expiry_during_sample_or_contention_does_not_renew_bound() {
+        let last = AtomicU64::new(100);
+        for contend in [false, true] {
+            let deadline = Instant::now() + Duration::from_millis(1);
+            let result = observe_shared_wall(&last, deadline, || {
+                if contend { last.store(102, Ordering::Release); }
+                while Instant::now() < deadline { std::hint::spin_loop(); }
+                Ok(101)
+            }).unwrap();
+            assert_eq!(result, None);
+            assert_eq!(last.load(Ordering::Acquire), if contend {102} else {100});
+        }
+    }
+}

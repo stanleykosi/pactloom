@@ -134,6 +134,66 @@ struct RequestEnvelope<'a> {
     token_hex: &'a str,
     request: &'a CoordinatedAppRequestV1,
 }
+/// Finite boundary of one actual original Pair failure; no identity or payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoordinatedPairFailureStageV1 {EndpointValidate, ScopeValidate, OriginalCustody, Connect, EnableCredentials, VerifySigner, ObservePeer, CloneObserver, RequestWrite, ResponseRead, ResponseDecode, ResponseValidate, ResponseDigest, ChannelDigest, InitialCurrent, StatusOpen, StatusRead, StatusDecode, StatusValidate, FinalCurrent}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoordinatedPairFailureClassV1 {BridgeBinding, BridgeConflict, BridgeMissing, BridgeUncertain, BridgeLimit, BridgePermission, BridgeRecoveryRequired, BridgeCompleteOriginRecoveryUnavailable, BridgeVerification, BridgeSignerOriginUnavailable, BridgeJournal, BridgeAuthority, BridgeWallet, BridgeIpc, FrameUnclassified, FrameDeadline, FrameEof, FrameCredentialsMissing, FrameCredentialsMismatch, FrameAncillaryRejected, FrameTruncated, FramePeerNotLive, FrameCurrentCheck, FrameIo, FrameLimit, FrameInvalidFrame, FrameInvalidBudget}
+/// Retains the unchanged original error. No Display/serialization or authority.
+pub struct CoordinatedPairFailureV1 {
+    stage: CoordinatedPairFailureStageV1,
+    frame_cause: Option<wholepact_signer_origin::framing::FrameReadCause>,
+    error: BridgeError,
+}
+impl CoordinatedPairFailureV1 {
+    pub fn stage(&self) -> CoordinatedPairFailureStageV1 { self.stage }
+    pub fn class(&self) -> CoordinatedPairFailureClassV1 {
+        use CoordinatedPairFailureClassV1 as C;
+        if let Some(cause) = self.frame_cause {
+            use wholepact_signer_origin::framing::FrameReadCause as F;
+            return match cause {
+                F::Unclassified=>C::FrameUnclassified,
+                F::Deadline=>C::FrameDeadline,
+                F::Eof=>C::FrameEof,
+                F::CredentialsMissing=>C::FrameCredentialsMissing,
+                F::CredentialsMismatch=>C::FrameCredentialsMismatch,
+                F::AncillaryRejected=>C::FrameAncillaryRejected,
+                F::Truncated=>C::FrameTruncated,
+                F::PeerNotLive=>C::FramePeerNotLive,
+                F::CurrentCheck=>C::FrameCurrentCheck,
+                F::Io=>C::FrameIo,
+                F::FrameLimit=>C::FrameLimit,
+                F::InvalidFrame=>C::FrameInvalidFrame,
+                F::InvalidBudget=>C::FrameInvalidBudget,
+            };
+        }
+        match &self.error {
+            BridgeError::Binding=>C::BridgeBinding,
+            BridgeError::Conflict=>C::BridgeConflict,
+            BridgeError::Missing=>C::BridgeMissing,
+            BridgeError::Uncertain=>C::BridgeUncertain,
+            BridgeError::Limit=>C::BridgeLimit,
+            BridgeError::Permission=>C::BridgePermission,
+            BridgeError::RecoveryRequired=>C::BridgeRecoveryRequired,
+            BridgeError::CompleteOriginRecoveryUnavailable=>C::BridgeCompleteOriginRecoveryUnavailable,
+            BridgeError::Verification=>C::BridgeVerification,
+            BridgeError::SignerOriginUnavailable=>C::BridgeSignerOriginUnavailable,
+            BridgeError::Journal(_)=>C::BridgeJournal,
+            BridgeError::Authority(_)=>C::BridgeAuthority,
+            #[cfg(feature="authority-signing")]
+            BridgeError::Wallet(_)=>C::BridgeWallet,
+            BridgeError::Ipc=>C::BridgeIpc,
+        }
+    }
+    pub fn into_error(self) -> BridgeError { self.error }
+}
+fn observe_pair_result<T>(
+    result: Result<T>,
+    stage: CoordinatedPairFailureStageV1,
+    frame_cause: Option<wholepact_signer_origin::framing::FrameReadCause>,
+) -> std::result::Result<T, CoordinatedPairFailureV1> {
+    result.map_err(|error| CoordinatedPairFailureV1 { stage, frame_cause, error })
+}
 /// Genuine H-owned, original-S authenticated request channel. Pair grants only
 /// this narrow transport; every source Read/export remains a separate C action.
 pub struct CoordinatedOriginalClientV1 {
@@ -172,8 +232,31 @@ impl CoordinatedOriginalClientV1 {
         endpoint: SignerV3PairEndpointV1,
         scope: PairScope,
     ) -> Result<Self> {
+        Self::pair_observed(verifier, endpoint, scope).map_err(CoordinatedPairFailureV1::into_error)
+    }
+    /// Same original Pair attempt, with finite failure-only observations.
+    /// No extra transport, authority, retry or renewed deadline is introduced.
+    pub fn pair_observed(
+        verifier: OriginalForkSignerVerifier,
+        endpoint: SignerV3PairEndpointV1,
+        scope: PairScope,
+    ) -> std::result::Result<Self, CoordinatedPairFailureV1> {
+        let mut stage = CoordinatedPairFailureStageV1::EndpointValidate;
+        let mut frame_cause = None;
+        let result = Self::pair_inner(verifier, endpoint, scope, &mut stage, &mut frame_cause);
+        observe_pair_result(result, stage, frame_cause)
+    }
+    fn pair_inner(
+        verifier: OriginalForkSignerVerifier,
+        endpoint: SignerV3PairEndpointV1,
+        scope: PairScope,
+        stage: &mut CoordinatedPairFailureStageV1,
+        frame_cause: &mut Option<wholepact_signer_origin::framing::FrameReadCause>,
+    ) -> Result<Self> {
         endpoint.validate().map_err(|_| BridgeError::Binding)?;
+        *stage = CoordinatedPairFailureStageV1::ScopeValidate;
         CoordinatedAppRequestV1::Status.validate(&scope)?;
+        *stage = CoordinatedPairFailureStageV1::OriginalCustody;
         verifier
             .check_original_custody_alive()
             .map_err(|_| BridgeError::Permission)?;
@@ -185,18 +268,24 @@ impl CoordinatedOriginalClientV1 {
                 .check_original_custody_alive()
                 .map_err(|_| BridgeError::Permission)
         };
+        *stage = CoordinatedPairFailureStageV1::Connect;
         let mut stream = wholepact_signer_origin::connect_local_checked_until(
             std::path::Path::new(&endpoint.endpoint_path),
             deadline,
             || current().map_err(|_| wholepact_signer_origin::Error::Permission),
         )
         .map_err(|_| BridgeError::Ipc)?;
+        *stage = CoordinatedPairFailureStageV1::EnableCredentials;
         crate::ipc::enable_credentials(stream.as_raw_fd()).map_err(|_| BridgeError::Ipc)?;
+        *stage = CoordinatedPairFailureStageV1::VerifySigner;
         verifier
             .verify_connected_signer(&stream)
             .map_err(|_| BridgeError::Permission)?;
+        *stage = CoordinatedPairFailureStageV1::ObservePeer;
         let peer = PeerProcess::observe(&stream).map_err(|_| BridgeError::Permission)?;
+        *stage = CoordinatedPairFailureStageV1::CloneObserver;
         let observer = stream.try_clone().map_err(|_| BridgeError::Ipc)?;
+        *stage = CoordinatedPairFailureStageV1::RequestWrite;
         v1::bounded_write(
             &mut stream,
             &serde_json::json!({
@@ -211,7 +300,8 @@ impl CoordinatedOriginalClientV1 {
                     .map_err(|_| BridgeError::Permission)
             },
         )?;
-        let bytes = wholepact_signer_origin::framing::read_frame_capped_checked_until(
+        *stage = CoordinatedPairFailureStageV1::ResponseRead;
+        let bytes = wholepact_signer_origin::framing::read_frame_capped_checked_observed_until(
             &stream,
             &peer,
             16 * 1024,
@@ -223,10 +313,15 @@ impl CoordinatedOriginalClientV1 {
                     .map_err(|_| wholepact_signer_origin::Error::Permission)
             },
         )
-        .map_err(|_| BridgeError::Ipc)?;
+        .map_err(|failure| {
+            *frame_cause = Some(failure.cause);
+            BridgeError::Ipc
+        })?;
+        *stage = CoordinatedPairFailureStageV1::ResponseDecode;
         let mut reply: PairResponse =
             wholepact_core::strict_json::parse_typed_json_with_byte_limit(&bytes, 16 * 1024)
                 .map_err(|_| BridgeError::Binding)?;
+        *stage = CoordinatedPairFailureStageV1::ResponseValidate;
         if reply.schema_version != 1
             || !reply.accepted
             || reply.reason_code != "LOCAL_PROCESS_REQUEST_SCOPE"
@@ -238,6 +333,7 @@ impl CoordinatedOriginalClientV1 {
         {
             return Err(BridgeError::Permission);
         }
+        *stage = CoordinatedPairFailureStageV1::ResponseDigest;
         super::super::durable_construction_v1::hash(&reply.grant_id)?;
         super::super::durable_construction_v1::hash(&reply.token_hex)?;
         for value in [
@@ -248,6 +344,7 @@ impl CoordinatedOriginalClientV1 {
         ] {
             super::super::durable_construction_v1::hash(value)?;
         }
+        *stage = CoordinatedPairFailureStageV1::ChannelDigest;
         let mut channel = sha2::Sha256::new();
         use sha2::Digest;
         channel.update(b"wholepact:local-process-pairing:v1\0");
@@ -277,7 +374,9 @@ impl CoordinatedOriginalClientV1 {
             redisclosure_attempt: None,
         };
         drop(stream);
+        *stage = CoordinatedPairFailureStageV1::InitialCurrent;
         client.check_current()?;
+        *stage = CoordinatedPairFailureStageV1::StatusOpen;
         let proof = client.open_request(&CoordinatedAppRequestV1::Status, deadline)?;
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -285,13 +384,17 @@ impl CoordinatedOriginalClientV1 {
             accepted: bool,
             reason_code: String,
         }
+        *stage = CoordinatedPairFailureStageV1::StatusRead;
         let bytes = client.read_metadata(&proof, 4096, deadline)?;
+        *stage = CoordinatedPairFailureStageV1::StatusDecode;
         let proof: Proof =
             wholepact_core::strict_json::parse_typed_json_with_byte_limit(&bytes, 4096)
                 .map_err(|_| BridgeError::Binding)?;
+        *stage = CoordinatedPairFailureStageV1::StatusValidate;
         if !proof.accepted || proof.reason_code != "REQUEST_ONLY" {
             return Err(BridgeError::Permission);
         }
+        *stage = CoordinatedPairFailureStageV1::FinalCurrent;
         client.check_current()?;
         Ok(client)
     }
@@ -448,5 +551,90 @@ impl CoordinatedOriginalClientV1 {
             },
         )
         .map_err(|_| BridgeError::Ipc)
+    }
+}
+
+#[cfg(test)]
+mod pair_failure_tests {
+    use super::*;
+    const STAGES: [CoordinatedPairFailureStageV1; 20] = [
+        CoordinatedPairFailureStageV1::EndpointValidate,
+        CoordinatedPairFailureStageV1::ScopeValidate,
+        CoordinatedPairFailureStageV1::OriginalCustody,
+        CoordinatedPairFailureStageV1::Connect,
+        CoordinatedPairFailureStageV1::EnableCredentials,
+        CoordinatedPairFailureStageV1::VerifySigner,
+        CoordinatedPairFailureStageV1::ObservePeer,
+        CoordinatedPairFailureStageV1::CloneObserver,
+        CoordinatedPairFailureStageV1::RequestWrite,
+        CoordinatedPairFailureStageV1::ResponseRead,
+        CoordinatedPairFailureStageV1::ResponseDecode,
+        CoordinatedPairFailureStageV1::ResponseValidate,
+        CoordinatedPairFailureStageV1::ResponseDigest,
+        CoordinatedPairFailureStageV1::ChannelDigest,
+        CoordinatedPairFailureStageV1::InitialCurrent,
+        CoordinatedPairFailureStageV1::StatusOpen,
+        CoordinatedPairFailureStageV1::StatusRead,
+        CoordinatedPairFailureStageV1::StatusDecode,
+        CoordinatedPairFailureStageV1::StatusValidate,
+        CoordinatedPairFailureStageV1::FinalCurrent,
+    ];
+    #[test]
+    fn finite_stage_errors_preserve_the_original_error_variant() {
+        // Inert Result injection only: no verifier, socket or Pair authority.
+        for stage in STAGES {
+            for error in [BridgeError::Binding, BridgeError::Permission, BridgeError::Ipc] {
+                let original = std::mem::discriminant(&error);
+                let failure = match observe_pair_result::<()>(Err(error), stage, None) {
+                    Err(failure) => failure,
+                    Ok(()) => panic!("error disappeared"),
+                };
+                assert_eq!(failure.stage(), stage);
+                assert_eq!(std::mem::discriminant(&failure.into_error()), original);
+            }
+        }
+    }
+    #[test]
+    fn successful_result_has_no_failure_observation() {
+        for stage in STAGES {
+            assert!(matches!(observe_pair_result(Ok(7), stage, None), Ok(7)));
+        }
+    }
+    #[test]
+    fn frame_cause_retained_without_changing_original_ipc_error() {
+        use wholepact_signer_origin::framing::FrameReadCause as F;
+        use CoordinatedPairFailureClassV1 as C;
+        for (cause, class) in [
+            (F::Unclassified, C::FrameUnclassified),
+            (F::Deadline, C::FrameDeadline),
+            (F::Eof, C::FrameEof),
+            (F::CredentialsMissing, C::FrameCredentialsMissing),
+            (F::CredentialsMismatch, C::FrameCredentialsMismatch),
+            (F::AncillaryRejected, C::FrameAncillaryRejected),
+            (F::Truncated, C::FrameTruncated),
+            (F::PeerNotLive, C::FramePeerNotLive),
+            (F::CurrentCheck, C::FrameCurrentCheck),
+            (F::Io, C::FrameIo),
+            (F::FrameLimit, C::FrameLimit),
+            (F::InvalidFrame, C::FrameInvalidFrame),
+            (F::InvalidBudget, C::FrameInvalidBudget),
+        ] {
+            let failure = match observe_pair_result::<()>(
+                Err(BridgeError::Ipc), CoordinatedPairFailureStageV1::ResponseRead, Some(cause),
+            ) { Err(failure) => failure, Ok(()) => panic!("error disappeared") };
+            assert_eq!(failure.class(), class);
+            assert!(matches!(failure.into_error(), BridgeError::Ipc));
+        }
+    }
+    #[test]
+    fn ordinary_pair_error_class_is_not_mislabeled_as_frame_failure() {
+        use CoordinatedPairFailureClassV1 as C;
+        for (error, class) in [(BridgeError::Binding, C::BridgeBinding),
+            (BridgeError::Permission, C::BridgePermission), (BridgeError::Ipc, C::BridgeIpc)] {
+            let failure = match observe_pair_result::<()>(Err(error), STAGES[0], None) {
+                Err(failure) => failure, Ok(()) => panic!("error disappeared"),
+            };
+            assert_eq!(failure.class(), class);
+        }
     }
 }

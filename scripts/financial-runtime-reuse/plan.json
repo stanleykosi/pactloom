@@ -1,64 +1,31 @@
 {
-  "version": 6,
-  "policy": "p32-crate-local-cfg-reuse-v2",
-  "qualification_profile": "coordinated-financial-rendered-host-semantic-v1",
-  "manifest_version": 2,
-  "build_recipe_version": 2,
+  "version": 1,
   "producer": {
     "attempt": 1,
     "repository": "stanleykosi/pactloom",
-    "run_id": 39896992026,
-    "source": "53a05883325fad2ee66886adea5cf67d34b7600b",
-    "source_tree": "559d863aa9b42239f6585f9a92d3160052f1a456"
+    "run_id": 39704950389,
+    "source": "f98de7fd79389ce340343292086c852825f59b60",
+    "source_tree": "1b4df59f4e2e664cad33440a947645e66424e410"
   },
   "harness": {
     "repository": "stanleykosi/pactloom",
-    "source": "1059e0a8d39c4a04ba8f038fde886d45691e367e",
-    "source_tree": "54ad57378b85c74f9c8590a680d566b17023de26"
+    "source": "ecda810b7167a54bdb3f6d587fb60956b56c6b6d",
+    "source_tree": "ee97fd0b7902e550d94ded2f4d5bde10abbd9e3e"
   },
   "artifact_pins": {
-    "archive_sha256": "0b158864d3fce1ced7fc2fea83f60de9acc7492a408e869cb34f369a57ce11f3",
-    "artifact_id": 12478314302,
-    "bundle_sha256": "b9879f8d296f8871a38c647585a05fd533268de28082061ad7c00c87235a23f9"
+    "archive_sha256": "8b9ea1f9badca360db272153b628a246544d7b1c524d2ea5162c5de512c2e24c",
+    "artifact_id": 12395613903,
+    "bundle_sha256": "d97af71f6a864829581610425122936cff65159617e19863d2d3f6930de1ed56"
   },
   "api_pins": {
-    "artifact": "a58c518bd520ce0e8c5a8eda235046b3cc4bb8797f9435b32de3e808ef16dd27",
-    "job": "1c90c60a502040068dae78374a62da1f3aa4dae985c4fdd2fa198ae149b5bb96",
-    "run": "0d1486278632939d4980d90e5dec68ea83e9a3e02e5911514c010a9034b6e5c9"
+    "artifact": "0e4edbab13a523155935c5981ae5349618aa878ae8204624c7b3c060781a5e62",
+    "job": "6c0a8f4cd83eadadaf11cf14cd48cb0183d7e42bb6f484924f1772cb7f528f4e",
+    "run": "0cc79e2d685a7f2cbc45a4beded54671fe03b7f4c3a176fa76548be45038fd24"
   },
-  "producer_inventory_sha256": "d94c8f37f5c83af4b54d3aa36d7e39f41e4c2ceebd72cd936ec8101134e80fa2",
-  "parser_sha256": "c6d12ee5a132083ee97f5aee7fcda3b3dc270a794b90d3d65e18b271c3426682",
   "reviewed_runtime_changes": {
-    "scripts/ci-financial-container.py": "a8ad996195f7392bc7fe09c205d79ce3c2642b32fd25448e98ce6dbc8386aace",
-    "scripts/ci-financial-fixture.py": "1a4ebac385dcaf56141af8403f23ea5ebce008cd5453894c51f6541bc77023eb",
-    "scripts/ci-financial-flow.py": "fde19149854c5458e691ab2a1eafc4bfadf7e2b22a674134a43ca72435677443",
-    "scripts/tests/test_ci_financial_fixture_diagnostics.py": "8397b3f2e3e6831263f16690ea4c84d288bbceb10bc7f9f5f79e5a6812c86151",
-    "scripts/tests/test_ci_financial_observer.py": "680e2e9fac575134bf8e79cdbfff0b4a978466fa9c9331f06f272cb6c8fb9526"
-  },
-  "diagnostic_compatibility": {
-    "version": 1,
-    "name": "p33-exact-input-budget-diagnostics-v1",
-    "files": {
-      "scripts/ci-financial-contract.py": {
-        "producer_git_blob": "1d5fb517546e188f4b79a0d0d4ea5b24094c7920",
-        "producer_sha256": "f33248f7e0b2b9690ce1a51580f7dc2739632154b09978e65f21375cd67b5b8e",
-        "producer_mode": "100644",
-        "producer_mode_sha256": "3c2a63ebedc9474df32bcf779c377780ae6832448fcc85334aeab8bf2a4a92a2",
-        "harness_git_blob": "f09c0a2bd451a67a697299ceacd65e4b3219acdb",
-        "harness_sha256": "f596d32a62f66736aa46cc36b156545af3b0a2b21f6a80e04de8a24458aef97e",
-        "harness_mode": "100644",
-        "harness_mode_sha256": "c54d4419942fd87ec69036347bb0668b308643399f68129fcfa8952487313b07"
-      },
-      "scripts/ci-financial-supervisor.py": {
-        "producer_git_blob": "19eaf548f5e60f5cbafb5220e004ce32aec16ffe",
-        "producer_sha256": "69fb9e10ae160f930a558ae499fe0a35bf40f422ea8111e1abc3c6c37b32f2ac",
-        "producer_mode": "100644",
-        "producer_mode_sha256": "37e1a0cd930e2220d4598460fbb53195fbbc82563c1a9cf0d4f87d1fa7c19faa",
-        "harness_git_blob": "f40fe647fd629a334818db3309792aa0aa9a4fed",
-        "harness_sha256": "2b251c9f0bcce7a227d7e7f37f2a7a51c049f6b0e30e36ee3c11adce19c6dce0",
-        "harness_mode": "100644",
-        "harness_mode_sha256": "94ed576bb1569ef2ecd418aaf3094299111bf1fac2379bc1543b9fe2806eec4b"
-      }
-    }
+    "scripts/ci-financial-container.py": "afb8031ca1211aab0f91e54e95448fd42a485bb5b75a525c019967f568a723a3",
+    "scripts/ci-financial-controller.py": "496d6a100f80f88244f05f7489b63b8f80de93bd7a3cc9d8a383df2ef2fe9815",
+    "scripts/ci-financial-flow.py": "307078a402553b9ef56ad37fa95000bbea6d589f2bb96828b39ca1193e8cc4e0",
+    "scripts/tests/test_ci_financial_observer.py": "8f7537d96730a4430f1adbbcfa2cf4fc52c4010b7a193f715ba9ccca53473589"
   }
 }

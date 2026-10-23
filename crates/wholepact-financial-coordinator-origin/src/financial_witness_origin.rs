@@ -39,8 +39,12 @@ impl ReviewBinding {
     fn check(&self,admitted:bool)->Result<()>{
         self.setup.core.actors()?;require_time(self.setup.core.clocks.supervision())?;
         require_time(self.setup.source)?;require_time(self.original_review)?;require_time(self.ceiling)?;
-        let wall=state::wall_ms()?;let old=self.last_wall.fetch_max(wall,Ordering::AcqRel);
-        if wall<old||wall<self.presentation.prepared_at_ms||wall>=self.presentation.expires_at_ms
+        let wall = state::observe_shared_wall(
+            &self.last_wall,
+            self.setup.source.min(self.setup.core.clocks.supervision()).min(self.original_review).min(self.ceiling),
+            state::wall_ms,
+        )?.ok_or_else(|| rejected("financial Witness review clock"))?;
+        if wall<self.presentation.prepared_at_ms||wall>=self.presentation.expires_at_ms
             ||wall>=self.setup.wire.continuation.source_expires_at_ms{return Err(rejected("financial Witness review clock"));}
         if !admitted{self.setup.core.action()?;}Ok(())
     }

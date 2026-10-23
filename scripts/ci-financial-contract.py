@@ -264,8 +264,8 @@ def validate_record(record, expected_profile=PROFILE):
 
 # Two independent authenticated actors: no cross-process ordering or cause claim.
 HOST_REAP_CONTEXTS=frozenset(('FinishPath','DropKillAttempted','RetirementTryReap'))
-HOST_FAILURE_STAGES=frozenset('TerminalSetup OriginalCustody RelaySetup StartupSelection HostOpen CommandsPath CommandsFileRead CommandsDecode CommandsCheck Reviewer1Message Reviewer1EndpointWait LaterWorkflow NormalClose RunnerReturn'.split())
-HOST_FAILURE_CLASSES=frozenset('Platform Terminal Permission Locked Invalid Authentication Storage Quarantined Unsupported Receipt RecoverySemantic RecoveryBackupUnsupported RecoveryFinancialUnsupported CompleteOriginRecoveryUnavailable HistoricalExportIncomplete GenerationArchiveIncomplete IoNotFound IoPermissionDenied IoInterrupted IoWouldBlock IoInvalidInput IoInvalidData IoUnexpectedEof IoTimedOut IoOther'.split())
+HOST_FAILURE_STAGES=frozenset('TerminalSetup OriginalCustody RelaySetup StartupSelection HostOpen CommandsPath CommandsFileRead CommandsDecode CommandsCheck Reviewer1Message Reviewer1EndpointWait LaterWorkflow NormalClose RunnerReturn PairEndpointValidate PairScopeValidate PairOriginalCustody PairConnect PairEnableCredentials PairVerifySigner PairObservePeer PairCloneObserver PairRequestWrite PairResponseRead PairResponseDecode PairResponseValidate PairResponseDigest PairChannelDigest PairInitialCurrent PairStatusOpen PairStatusRead PairStatusDecode PairStatusValidate PairFinalCurrent'.split())
+HOST_FAILURE_CLASSES=frozenset('Platform Terminal Permission Locked Invalid Authentication Storage Quarantined Unsupported Receipt RecoverySemantic RecoveryBackupUnsupported RecoveryFinancialUnsupported CompleteOriginRecoveryUnavailable HistoricalExportIncomplete GenerationArchiveIncomplete IoNotFound IoPermissionDenied IoInterrupted IoWouldBlock IoInvalidInput IoInvalidData IoUnexpectedEof IoTimedOut IoOther BridgeBinding BridgeConflict BridgeMissing BridgeUncertain BridgeLimit BridgePermission BridgeRecoveryRequired BridgeCompleteOriginRecoveryUnavailable BridgeVerification BridgeSignerOriginUnavailable BridgeJournal BridgeAuthority BridgeWallet BridgeIpc FrameUnclassified FrameDeadline FrameEof FrameCredentialsMissing FrameCredentialsMismatch FrameAncillaryRejected FrameTruncated FramePeerNotLive FrameCurrentCheck FrameIo FrameLimit FrameInvalidFrame FrameInvalidBudget'.split())
 HOST_RELAY_STAGES=frozenset('LifecycleCheck DeadlineCheck HostAbsent CoordinatorLifetime Signer1Lifetime Signer2Lifetime CoordinatorReceive NormalControl CompletedPairControl RetirementControl DownstreamValidation TargetSelection Signer1Send Signer2Send RetirementObservation NormalObservation Signer1Receive Signer2Receive Signer1UpstreamValidation Signer2UpstreamValidation CoordinatorSend FinalLifecycleCheck'.split())
 HOST_RELAY_CLASSES=frozenset('IoNotFound IoPermissionDenied IoInterrupted IoWouldBlock IoInvalidInput IoInvalidData IoUnexpectedEof IoTimedOut IoOther'.split())
 def validate_host_relay_facts(facts):
@@ -464,4 +464,38 @@ def validate_host_diagnostic(value):
         require(type(o['coverage']) is str and o['coverage'] in HOST_DIAGNOSTIC_COVERAGE)
         require(type(o['capture_outcome']) is str and o['capture_outcome'] in (HOST_DIAGNOSTIC_CATEGORIES|{'Unobserved','Accepted'}))
         require(type(o['capture_context']) is str and o['capture_context'] in ('Unobserved','Same','Changed'))
+    return value
+
+
+# Failure-only Python guard attribution; never native authority or success proof.
+INPUT_BUDGET_LIMITS={'actions':512,'scroll':128,'idle_sweep':64,'paired_review':256,
+ 'challenges':96,'host_tail':128,'host_coverage':128,'host_lines':128,'startup_focus':64,
+ 'fixture_preflight':MAX_NATIVE_COMMANDS}
+INPUT_WIDGET_TAGS=tuple(sorted(WIDGETS))
+def input_budget(ok,site,count):
+    if not ok:
+        error=Rejected('input_budget')
+        try:error.input_budget={'site':site,'count':count,'limit':INPUT_BUDGET_LIMITS[site]}
+        except Exception:pass  # Attribution must not replace the original rejection.
+        raise error
+
+def validate_input_diagnostic(value):
+    exact(value,('version','budget','last_main_loop'))
+    require(type(value['version']) is int and value['version']==1)
+    b=value['budget'];exact(b,('site','count','limit'))
+    require(type(b['site']) is str and b['site'] in INPUT_BUDGET_LIMITS)
+    require(type(b['limit']) is int and b['limit']==INPUT_BUDGET_LIMITS[b['site']])
+    require(integer(b['count'],b['limit']+int(b['site'] in ('actions','host_lines','fixture_preflight')),1<<30))
+    s=value['last_main_loop']
+    if s is not None:
+        exact(s,('phase','subphase','owner','target','widget_states'))
+        require(type(s['phase']) is str and s['phase'] in PHASES and type(s['subphase']) is str and s['subphase'] in SUBPHASES)
+        require(s['owner'] in (None,'Signer1','Signer2') and s['target'] in (None,'Signer1','Signer2'))
+        rows=s['widget_states']
+        # Rows: None, Signer1, Signer2. Columns: INPUT_WIDGET_TAGS.
+        # 0 absent, 1 disabled, 2 enabled; 3/4 disabled/enabled + default-ordinal latch; 5 absent + default-ordinal latch.
+        require(type(rows) is list and len(rows)==3)
+        for row in rows:
+            require(type(row) is list and len(row)==len(INPUT_WIDGET_TAGS))
+            require(all(integer(v,0,5) for v in row))
     return value

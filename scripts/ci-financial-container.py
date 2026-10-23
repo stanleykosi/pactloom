@@ -286,6 +286,17 @@ def emit_cached_host_exit_failure(flow):
     except Exception:return # independent cached actors, no late IO or inference
 
 
+def emit_cached_input_failure(flow,error):
+    # Original exception and cached checkpoint only; no fresh read/input/clock.
+    try:
+        budget=getattr(error,'input_budget',None)
+        if budget is None:return
+        value=dict(version=1,budget=budget,last_main_loop=getattr(flow,'input_checkpoint',None))
+        encoded=json.dumps(C.validate_input_diagnostic(value),separators=(',',':'))
+        print('CI_FINANCIAL_INPUT_DIAGNOSTIC '+encoded,flush=True)
+    except Exception:return
+
+
 def main():
     if sys.argv[1:]==['fixture-child']:fixture_child();return
     C.require(not sys.argv[1:],'contract')
@@ -316,6 +327,7 @@ def main():
         # when none was observed. It does not identify the terminal cause.
         if flow is not None and flow.location is not None:
             print('CI_FINANCIAL_LOCATION '+json.dumps(flow.location,separators=(',',':')),flush=True)
+        emit_cached_input_failure(flow,error)
         emit_cached_progress_failure(flow)
         emit_cached_host_failure(flow)
         emit_cached_native_failure(flow)

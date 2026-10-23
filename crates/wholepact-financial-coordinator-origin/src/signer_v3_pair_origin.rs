@@ -60,10 +60,15 @@ impl PairBinding {
     }
     pub(super) fn channel_bounds(&self) -> Result<()> {
         self.entry.check_custody()?;
-        let wall = state::wall_ms()?;
-        let old = self.last_wall.fetch_max(wall, Ordering::AcqRel);
-        if wall < old
-            || wall < self.p.facts.reviewed_at_ms
+        let wall = state::observe_shared_wall(
+            &self.last_wall,
+            self.channel_deadline
+                .min(self.entry.original_source)
+                .min(self.entry.clocks.supervision()),
+            state::wall_ms,
+        )?
+        .ok_or_else(|| rejected("Pair original channel expired"))?;
+        if wall < self.p.facts.reviewed_at_ms
             || wall >= self.p.facts.channel_expires_at_ms
             || Instant::now() >= self.channel_deadline
         {
@@ -73,10 +78,16 @@ impl PairBinding {
     }
     fn bounds(&self) -> Result<()> {
         self.channel_bounds()?;
-        let wall = state::wall_ms()?;
-        let old = self.last_wall.fetch_max(wall, Ordering::AcqRel);
-        if wall < old
-            || wall < self.p.facts.reviewed_at_ms
+        let wall = state::observe_shared_wall(
+            &self.last_wall,
+            self.deadline
+                .min(self.channel_deadline)
+                .min(self.entry.original_source)
+                .min(self.entry.clocks.supervision()),
+            state::wall_ms,
+        )?
+        .ok_or_else(|| rejected("Pair original action expired"))?;
+        if wall < self.p.facts.reviewed_at_ms
             || wall >= self.p.facts.expires_at_ms
             || Instant::now() >= self.deadline
         {

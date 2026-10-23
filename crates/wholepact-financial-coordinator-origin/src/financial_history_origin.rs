@@ -79,10 +79,13 @@ impl SetupBinding {
         self.core.action()?;
         require_time(self.read_ceiling)?;
         let f = &self.wire.read_binding.read.facts;
-        let wall = state::wall_ms()?;
-        let old = self.last_wall.fetch_max(wall, Ordering::AcqRel);
-        if wall < old
-            || wall < f.reviewed_at_ms
+        let wall = state::observe_shared_wall(
+            &self.last_wall,
+            self.read_ceiling.min(self.core.clocks.supervision()),
+            state::wall_ms,
+        )?
+        .ok_or_else(|| rejected("initial history original Read clock"))?;
+        if wall < f.reviewed_at_ms
             || wall >= f.expires_at_ms
             || wall >= f.source_expires_at_ms
         {
@@ -106,9 +109,13 @@ impl ReviewBinding {
     fn current(&self) -> Result<()> {
         self.setup.read_current()?;
         require_time(self.ceiling)?;
-        let wall = state::wall_ms()?;
-        let old = self.last_wall.fetch_max(wall, Ordering::AcqRel);
-        if wall < old || wall < self.data.prepared_at_ms || wall >= self.data.expires_at_ms {
+        let wall = state::observe_shared_wall(
+            &self.last_wall,
+            self.ceiling.min(self.setup.read_ceiling).min(self.setup.core.clocks.supervision()),
+            state::wall_ms,
+        )?
+        .ok_or_else(|| rejected("initial history prepared source clock"))?;
+        if wall < self.data.prepared_at_ms || wall >= self.data.expires_at_ms {
             return Err(rejected("initial history prepared source clock"));
         }
         Ok(())

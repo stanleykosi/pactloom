@@ -137,12 +137,15 @@ impl V3EntryReviewed {
     /// Private retirement only. The sole driver separately checks every
     /// original actor except its owned exiting target. This grants no action.
     pub(super) fn retirement_clock_bounds(&self) -> Result<()> {
+        let wall = state::observe_shared_wall(
+            &self.last_wall,
+            self.original_source.min(self.clocks.supervision()),
+            state::wall_ms,
+        )?
+        .ok_or_else(|| rejected("retirement original source clock elapsed"))?;
         let now = Instant::now();
-        let wall = state::wall_ms()?;
-        let prior = self.last_wall.fetch_max(wall, Ordering::AcqRel);
         if now >= self.original_source
             || now >= self.clocks.supervision()
-            || wall < prior
             || wall < self.wire.presentation.facts.reviewed_at_ms
             || wall >= self.wire.presentation.facts.source_expires_at_ms
         {
@@ -153,12 +156,15 @@ impl V3EntryReviewed {
     fn observe_custody(&self) -> Result<u64> {
         let result = (|| {
             self.core.check()?;
+            let wall = state::observe_shared_wall(
+                &self.last_wall,
+                self.original_source.min(self.clocks.supervision()),
+                state::wall_ms,
+            )?
+            .ok_or_else(|| rejected("original financial custody expired"))?;
             let now = Instant::now();
-            let wall = state::wall_ms()?;
-            let prior = self.last_wall.fetch_max(wall, Ordering::AcqRel);
             if now >= self.original_source
                 || now >= self.clocks.supervision()
-                || wall < prior
                 || wall < self.wire.presentation.facts.reviewed_at_ms
                 || wall >= self.wire.presentation.facts.source_expires_at_ms
             {
@@ -1242,3 +1248,4 @@ impl CV3Entry { pub(super) fn has_financial_setup(&self)->bool{self.financial_se
 impl SV3Entry{pub(super) fn return_transport_bounds(&self)->Result<ReturnTransportBounds>{if !self.audit.reported{return Err(rejected("Return before actual V3 Audit"));}let b=self.audit.binding.as_ref().ok_or_else(||rejected("Return missing actual V3 custody"))?;b.owner.custody_bounds()?;Ok(ReturnTransportBounds{channel:b.owner.pair.channel_deadline,material:b.owner.material_deadline,channel_ceiling:b.owner.pair.p.channel_ceiling_ms,material_ceiling:b.owner.p.material_ceiling_ms,channel_wall:b.owner.pair.p.facts.channel_expires_at_ms,material_wall:b.owner.p.facts.material_expires_at_ms})}}
 impl CV3Entry{pub(super) fn return_transport_bounds(&self)->Result<ReturnTransportBounds>{if !self.audit.reported{return Err(rejected("Return before actual V3 Audit"));}let b=self.audit.binding.as_ref().ok_or_else(||rejected("Return missing actual V3 custody"))?;b.owner.custody_bounds()?;Ok(ReturnTransportBounds{channel:b.owner.pair.channel_deadline,material:b.owner.material_deadline,channel_ceiling:b.owner.pair.p.channel_ceiling_ms,material_ceiling:b.owner.p.material_ceiling_ms,channel_wall:b.owner.pair.p.facts.channel_expires_at_ms,material_wall:b.owner.p.facts.material_expires_at_ms})}}
 impl HV3Entry{pub(super) fn return_transport_bounds(&self,clocks:FullWorkflowClocksV1)->Result<ReturnTransportBounds>{if !self.audit.reported{return Err(rejected("Return relay before actual V3 Audit"));}let (p,_)=self.delivery.admission_wire()?;let pair=self.pair.wire.as_ref().ok_or_else(||rejected("Return missing original Pair"))?;let now=Instant::now();let wall=state::wall_ms()?;let channel=clocks.restrict_received(PROFILE,pair.channel_ceiling_ms,clocks.supervision(),now)?.min(wall_ceiling(now,wall,pair.facts.reviewed_at_ms,pair.facts.channel_expires_at_ms)?);let material=clocks.restrict_received(PROFILE,p.material_ceiling_ms,clocks.supervision(),now)?.min(wall_ceiling(now,wall,p.facts.reviewed_at_ms,p.facts.material_expires_at_ms)?);Ok(ReturnTransportBounds{channel,material,channel_ceiling:pair.channel_ceiling_ms,material_ceiling:p.material_ceiling_ms,channel_wall:pair.facts.channel_expires_at_ms,material_wall:p.facts.material_expires_at_ms})}}
+

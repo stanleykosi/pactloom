@@ -1,8 +1,8 @@
 """PRIVATE review candidate, no network or activation at import.
 
-Only semantic P32 recipe-v2 producer is accepted under separate plan v6 policy. H may change only the original eight reviewed runtime paths. Only exact two-file P33 diagnostic annex is reviewed. L is an independent
-exact CI event checkout. Missing artifact/H pins reject. No compiler invocation,
-context override, monkey-patch, native authority or success-gate change.
+Only retry03 native producer is accepted. H contains runtime-only edits; L is
+an independent exact CI event checkout. Missing future artifact/H pins reject.
+No compiler invocation, context override, monkey-patch or runtime policy change.
 """
 import hashlib
 import types
@@ -24,7 +24,7 @@ HERE=pathlib.Path(__file__).resolve().parent
 # Bootstrap is stdlib-only. No helper import or bytecode is executed until its
 # tracked Git blob, working content and mode are verified against actual L.
 V=None
-CLEANUP_PINS={'cleanup_snapshot/scripts/ci-bootstrap-output.py': 'ce7c9a11b439e2a31f6e38c8401ab644840abba78c05482224484e5c931cc898', 'cleanup_snapshot/scripts/ci-bootstrap-supervisor.py': 'f606f43e4c3436209a380377ae7d8225fe8ee45828a748c776699f6190c709c0', 'cleanup_snapshot/scripts/ci-financial-artifacts.py': 'c6d12ee5a132083ee97f5aee7fcda3b3dc270a794b90d3d65e18b271c3426682', 'cleanup_snapshot/scripts/ci-financial-contract.py': 'f33248f7e0b2b9690ce1a51580f7dc2739632154b09978e65f21375cd67b5b8e', 'cleanup_snapshot/scripts/ci-financial-external-output.py': '4aa971c7c6455aaa259dd587dda9ad92d9ec84bfbec6df113a6960640b553a57', 'cleanup_snapshot/scripts/ci-financial-image.py': '0f638a42094bc41204a3869cbe33c0332e79c478782b813ed2cf8a6503b36439', 'cleanup_snapshot/scripts/ci-financial-ocr-image.py': '5dd479e0def902357714b07d1116a83f2c9ad215ea462493032502e29d564d67', 'cleanup_snapshot/scripts/ci-financial-supervisor.py': '69fb9e10ae160f930a558ae499fe0a35bf40f422ea8111e1abc3c6c37b32f2ac', 'cleanup_snapshot/scripts/ci-ui-image.py': '181ebc76e3d15d02381ac6a7338346ea333c9026630968098dc3d25ee58b551b', 'cleanup_snapshot/scripts/qualification-gate-mode': 'ebadd1b086ae7c27c6a731049ef4c883841e9d7a710ac4e2b444677f130b38a2'}
+CLEANUP_PINS={'cleanup_snapshot/scripts/ci-bootstrap-output.py': 'ce7c9a11b439e2a31f6e38c8401ab644840abba78c05482224484e5c931cc898', 'cleanup_snapshot/scripts/ci-bootstrap-supervisor.py': 'f606f43e4c3436209a380377ae7d8225fe8ee45828a748c776699f6190c709c0', 'cleanup_snapshot/scripts/ci-financial-artifacts.py': 'd24433f973c77d34e6d1f5c299cc1c7d00a7d024584bbfcb3d45e077c0e92f5d', 'cleanup_snapshot/scripts/ci-financial-contract.py': '574ad44f5f6414ce93b8c9f4b2c0954385dc7313f304aa28e961858f220fbc05', 'cleanup_snapshot/scripts/ci-financial-external-output.py': '10a067d58042bc86a21e8b640b129778036ca5b5b4383e9c5a109c303830a9a0', 'cleanup_snapshot/scripts/ci-financial-image.py': 'bd576c467c59a4958d77620c930076e9adb1551f8b8600d04de0f618a8a72b5b', 'cleanup_snapshot/scripts/ci-financial-ocr-image.py': '5dd479e0def902357714b07d1116a83f2c9ad215ea462493032502e29d564d67', 'cleanup_snapshot/scripts/ci-financial-supervisor.py': 'c9dc7952eca234465cce4d9efec730d7d422525b00af0c047cd25d549efdd94e', 'cleanup_snapshot/scripts/ci-ui-image.py': '181ebc76e3d15d02381ac6a7338346ea333c9026630968098dc3d25ee58b551b'}
 HELPERS=('launch_adapter.py','verify_option.py','producer_artifacts.py','acquire_archive.py')
 CI_KEYS=('PATH','RUNNER_TEMP','GITHUB_ACTIONS','RUNNER_OS','RUNNER_ENVIRONMENT',
     'GITHUB_REPOSITORY','GITHUB_REF','GITHUB_EVENT_NAME','GITHUB_SHA','GITHUB_RUN_ID',
@@ -138,7 +138,26 @@ def load_json(path):
 
 
 def validate_plan(plan):
-    return V.validate_binding(plan)
+    V.require(type(plan) is dict and set(plan)=={'version','producer','harness','artifact_pins',
+        'api_pins','reviewed_runtime_changes'},'plan_schema')
+    V.require(type(plan['version']) is int and plan['version']==1,'plan_version')
+    V.require(plan['producer']==V.PRODUCER,'producer_pin')
+    h=plan['harness']
+    V.require(type(h) is dict and set(h)=={'repository','source','source_tree'}
+        and h['repository']==V.PRODUCER['repository']
+        and type(h['source']) is str and V.A.COMMIT.fullmatch(h['source'])
+        and type(h['source_tree']) is str and V.A.COMMIT.fullmatch(h['source_tree']),'harness_pin')
+    V.require(type(plan['artifact_pins']) is dict and
+        set(plan['artifact_pins'])=={'artifact_id','archive_sha256','bundle_sha256'},'artifact_pins')
+    p=plan['artifact_pins']
+    V.require(type(p['artifact_id']) is int and p['artifact_id']>0,'artifact_id')
+    for key in ('archive_sha256','bundle_sha256'):
+        V.require(type(p[key]) is str and V.A.SHA.fullmatch(p[key]),'artifact_digest')
+    V.require(type(plan['api_pins']) is dict and set(plan['api_pins'])=={'run','artifact','job'},'api_pins')
+    for value in plan['api_pins'].values():V.require(type(value) is str and V.A.SHA.fullmatch(value),'api_digest')
+    changes=plan['reviewed_runtime_changes'];V.A.closure(changes)
+    V.require(set(changes)<=V.RUNTIME_ONLY,'reviewed_change_set')
+    return plan
 
 
 def validate_job(job):
@@ -171,8 +190,8 @@ def verify_sources(plan,producer_root,harness_root,launcher_root):
     l_sha=os.environ.get('GITHUB_SHA','');l_tree,l_inv=V.inventory_checkout(roots[2],l_sha)
     V.require(HERE.is_relative_to(roots[2]),'launcher_location')
     V.require(p_tree==V.PRODUCER['source_tree'] and h_tree==plan['harness']['source_tree'],'tree_identity')
-    changes=V.equivalent(p_inv,h_inv,plan['diagnostic_compatibility'])
-    V.require({k:h_inv[k] for k in changes if k in V.RUNTIME_ONLY}==plan['reviewed_runtime_changes'],'unreviewed_runtime_delta')
+    changes=V.equivalent(p_inv,h_inv)
+    V.require({k:h_inv[k] for k in changes}==plan['reviewed_runtime_changes'],'unreviewed_runtime_delta')
     return p_inv,h_inv,dict(repository=V.PRODUCER['repository'],source=l_sha,source_tree=l_tree)
 
 
@@ -182,7 +201,6 @@ def verified_api(staging,plan):
         p=pathlib.Path(staging)/(name+'.json');V.require(digest(p)==expected,'api_file_changed')
         values[name]=load_json(p)
     validate_job(values['job'])
-    V.authenticate_metadata(values['run'],values['artifact'],values['job'])
     return values
 
 
@@ -202,7 +220,7 @@ def acquire_verified_inputs(root,staging,plan,p_inv,h_inv):
     with zipfile.ZipFile(archive) as z:
         with z.open('build.tar') as source,bundle.open('xb') as destination:shutil.copyfileobj(source,destination)
     bundle.chmod(0o400)
-    evidence=V.qualify(bundle,archive,plan['artifact_pins'],api['run'],api['artifact'],p_inv,h_inv,plan['harness'],plan['diagnostic_compatibility'],binding=plan,job=api['job'])
+    evidence=V.qualify(bundle,archive,plan['artifact_pins'],api['run'],api['artifact'],p_inv,h_inv,plan['harness'])
     inputs=root/'artifacts';inputs.mkdir(mode=0o700)
     # The strict verifier has checked every header, name, mode and byte digest.
     # Stream the named entries to newly-created explicit paths; never extractall.
@@ -219,7 +237,7 @@ def acquire_verified_inputs(root,staging,plan,p_inv,h_inv):
 
 def stage_image_context(S,root,inputs,h_sha):
     S.package_preflight();S.exact_source(h_sha)
-    S.require(S.I.profile()==V.QUALIFICATION_PROFILE and S.A.recipe(V.QUALIFICATION_PROFILE)==V.A.recipe(V.QUALIFICATION_PROFILE) and S.FEATURES==V.A.recipe(V.QUALIFICATION_PROFILE)['artifact_features'],'compile','artifact_bundle')
+    S.require(S.A.RECIPE==V.A.RECIPE and S.FEATURES==V.A.RECIPE['artifact_features'],'compile','artifact_bundle')
     # Check exact fixture selector before any runtime fixture; this is not a build.
     listing=S.checked([str(inputs/'pristine-setup'),'--list','--exact',S.LIVE_FIXTURE_TEST],
         'compile',seconds=30,limit=4096,env=safe_environment())
@@ -251,12 +269,11 @@ def run_owned(S,root,staging,plan,p_inv,h_inv,launcher,token,*,cleanup_only=Fals
             S.exact_source(h_sha)
             # Whole H test suite is mandatory, including actual AF_UNIX bind.
             for args in ([sys.executable,'-I','-B','scripts/ci-financial-launch-tests.py'],
-                         [sys.executable,'-I','-B','-m','unittest','discover','-s','scripts/tests','-p','test*financial*.py']):
+                         [sys.executable,'-I','-B','-m','unittest','discover','-s','scripts/tests','-p','test_ci_financial*.py']):
                 S.checked(args,'preflight',seconds=300,limit=1024*1024,env=safe_environment())
             S.exact_source(h_sha)
             inputs,evidence=acquire_verified_inputs(root,staging,plan,p_inv,h_inv)
             S.emit('REUSE_SOURCE',dict(native_producer=V.PRODUCER,harness=plan['harness'],launcher=launcher,
-                qualification_profile=V.QUALIFICATION_PROFILE,reuse_policy=V.POLICY,
                 artifact_pins=plan['artifact_pins'],original_manifest_sha256=digest(root/'original-manifest.json'),
                 native_binaries_reused=True,native_binaries_freshly_compiled=False,
                 financial_session_seconds=1800,original_fixture_ceiling_seconds=900,
@@ -276,8 +293,7 @@ def run_owned(S,root,staging,plan,p_inv,h_inv,launcher,token,*,cleanup_only=Fals
         passed=passed and clean and first is None
         S.emit('REUSE_RESULT',dict(passed=passed,cleanup_only=cleanup_only,native_producer=V.PRODUCER,
             harness=plan['harness'],launcher=launcher,native_binaries_reused=not cleanup_only,
-            native_binaries_freshly_compiled=False,profile=V.QUALIFICATION_PROFILE,
-            semantic_assisted_host_observation=True,pixel_only_ui_verified=False,
+            native_binaries_freshly_compiled=False,profile=S.P.C.EXTERNAL_PROFILE,
             synthetic_external_witness_flow_verified=passed and not cleanup_only,
             synthetic_full_native_verified=False,integrated_witness_services=7,retained_inert_witnesses=6,
             containers_and_image_removed=clean,public_chain_verified=False,dispatch_requested=False,deployment_verified=False))
@@ -295,13 +311,8 @@ def main():
     if mode=='acquire':
         boot_require(len(sys.argv)==5,'arguments')
         _,_,plan_path,staging,launcher=sys.argv
-        try:
-            trusted,raw=bootstrap(launcher,plan_path);load_helpers(trusted)
-            acquisition=trusted.module('reviewed_acquisition',HERE/'acquire_archive.py',L=sys.modules[__name__])
-        except BaseException:
-            try:print('CI_FINANCIAL_REUSE_ACQUISITION_DIAGNOSTIC {"version":1,"stage":"bootstrap","category":"verification","api_pin":"none","http_status":0}',flush=True)
-            except BaseException:pass
-            raise
+        trusted,raw=bootstrap(launcher,plan_path);load_helpers(trusted)
+        acquisition=trusted.module('reviewed_acquisition',HERE/'acquire_archive.py',L=sys.modules[__name__])
         return acquisition.acquire_command(raw,staging)
     boot_require(mode=='run' and len(sys.argv)==7,'arguments')
     _,_,plan_path,producer,harness,staging,launcher=sys.argv

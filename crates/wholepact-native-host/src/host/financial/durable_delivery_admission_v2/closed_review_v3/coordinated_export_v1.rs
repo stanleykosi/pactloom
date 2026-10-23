@@ -158,6 +158,13 @@ pub(in crate::host::financial) fn begin_original_coordinated_export_v1<'host>(
                 history_read: true, authorization_export: false, preconstruction_export: true,
             };
             host.terminal.confirm("Pair this exact original coordinated reviewer for independently approved receive/view. No native provider fallback or financial execution is authorized.")?;
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            let mut client = CoordinatedOriginalClientV1::pair_observed(verifier, endpoint, scope)
+                .map_err(|failure| {
+                    crate::financial_ci_host_failure::pair(&failure);
+                    Error::Permission
+                })?;
+            #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
             let mut client = CoordinatedOriginalClientV1::pair(verifier, endpoint, scope).map_err(|_| Error::Permission)?;
             // Pair must finish before these actual fresh committed observations
             // can exist. The callback consumes the same original H mailbox once.

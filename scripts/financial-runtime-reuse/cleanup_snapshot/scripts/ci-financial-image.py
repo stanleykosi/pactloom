@@ -41,11 +41,7 @@ def runtime_files():
     B._require(all(type(n) is str and re.fullmatch(r'ci-financial-[a-z-]+\.(py|so)',n) for n in names),'input_allowlist')
     return tuple(n for n in names if n!=MODULE_BINARY)
 
-def profile():
-    gate=(ROOT/'qualification-gate-mode').read_bytes()
-    B._require(gate in (b'financial-ui\n',b'financial-semantic\n'),'qualification_gate')
-    return literal(ROOT/'ci-financial-contract.py',
-        'SEMANTIC_PROFILE' if gate==b'financial-semantic\n' else 'EXTERNAL_PROFILE')
+def profile():return literal(ROOT/'ci-financial-contract.py','EXTERNAL_PROFILE')
 
 def pin(raw):return {'size':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}
 

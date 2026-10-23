@@ -22,28 +22,14 @@ MAX_MANIFEST = 2 * 1024 * 1024
 SHA = re.compile(r'[0-9a-f]{64}')
 COMMIT = re.compile(r'[0-9a-f]{40}')
 REPOSITORY = 'stanleykosi/pactloom'
-MANIFEST_VERSION = 2
-PIXEL_PROFILE='coordinated-financial-external-pre-v3-witness-v1'
-SEMANTIC_PROFILE='coordinated-financial-rendered-host-semantic-v1'
-MODE_ENV='WHOLEPACT_FINANCIAL_BUILD_MODE'
-CFG_CRATES=('wholepact-financial-coordinator','wholepact-financial-coordinator-origin','wholepact-native-host')
-FINANCIAL_CFGS=('wholepact_financial_ci','wholepact_financial_external_ci','wholepact_financial_rendered_host_semantic_ci')
-BUILD_SCRIPTS=tuple('crates/'+name+'/build.rs' for name in CFG_CRATES)
-SCRIPT_SCOPES={name:list(CFG_CRATES) if name!='pristine-setup' else ['wholepact-native-host'] for name in NAMES}
-RECIPE = dict(build_recipe_version=2, qualification_profile=PIXEL_PROFILE,
-    toolchain='1.99.0', rustc='rustc 1.99.0 (b940084d7 2026-09-28)',
+RECIPE = dict(toolchain='1.99.0', rustc='rustc 1.99.0 (b940084d7 2026-09-28)',
     target='x86_64-unknown-linux-gnu', jobs=3, incremental=False,
     profile='release', default_features=False,
     coordinator_features='coordinated-financial-runtime',
     setup_features='durable-proposal,synthetic-born-joined-qualification',
-    observed_rustflags='', production_rustflags='',
+    observed_rustflags='--cfg wholepact_financial_ci --cfg wholepact_financial_external_ci', production_rustflags='',
     setup_rustflags='', sqlcipher='4.19.0', openssl='3.5.9', static_crypto=True,
     platform='linux-amd64', locked=True,
-    cfg_delivery=dict(mechanism='cargo-build-script-v1', mode_environment=MODE_ENV,
-        build_scripts=list(BUILD_SCRIPTS), artifact_script_crates=SCRIPT_SCOPES,
-        artifact_modes={'coordinator-production':'production','coordinator-observed':'observed-pixel','pristine-setup':'production'},
-        effective_cfgs={'coordinator-production':[],'coordinator-observed':list(FINANCIAL_CFGS[:2]),'pristine-setup':[]},
-        global_financial_cfgs_permitted=False),
     artifact_features={
         'coordinator-production':['common-image-bootstrap','coordinated-financial-runtime',
             'coordinated-financial-source-ui','coordinator-transient-password-input'],
@@ -51,15 +37,6 @@ RECIPE = dict(build_recipe_version=2, qualification_profile=PIXEL_PROFILE,
             'coordinated-financial-source-ui','coordinator-transient-password-input'],
         'pristine-setup':['durable-proposal','financial-runtime','manual-admission',
             'synthetic-born-joined-qualification']})
-
-def recipe(profile):
-    need(profile in (PIXEL_PROFILE,SEMANTIC_PROFILE),'qualification_profile')
-    value=json.loads(json.dumps(RECIPE))
-    if profile==SEMANTIC_PROFILE:
-        value['qualification_profile']=profile
-        value['cfg_delivery']['artifact_modes']['coordinator-observed']='observed-semantic'
-        value['cfg_delivery']['effective_cfgs']['coordinator-observed']=list(FINANCIAL_CFGS)
-    return value
 
 class Rejected(Exception):
     pass
@@ -113,13 +90,12 @@ def file_pin(path):
     return dict(size=meta.st_size, sha256=digest)
 
 
-def validate_manifest(value, expected_identity, expected_closure,profile=PIXEL_PROFILE):
+def validate_manifest(value, expected_identity, expected_closure):
     need(type(value) is dict and set(value) == {'version', 'identity', 'closure', 'recipe', 'files'}, 'manifest')
-    need(type(value['version']) is int and value['version'] == MANIFEST_VERSION, 'version')
+    need(type(value['version']) is int and value['version'] == 1, 'version')
     need(identity(value['identity']) == identity(expected_identity), 'provenance')
     need(closure(value['closure']) == closure(expected_closure), 'closure_mismatch')
-    need(set(BUILD_SCRIPTS) <= set(value['closure']), 'build_script_closure')
-    need(type(value['recipe']) is dict and canonical(value['recipe']) == canonical(recipe(profile)), 'recipe')
+    need(type(value['recipe']) is dict and canonical(value['recipe']) == canonical(RECIPE), 'recipe')
     need(type(value['files']) is dict and set(value['files']) == set(NAMES), 'file_set')
     total = 0
     for row in value['files'].values():
@@ -131,13 +107,13 @@ def validate_manifest(value, expected_identity, expected_closure,profile=PIXEL_P
     return value
 
 
-def export_bundle(artifacts, destination, producer, inputs,profile=PIXEL_PROFILE):
+def export_bundle(artifacts, destination, producer, inputs):
     """Called before any fixture exists; exclusive output, exact four entries."""
     artifacts, destination = pathlib.Path(artifacts), pathlib.Path(destination)
     need({p.name for p in artifacts.iterdir()} == set(NAMES), 'file_set')
-    value = dict(version=MANIFEST_VERSION, identity=identity(producer), closure=closure(inputs), recipe=recipe(profile),
+    value = dict(version=1, identity=identity(producer), closure=closure(inputs), recipe=RECIPE,
                  files={name: file_pin(artifacts / name) for name in NAMES})
-    validate_manifest(value, producer, inputs,profile)
+    validate_manifest(value, producer, inputs)
     raw = canonical(value)
     need(len(raw) <= MAX_MANIFEST, 'manifest_size')
     with destination.open('xb') as output:
@@ -153,11 +129,11 @@ def export_bundle(artifacts, destination, producer, inputs,profile=PIXEL_PROFILE
         output.flush(); os.fsync(output.fileno())
     destination.chmod(0o444)
     # Revalidate the actual exported bytes, not just their original inputs.
-    verify_bundle(destination, producer, inputs,profile)
+    verify_bundle(destination, producer, inputs)
     return value
 
 
-def verify_bundle(bundle, expected_identity, expected_closure,profile=PIXEL_PROFILE):
+def verify_bundle(bundle, expected_identity, expected_closure):
     path = pathlib.Path(bundle)
     meta = path.lstat()
     need(stat.S_ISREG(meta.st_mode) and meta.st_nlink == 1 and
@@ -185,7 +161,7 @@ def verify_bundle(bundle, expected_identity, expected_closure,profile=PIXEL_PROF
                 except (ValueError, UnicodeError, RecursionError):
                     raise Rejected('json') from None
                 need(canonical(value) == raw, 'canonical')
-                validate_manifest(value, expected_identity, expected_closure,profile)
+                validate_manifest(value, expected_identity, expected_closure)
             else:
                 pin = value['files'][name]
                 need(member.size == pin['size'] and member.mode == 0o555, 'archive_pin')
