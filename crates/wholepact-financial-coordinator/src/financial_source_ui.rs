@@ -7311,6 +7311,13 @@ fn host_phase_allows_input(phase: Phase) -> bool {
     matches!(
         phase,
         Phase::Selecting
+            // Receive Final has already been admitted; Host must still obtain
+            // its separate metadata-read and ExportExact replies before bytes
+            // can arrive. These lines never issue or renew Signer authority.
+            | Phase::V3Receiving
+            // Return Read Final has been admitted; after Read completes, Host
+            // intake approvals must precede HostPrepared and ReturnExact review.
+            | Phase::ReturnReading
             | Phase::HistoryReady
             | Phase::Waiting
             | Phase::SetupNeeded
@@ -7791,6 +7798,47 @@ mod tests {
             Default::default(),
         );
         assert!(raw_facts(&raw).is_none());
+    }
+    #[test]
+    fn passive_waits_allow_distinct_host_approval_without_exposing_signer_reviews() {
+        for phase in [Phase::V3Receiving, Phase::ReturnReading] {
+            assert!(host_phase_allows_input(phase));
+            assert!(!v3_pair_final_eligible(phase, true, true, true, true, false, true));
+            for review in [Phase::ReturnReadReview, Phase::ReturnExactReview] {
+                assert!(!return_tail_eligible(phase, review, true, true, true, false, true));
+            }
+        }
+        for phase in [
+            Phase::V3Configuring,
+            Phase::V3Preparing,
+            Phase::V3Review,
+            Phase::V3Confirm,
+            Phase::V3Password,
+            Phase::V3Opening,
+            Phase::V3PairReview,
+            Phase::V3EnrollmentReview,
+            Phase::V3ManifestReview,
+            Phase::V3RedisclosureReadReview,
+            Phase::V3RediscloseReview,
+            Phase::V3OwnerConfiguring,
+            Phase::V3PrepareReadReview,
+            Phase::V3ReceiveReview,
+            Phase::V3AdmitReadReview,
+            Phase::V3AdmitReview,
+            Phase::V3AuditReview,
+            Phase::Password,
+            Phase::ReturnReadReview,
+            Phase::ReturnPrepared,
+            Phase::ReturnExactReview,
+            Phase::ReturningExact,
+            Phase::Revoked,
+            Phase::Finished,
+        ] {
+            assert!(!host_phase_allows_input(phase));
+        }
+        assert!(host_entry_blocks_source(HostEntry::Editing(1)));
+        assert!(host_entry_blocks_source(HostEntry::Writing(1)));
+        assert!(!host_entry_blocks_source(HostEntry::Idle));
     }
     #[test]
     fn protected_host_editor_and_partial_write_exclude_source_controls() {

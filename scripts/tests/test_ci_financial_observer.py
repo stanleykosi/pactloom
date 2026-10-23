@@ -3032,3 +3032,97 @@ class ActorDiagnosticTests(unittest.TestCase):
         for cls in ('JournalOther','JournalRawError',True):
             facts=self.facts();facts['driver']['class']=cls
             with self.assertRaises(O.C.Rejected):O.C.validate_actor_failure_facts(facts,'Signer1')
+
+from unittest import mock
+class StopObservation(Exception):pass
+class CaptureReached(Exception):pass
+class ReceivingHostNavigationTests(unittest.TestCase):
+ def model(self,hidden,phase='V3Receiving',*,reveal=True,context_valid=True,enabled=True,new_context=True):
+  state=dict(frames=0,deadlines=[],moved=False);deadline=time.monotonic_ns()+60_000_000_000
+  class Observer:
+   expected_profile=F.C.SEMANTIC_PROFILE
+   host_view=mock.Mock()
+   def read(self):return [dict(kind='SignerMilestone',facts=dict(owner='Signer1',step=x)) for x in ('EntryOpened','Paired','Enrolled','ManifestAccepted','Redisclosed','Prepared')]
+   def next_snapshot(self,bound):
+    state['frames']+=1;state['deadlines'].append(bound)
+    if state['frames']>24:raise StopObservation()
+    widgets=[dict(tag='ScrollRegion',owner=None,enabled=True,rect=[0,0,1280,800])]
+    if hidden!='BeginHostLine' or state['moved']:widgets.append(dict(tag='BeginHostLine',owner=None,enabled=enabled,rect=[10,350,200,380]))
+    if hidden!='HostOutput' or state['moved']:widgets.append(dict(tag='HostOutput',owner=None,enabled=True,rect=[10,100,600,340]))
+    view=None if not context_valid or (hidden=='HostOutput' and not state['moved']) else dict(rect=[10,100,600,120],nonws=110 if new_context else 100,rows=1)
+    return dict(phase=phase,subphase='None',owner='Signer1',view_generation=state['frames'],focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=widgets,host_observation=dict(revision=18,nonws_end=110 if new_context else 100,context_valid=context_valid,entry='Idle',editor=None,view=view),host_view_id=1 if view else None)
+  fixture=mock.Mock(deadline_ns=deadline);controller=mock.Mock()
+  def wheel(*args):
+   if reveal:state['moved']=True
+  controller.scroll_up.side_effect=wheel;controller.scroll_down.side_effect=wheel
+  flow=F.FullFlow(controller,fixture,Observer(),None,None)
+  flow.startup_index=13;flow.host_lines=17;flow.startup_focus_seen=True;flow.commands_instruction_observed=True;flow._startup_ceiling=None
+  flow.host_occurrences.frontier=100;flow.host_occurrences.last_end=100;flow.host_occurrences.last_revision=17
+  # Probe capture admission only; actual NativeScenario snapshot validation,
+  # freshness, FullFlow scheduling, pump and navigation are left unchanged.
+  flow.native.capture_host=mock.Mock(side_effect=CaptureReached())
+  return flow,controller,state,deadline
+ def test_receiving_clipped_control_uses_bounded_navigation_then_fresh_capture(self):
+  for hidden in ('BeginHostLine','HostOutput'):
+   with self.subTest(hidden=hidden):
+    f,c,s,d=self.model(hidden)
+    with self.assertRaises(CaptureReached):f.run()
+    self.assertGreater(s['frames'],1);self.assertEqual(set(s['deadlines']),{d});self.assertEqual(f.host_lines,17)
+    self.assertEqual(c.scroll_up.call_count+c.scroll_down.call_count,1);f.native.capture_host.assert_called_once()
+    c.click.assert_not_called();c.type_ascii.assert_not_called();self.assertIsNone(f.pending_host)
+ def test_ineligible_context_or_disabled_begin_does_not_navigate(self):
+  for kwargs in (dict(context_valid=False),dict(new_context=False),dict(enabled=False)):
+   hidden='HostOutput' if 'enabled' in kwargs else 'BeginHostLine'
+   f,c,s,d=self.model(hidden,**kwargs)
+   with self.assertRaises(StopObservation):f.run()
+   c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();f.native.capture_host.assert_not_called()
+ def test_fresh_transition_never_scrolls_or_captures(self):
+  for change in ('phase','subphase','context','invalid','secret','host','focus','disabled','visible'):
+   with self.subTest(change=change):
+    f,c,state,d=self.model('BeginHostLine');initial=f.snapshot()
+    original=f.native.next_snapshot
+    def fresh(bound):
+     row=original(bound)
+     if change=='phase':row['phase']='V3Preparing'
+     elif change=='subphase':row['subphase']='SetupNeeded'
+     elif change=='context':row['host_observation']['revision']+=1
+     elif change=='invalid':row['host_observation']['context_valid']=False;row['host_observation']['view']=None;row['host_view_id']=None
+     elif change=='secret':row['secret_input']=True
+     elif change=='host':row['host_input']=True
+     elif change=='focus':row['focused']=False
+     elif change in ('disabled','visible'):row['widgets'].append(dict(tag='BeginHostLine',owner=None,enabled=change=='visible',rect=[10,350,200,380]))
+     return row
+    f.native.next_snapshot=fresh
+    if change in ('phase','secret','host','focus'):
+     with self.assertRaises(F.C.Rejected):f.pump_host(initial)
+    else:self.assertTrue(f.pump_host(initial))
+    c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();c.click.assert_not_called();f.native.capture_host.assert_not_called()
+ def test_existing_seek_budget_exhaustion_rejects_without_input(self):
+  f,c,state,d=self.model('BeginHostLine');initial=f.snapshot()
+  key=(initial['phase'],initial['subphase'],'seek','BeginHostLine',None)
+  f.scrolls[key]=64
+  with self.assertRaises(F.C.Rejected) as error:f.pump_host(initial)
+  self.assertEqual(error.exception.code,'input_widget');self.assertEqual(set(state['deadlines']),{d})
+  c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();c.click.assert_not_called();f.native.capture_host.assert_not_called()
+ def test_expired_original_deadline_rejects_before_navigation(self):
+  f,c,state,d=self.model('BeginHostLine');initial=f.snapshot()
+  f.fixture.deadline_ns=time.monotonic_ns()-1
+  with self.assertRaises(F.C.Rejected) as error:f.pump_host(initial)
+  self.assertEqual(error.exception.code,'deadline')
+  c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();c.click.assert_not_called();f.native.capture_host.assert_not_called()
+ def test_other_passive_phase_does_not_gain_navigation(self):
+  f,c,s,d=self.model('BeginHostLine',phase='V3Preparing')
+  with self.assertRaises(StopObservation):f.run()
+  c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();f.native.capture_host.assert_not_called()
+ def test_visible_receiving_prompt_reaches_capture_without_received_proof(self):
+  f,c,s,d=self.model(None)
+  with self.assertRaises(CaptureReached):f.run()
+  f.native.capture_host.assert_called_once();self.assertFalse(f.milestone('Signer1','Received'));self.assertEqual(set(s['deadlines']),{d})
+ def test_waiting_branch_same_clipping_does_navigate(self):
+  f,c,s,d=self.model('BeginHostLine',phase='Waiting',reveal=False)
+  with self.assertRaises(StopObservation):f.run()
+  self.assertGreater(c.scroll_up.call_count+c.scroll_down.call_count,0);self.assertEqual(set(s['deadlines']),{d})
+
+class ReturnReadingHostNavigationTests(ReceivingHostNavigationTests):
+ def model(self,hidden,phase='ReturnReading',**kwargs):
+  return super().model(hidden,phase=phase,**kwargs)

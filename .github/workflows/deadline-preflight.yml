@@ -1,14 +1,14 @@
-name: Readiness observation preflight only
+name: Host approval phase preflight only
 on:
   push:
-    branches: [checkpoint/readiness-preflight-p46]
+    branches: [checkpoint/host-approval-preflight-p47]
 permissions: {}
 concurrency:
-  group: readiness-preflight-p46
+  group: host-approval-preflight-p47
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/readiness-preflight-p46' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/host-approval-preflight-p47' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -81,6 +81,7 @@ jobs:
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-close-trace.py', '--source', str(repo), '--out', str(root/'close-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-preparation-client-trace.py', '--source', str(repo), '--out', str(root/'readiness-client-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-preparation-server-trace.py', '--source', str(repo), '--out', str(root/'readiness-server-traces'), '--run'], env=env, timeout=180))
+          print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-host-phase-trace.py', '--source', str(repo), '--out', str(root/'host-phase-traces'), '--run'], env=env, timeout=180))
           package = 'wholepact-financial-coordinator-origin'
           feature = 'coordinated-financial-workflow-v1'
           environments = {}
@@ -143,7 +144,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/readiness-preflight-p46' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/host-approval-preflight-p47' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

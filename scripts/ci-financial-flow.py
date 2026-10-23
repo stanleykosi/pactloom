@@ -463,6 +463,24 @@ class FullFlow:
         latest=self.native.stable(s['phase'],s['owner'])
         return self.scroll(latest,'ScrollRegion',None,'up' if coverage_step<8 else 'down')
 
+    def seek_waiting_host_control(self,s,tag):
+        # Navigation only in the two native Host-approval waiting phases. Never
+        # turn new geometry or a changed prompt into approval/capture authority.
+        if s['phase'] not in ('V3Receiving','ReturnReading'):return False
+        latest=self.native.stable(s['phase'],s['owner'])
+        h=latest['host_observation'];old=s['host_observation']
+        if (latest['subphase']!=s['subphase'] or not latest['focused']
+                or latest['secret_input'] or latest['host_input']
+                or self.pending_host is not None or self.host_prepared is not None
+                or not h['context_valid'] or h['entry']!='Idle'
+                or (h['revision'],h['nonws_end'])!=(old['revision'],old['nonws_end'])
+                or h['nonws_end']<=self.host_occurrences.frontier):return True
+        button=self.find(latest,'BeginHostLine',None)
+        if button is not None and not button['enabled']:return True
+        if self.find(latest,tag,None) is None:self.seek(latest,tag,None)
+        # Even if the target appeared, re-enter the pump on a new outer frame.
+        return True
+
     def pump_host(self,s):
         h=s['host_observation'];context=(h['revision'],h['nonws_end'])
         if self.pending_host is not None:
@@ -542,10 +560,18 @@ class FullFlow:
         else:
             self.host_deferred=None
             button=self.find(s,'BeginHostLine',None)
-            if button is None or not button['enabled']:return False
+            if button is None:
+                # These waiting phases need ordinary Host export/read approval; an unconsumed native Host
+                # context may need ordinary navigation before capture. This
+                # grants no prompt/approval authority and never resets a budget.
+                if s['phase'] in ('V3Receiving','ReturnReading'):return self.seek_waiting_host_control(s,'BeginHostLine')
+                return False
+            if not button['enabled']:return False
             if time.monotonic_ns()-self.last_ocr<self.ocr_delay:return False
             output=self.find(s,'HostOutput',None)
-            if output is None:return False
+            if output is None:
+                if s['phase'] in ('V3Receiving','ReturnReading'):return self.seek_waiting_host_control(s,'HostOutput')
+                return False
             if h['view'] is None:
                 self.host_rejection='tail_not_visible'
                 return self.seek_host_tail(s)

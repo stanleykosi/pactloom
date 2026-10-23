@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Fixed pre-credential P45 typecheck; no fixture, native runtime or artifact export."""
+"""Fixed pre-credential P47 typecheck; no fixture, native runtime or artifact export."""
 import importlib.util,json,os,pathlib,shutil
 HERE=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('preflight_supervisor',HERE/'ci-financial-supervisor.py');S=importlib.util.module_from_spec(spec);spec.loader.exec_module(S)
-PACKAGES=('wholepact-native-host','wholepact-authority','wholepact-financial-coordinator-origin','wholepact-signer')
-SCRIPTS=('wholepact-native-host','wholepact-financial-coordinator-origin','wholepact-signer')
-FEATURES=('wholepact-native-host/coordinated-financial-workflow-v1','wholepact-signer/coordinated-financial-workflow-v1',*(f'wholepact-authority/{x}' for x in ('coordinated-witness-financial-history','coordinated-witness-financial-continuation','coordinated-witness-financial-signing','coordinated-witness-completed-pair')))
+PACKAGES=('wholepact-financial-coordinator','wholepact-native-host','wholepact-authority','wholepact-financial-coordinator-origin','wholepact-signer')
+SCRIPTS=('wholepact-financial-coordinator','wholepact-native-host','wholepact-financial-coordinator-origin','wholepact-signer')
+FEATURES=('wholepact-financial-coordinator/coordinated-financial-runtime','wholepact-native-host/coordinated-financial-workflow-v1','wholepact-signer/coordinated-financial-workflow-v1',*(f'wholepact-authority/{x}' for x in ('coordinated-witness-financial-history','coordinated-witness-financial-continuation','coordinated-witness-financial-signing','coordinated-witness-completed-pair')))
 def validate(raw,target):
     rows=[json.loads(line) for line in raw.splitlines() if line.startswith(b'{')]
     packages={};tested=set()
@@ -19,7 +19,10 @@ def validate(raw,target):
             packages[row['package_id']]=crate
         if row.get('profile',{}).get('test') is True and manifest in [str(S.REPO/'crates'/p/'Cargo.toml') for p in PACKAGES]:
             crate=pathlib.Path(manifest).parent.name
-            if t.get('kind')==['lib'] and t.get('name')==crate.replace('-','_') and t.get('src_path')==str(S.REPO/'crates'/crate/'src/lib.rs'):
+            binary=crate=='wholepact-financial-coordinator'
+            if binary:assert sorted(row.get('features',[]))==sorted(S.A.RECIPE['artifact_features']['coordinator-observed'])
+            kind=['bin'] if binary else ['lib'];source='main.rs' if binary else 'lib.rs'
+            if t.get('kind')==kind and t.get('name')==(crate if binary else crate.replace('-','_')) and t.get('src_path')==str(S.REPO/'crates'/crate/'src'/source):
                 tested.add(crate)
     assert set(packages.values())==set(SCRIPTS) and tested==set(PACKAGES)
     seen=set()
@@ -39,7 +42,7 @@ def main():
     try:
         env=S.encrypted_build_environment(root,env)
         selected=S.select_build_environment(env,'coordinator-observed',S.A.SEMANTIC_PROFILE)
-        args=['rustup','run','1.99.0','cargo','check','--locked','--lib','--tests','--no-default-features','--message-format=json']
+        args=['rustup','run','1.99.0','cargo','check','--locked','--tests','--no-default-features','--message-format=json']
         for package in PACKAGES:args+=['-p',package]
         args+=['--features',','.join(FEATURES)]
         raw=S.checked(args,'compile',env=selected,seconds=900,limit=32*1024*1024)
