@@ -1,14 +1,14 @@
-name: Coordinated handoff lease preflight only
+name: Retained RPC frame budget preflight only
 on:
   push:
-    branches: [checkpoint/handoff-preflight-p50b]
+    branches: [checkpoint/rpc-budget-preflight-p51]
 permissions: {}
 concurrency:
-  group: handoff-preflight-p50b
+  group: rpc-budget-preflight-p51
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/handoff-preflight-p50b' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/rpc-budget-preflight-p51' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -83,6 +83,7 @@ jobs:
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-preparation-client-trace.py', '--source', str(repo), '--out', str(root/'readiness-client-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-preparation-server-trace.py', '--source', str(repo), '--out', str(root/'readiness-server-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-readiness-frame-trace.py', '--source', str(repo), '--out', str(root/'readiness-frame-traces'), '--run'], env=env, timeout=180))
+          print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-postimport-frame-trace.py', '--source', str(repo), '--out', str(root/'postimport-frame-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-pair-channel-trace.py', '--source', str(repo), '--out', str(root/'pair-channel-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-host-phase-trace.py', '--source', str(repo), '--out', str(root/'host-phase-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-admission-trace.py', '--source', str(repo), '--out', str(root/'admission-traces'), '--run'], env=env, timeout=180))
@@ -154,7 +155,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/handoff-preflight-p50b' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/rpc-budget-preflight-p51' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

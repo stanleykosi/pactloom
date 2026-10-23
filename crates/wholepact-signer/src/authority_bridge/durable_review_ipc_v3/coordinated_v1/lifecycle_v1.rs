@@ -623,6 +623,16 @@ impl FreshCoordinatedDurableReviewDeliveryV1 {
         })
     }
 }
+/// Local terminal verification-read detail; never a lease or serialized value.
+pub struct CoordinatedVerifiedFailureV1 {
+    frame_cause: Option<wholepact_signer_origin::framing::FrameReadCause>,
+    error: BridgeError,
+}
+impl CoordinatedVerifiedFailureV1 {
+    pub fn frame_cause(&self) -> Option<wholepact_signer_origin::framing::FrameReadCause> { self.frame_cause }
+    pub fn error(&self) -> &BridgeError { &self.error }
+    pub fn into_error(self) -> BridgeError { self.error }
+}
 impl ImportedCoordinatedDurableReviewSessionV1 {
     pub fn intent(&self) -> &CoordinatedRecipientIntentV1 {
         &self.intent
@@ -631,19 +641,32 @@ impl ImportedCoordinatedDurableReviewSessionV1 {
         &self.receipt
     }
     pub fn await_verified_v3(self) -> Result<VerifiedImportedCoordinatedDurableReviewSessionV1> {
+        self.await_verified_inner_v3(&mut None)
+    }
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    pub fn await_verified_observed_v3(self) -> std::result::Result<VerifiedImportedCoordinatedDurableReviewSessionV1, CoordinatedVerifiedFailureV1> {
+        let mut frame_cause = None;
+        self.await_verified_inner_v3(&mut frame_cause)
+            .map_err(|error| CoordinatedVerifiedFailureV1 { frame_cause, error })
+    }
+    fn await_verified_inner_v3(self, frame_cause: &mut Option<wholepact_signer_origin::framing::FrameReadCause>) -> Result<VerifiedImportedCoordinatedDurableReviewSessionV1> {
         loop {
             require_before(self.deadline)?;
+            // Material custody is the overall bound, not a single frame budget.
+            // Freeze one transport ceiling before opening this exchange.
+            let request_deadline = self.deadline.min(self.client.deadline).min(Instant::now() + Duration::from_secs(120));
             let nonce = fresh_nonce()?;
             let stream = self.client.open_closed(
                 CoordinatedClosedCommandV1::VerifyImport {
                     intent_digest: self.intent.digest()?,
                     nonce: nonce.clone(),
                 },
-                self.deadline,
+                request_deadline,
             )?;
+            let mut stage = CoordinatedAdmissionFailureStageV1::ResponseCheckBefore;
             match self
                 .client
-                .closed_response(&stream, self.deadline, &|| Ok(()))?
+                .closed_response_detailed_v1(&stream, request_deadline, &|| Ok(()), &mut stage, frame_cause)?
             {
                 CoordinatedClosedResponseV1::Verified {
                     nonce: actual,

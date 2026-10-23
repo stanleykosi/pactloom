@@ -111,14 +111,17 @@ impl VerifiedImportedCoordinatedDurableReviewSessionV1 {
             attempt_error: None,
         };
         let exchange = (|| -> Result<()> {
+            // One attempted Admit keeps its owner and original material bound.
+            // Only this request's transport wait is narrowed to 120 seconds.
+            let request_deadline = pending.deadline.min(pending.client.deadline).min(Instant::now() + Duration::from_secs(120));
             let stream = pending.client.open_closed(
                 CoordinatedClosedCommandV1::Admit {
                     intent_digest,
                     nonce: nonce.clone(),
                 },
-                pending.deadline,
+                request_deadline,
             )?;
-            if !matches!(pending.client.closed_response(&stream,pending.deadline,&||Ok(()))?,
+            if !matches!(pending.client.closed_response(&stream,request_deadline,&||Ok(()))?,
                 CoordinatedClosedResponseV1::Admitting{nonce:actual} if actual==nonce)
             {
                 return Err(BridgeError::Uncertain);
@@ -158,17 +161,20 @@ impl PendingCoordinatedDurableDeliveryAdmissionV1 {
         let intent_digest = self.intent.digest()?;
         loop {
             require_before(self.deadline)?;
+            // Polling does not renew original material custody. Each exchange
+            // separately uses the ordinary authenticated frame budget.
+            let request_deadline = self.deadline.min(self.client.deadline).min(Instant::now() + Duration::from_secs(120));
             let nonce = fresh_nonce()?;
             let stream = self.client.open_closed(
                 CoordinatedClosedCommandV1::AdmissionStatus {
                     intent_digest: intent_digest.clone(),
                     nonce: nonce.clone(),
                 },
-                self.deadline,
+                request_deadline,
             )?;
             match self
                 .client
-                .closed_response(&stream, self.deadline, &|| Ok(()))?
+                .closed_response(&stream, request_deadline, &|| Ok(()))?
             {
                 CoordinatedClosedResponseV1::Admitting { nonce: actual } if actual == nonce => {
                     drop(stream);

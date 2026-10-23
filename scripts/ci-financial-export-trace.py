@@ -12,6 +12,9 @@ def item(s,n):
   i+=1
  return s[p:i]
 def normalize_observers(text):
+ verified_wrapper = '        #[cfg(wholepact_financial_rendered_host_semantic_ci)]\n        let verified = bytes_received.await_verified_observed_v3().map_err(|error| {\n            crate::financial_ci_host_failure::verified_wait(&error);\n            error.into_error()\n        }).map_err(|_| unknown())?;\n        #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]\n        let verified = bytes_received.await_verified_v3().map_err(|_| unknown())?;'
+ assert text.count(verified_wrapper) == 1
+ text = text.replace(verified_wrapper, '        let verified = bytes_received.await_verified_v3().map_err(|_| unknown())?;')
  start=text.find('// Observe only an already-returned error.')
  if start>=0:
   end=text.index('#[derive(Serialize)]',start);text=text[:start]+text[end:]
@@ -72,7 +75,7 @@ functions='\n'.join(item(mapper,k) for k in ['pub(crate) fn native(', 'fn class(
 stages=['ExportRecipientBinding','ExportMetadataSource','ExportMetadataMaterials','ExportMetadataApproval','ExportRecipientBind','ExportFinalApproval','ExportConsent','ExportCommit','ExportVerifiedWait']
 # Structural coverage validates every label is an actual callsite and the old
 # preparation observer remains restored before any new wrapper.
-start=call.index('drop(_observation_scope);');assert all(re.search(r'export_observed!\([^,]+,'+stage+r'\b',call[start:]) for stage in stages)
+start=call.index('drop(_observation_scope);');assert all(re.search(r'export_observed!\([^,]+,'+stage+r'\b',call[start:]) for stage in stages if stage != 'ExportVerifiedWait');assert call.count('crate::financial_ci_host_failure::verified_wait(&error);') == 1
 assert call.count('let result=$operation;')==1
 assert not re.search(r'let\s+_observation_scope',call[start:])
 class_names=re.search(r'codes!\(Class \{([^}]+)\}\)',codes).group(1)

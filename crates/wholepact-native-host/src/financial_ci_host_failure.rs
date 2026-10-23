@@ -198,3 +198,28 @@ pub(crate) fn preparation_readiness(error: &wholepact_signer::authority_bridge::
         bridge(stage,error.error());
     }
 }
+
+/// Only the actual terminal verification response error is classified.
+pub(crate) fn verified_wait(error: &wholepact_signer::authority_bridge::durable_review_ipc_v3::coordinated_v1::CoordinatedVerifiedFailureV1) {
+    if let Some(cause) = error.frame_cause() {
+        use wholepact_signer_origin::framing::FrameReadCause as F;
+        let class = match cause {
+            F::Unclassified=>Class::FrameUnclassified,
+            F::Deadline=>Class::FrameDeadline,
+            F::Eof=>Class::FrameEof,
+            F::CredentialsMissing=>Class::FrameCredentialsMissing,
+            F::CredentialsMismatch=>Class::FrameCredentialsMismatch,
+            F::AncillaryRejected=>Class::FrameAncillaryRejected,
+            F::Truncated=>Class::FrameTruncated,
+            F::PeerNotLive=>Class::FramePeerNotLive,
+            F::CurrentCheck=>Class::FrameCurrentCheck,
+            F::Io=>Class::FrameIo,
+            F::FrameLimit=>Class::FrameLimit,
+            F::InvalidFrame=>Class::FrameInvalidFrame,
+            F::InvalidBudget=>Class::FrameInvalidBudget,
+        };
+        latch_failure(Stage::ExportVerifiedWait,class);
+    } else {
+        bridge(Stage::ExportVerifiedWait,error.error());
+    }
+}

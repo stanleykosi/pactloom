@@ -32,6 +32,15 @@ def main():
     his_wrap='\n'.join(take(s,m) for m in ['pub fn read_original_status_retained_v1(','pub fn read_original_status_retained_observed_v1('])
     old_request='pub fn request_admission_retained_v1(\n        self,\n    ) -> Result<PendingCoordinatedDurableDeliveryAdmissionV1> '+request[request.index('{'):]
     old_history='pub fn read_original_status_retained_v1(\n        &mut self,\n    ) -> Result<CoordinatedDurableDeliveryAdmissionStatusV1> '+history[history.index('{'):]
+    # P51 narrows only the single exchange transport ceiling. Reconstruct the
+    # already-tested P47 operation body before its fixed baseline comparison.
+    transport = ("            // One attempted Admit keeps its owner and original material bound.\n"
+                 "            // Only this request's transport wait is narrowed to 120 seconds.\n"
+                 "            let request_deadline = pending.deadline.min(pending.client.deadline).min(Instant::now() + Duration::from_secs(120));\n")
+    assert old_request.count(transport) == 1
+    old_request = old_request.replace(transport, '').replace(
+        '                request_deadline,\n', '                pending.deadline,\n').replace(
+        '&stream,request_deadline,', '&stream,pending.deadline,')
     old_request=re.sub(r'^\s*\*stage = CoordinatedAdmissionFailureStageV1::\w+;\n','',old_request,flags=re.M)
     old_history=re.sub(r'^\s*\*stage = CoordinatedAdmissionFailureStageV1::\w+;\n','',old_history,flags=re.M)
     old_history=old_history.replace('self.client.closed_response_detailed_v1(&stream, wait, &|| Ok(()), stage, frame_cause)', 'self.client.closed_response(&stream, wait, &|| Ok(()))')

@@ -133,7 +133,13 @@ impl Host {
         })?;
         // Actual coordinated verification is a separate read-bound worker result.
         // A data receipt cannot promote itself into an admission owner.
-        let verified = export_observed!(bridge,ExportVerifiedWait,bytes_received.await_verified_v3()).map_err(|_| unknown())?;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        let verified = bytes_received.await_verified_observed_v3().map_err(|error| {
+            crate::financial_ci_host_failure::verified_wait(&error);
+            error.into_error()
+        }).map_err(|_| unknown())?;
+        #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
+        let verified = bytes_received.await_verified_v3().map_err(|_| unknown())?;
         // The export action is over. Coordinated verified import is independently
         // bounded by its read permission, not by Host's now-finished action120.
         observe_delivery(DeliveryObservationSiteV2::ExportCommit, DeliveryObservationOutcomeV2::ReturnedOk);
