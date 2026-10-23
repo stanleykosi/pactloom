@@ -2014,3 +2014,79 @@ class CommandsConsumptionGateTests(unittest.TestCase):
         self.assertEqual(str(e.exception),'input_budget');self.assertEqual(flow.host_visibility_steps,128)
         self.assertEqual(flow.startup_wait_ceiling(),bound);self.assertFalse(flow.commands_instruction_observed)
         self.assertEqual(state['captures'],0);c.click.assert_not_called();c._command.assert_not_called()
+
+class PreparedHostContextTests(unittest.TestCase):
+    def harness(self,change=None,initial_complete=False):
+        from unittest import mock
+        class Begun(Exception):pass
+        prompt='Type APPROVE 0123456789abcdef to approve this exact operation, or anything else to reject: '
+        old='Original primary financial passphrase: '
+        state=dict(generation=0,begun=False,views=0)
+        class Observer:
+            expected_profile=F.C.SEMANTIC_PROFILE
+            def read(self):return []
+            def next_snapshot(self,deadline):
+                if state['begun']:raise Begun()
+                state['generation']+=1
+                fresh=initial_complete or state['generation']>1;text=old+(prompt if fresh else 'Type APPROVE ')
+                result=dict(phase='Selecting',subphase='None',owner=None,view_generation=state['generation'],
+                    focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],
+                    host_view_id=5 if fresh else 4,host_observation=dict(revision=5 if fresh else 4,
+                        nonws_end=F.H.count(text),context_valid=True,entry='Idle',editor=None,
+                        view=dict(rect=[10,10,600,230],nonws=F.H.count(text),rows=4)),widgets=[
+                        dict(tag='HostOutput',owner=None,enabled=True,rect=[0,0,640,240]),
+                        dict(tag='BeginHostLine',owner=None,enabled=True,rect=[10,250,200,280])])
+                if state['generation']>=8 and change is not None:
+                    if change=='context':result['host_observation']['revision']=6;result['host_view_id']=6
+                    elif change=='phase':result.update(phase='Waiting',owner='Signer1')
+                    else:
+                        result['host_view_id']=None;result['host_observation']['view']=None
+                        if change=='focus':result['focused']=False
+                        elif change=='host':result['host_input']=True
+                        elif change=='secret':result['secret_input']=True
+                return result
+            def host_view(self,s):
+                state['views']+=1;h=s['host_observation'];text=old+prompt
+                F.C.match_host_view(s,dict(id=5,view_generation=s['view_generation'],revision=5,
+                    nonws_end=F.H.count(text),view=h['view'],text=text))
+                return text
+        fixture=mock.Mock(deadline_ns=time.monotonic_ns()+F.C.ORIGINAL_NS)
+        controller=mock.Mock()
+        def click(x,y):
+            self.assertEqual((x,y),(105,265));self.assertFalse(state['begun']);state['begun']=True
+        controller.click.side_effect=click
+        flow=F.FullFlow(controller,fixture,Observer(),None)
+        flow.startup_index=4;flow.host_lines=4;flow.startup_focus_seen=True
+        flow.host_occurrences.frontier=F.H.count(old)
+        return flow,state,controller,Begun
+    def test_real_capture_advancing_before_bracket_reobserves_before_single_begin(self):
+        flow,state,controller,Begun=self.harness()
+        bound=flow.startup_wait_ceiling()
+        with self.assertRaises(Begun):flow.run()
+        self.assertEqual(state['views'],1);controller.click.assert_called_once()
+        self.assertEqual(flow.host_lines,5);self.assertEqual(flow.startup_issued,4)
+        self.assertEqual(flow.pending_host,('public','APPROVE 0123456789abcdef'))
+        self.assertEqual(flow.pending_occurrence[2],5);self.assertEqual(flow.startup_wait_ceiling(),bound)
+        controller.type_ascii.assert_not_called();controller._command.assert_not_called();controller.observe.assert_not_called()
+    def test_second_context_phase_or_protection_change_still_rejects_without_begin(self):
+        for change in ('context','phase','focus','host','secret'):
+            with self.subTest(change=change):
+                flow,state,c,_=self.harness(change=change);bound=flow.startup_wait_ceiling()
+                with self.assertRaises(F.C.Rejected) as e:flow.run()
+                self.assertEqual(str(e.exception),'input_phase')
+                self.assertEqual(flow.startup_issued,4);self.assertEqual(flow.host_lines,4)
+                self.assertEqual(len(flow.challenges),1);self.assertIsNone(flow.pending_host)
+                self.assertEqual(flow.startup_wait_ceiling(),bound)
+                c.click.assert_not_called();c.type_ascii.assert_not_called();c._command.assert_not_called()
+    def test_same_context_retains_immediate_begin_and_expiry_never_renews(self):
+        from unittest import mock
+        flow,state,c,_=self.harness(initial_complete=True)
+        s=flow.snapshot();self.assertTrue(flow.pump_host(s));self.assertTrue(state['begun'])
+        c.click.assert_called_once();self.assertEqual(flow.host_lines,5)
+        flow,state,c,_=self.harness();bound=flow.startup_wait_ceiling()
+        s=flow.snapshot();self.assertTrue(flow.pump_host(s));self.assertFalse(state['begun'])
+        self.assertEqual(flow.startup_wait_ceiling(),bound)
+        with mock.patch.object(F.time,'monotonic_ns',return_value=bound):
+            with self.assertRaises(F.C.Rejected) as e:flow.run()
+        self.assertEqual(str(e.exception),'deadline');self.assertEqual(flow.startup_wait_ceiling(),bound)
+        c.click.assert_not_called();c.type_ascii.assert_not_called();c._command.assert_not_called()
