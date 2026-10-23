@@ -49,6 +49,14 @@ use wholepact_signer::ipc::PairScope;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::host) enum DeliveryObservationSiteV2 {
     SourceOpen,
+    PreparationSourceBefore,
+    PreparationApproval,
+    PreparationSourceAfter,
+    HistoricalApprovalDeadline,
+    HistoricalApprovalForeground,
+    OriginalDisclosureSelector,
+    MaterialRestrictionCapture,
+    PairConfirmation,
     SourceInspection,
     SourcePlan,
     RecipientPrepare,
@@ -171,31 +179,125 @@ pub(in crate::host) enum DeliveryObservationOutcomeV2 {
     OriginIoPermissionDenied,
     OriginIoOther,
 }
-#[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+#[cfg(any(all(test, feature = "synthetic-born-joined-qualification"), wholepact_financial_rendered_host_semantic_ci))]
 thread_local! { static DELIVERY_OBSERVER_V2: std::cell::Cell<Option<fn(DeliveryObservationSiteV2,DeliveryObservationOutcomeV2)>> = const { std::cell::Cell::new(None) }; }
-#[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+#[cfg(any(all(test, feature = "synthetic-born-joined-qualification"), wholepact_financial_rendered_host_semantic_ci))]
+struct DeliveryObserverScope {
+    previous: Option<fn(DeliveryObservationSiteV2, DeliveryObservationOutcomeV2)>,
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    previous_semantic: bool,
+}
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+thread_local! { static SEMANTIC_DELIVERY_SCOPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(any(all(test, feature = "synthetic-born-joined-qualification"), wholepact_financial_rendered_host_semantic_ci))]
+impl Drop for DeliveryObserverScope {
+    fn drop(&mut self) {
+        DELIVERY_OBSERVER_V2.with(|cell| cell.set(self.previous));
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        SEMANTIC_DELIVERY_SCOPE.with(|cell| cell.set(self.previous_semantic));
+    }
+}
+#[cfg(any(all(test, feature = "synthetic-born-joined-qualification"), wholepact_financial_rendered_host_semantic_ci))]
+fn delivery_observer_scope(observer: fn(DeliveryObservationSiteV2, DeliveryObservationOutcomeV2)) -> DeliveryObserverScope {
+    DeliveryObserverScope {
+        previous: DELIVERY_OBSERVER_V2.with(|cell| cell.replace(Some(observer))),
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        previous_semantic: SEMANTIC_DELIVERY_SCOPE.with(|cell| cell.replace(false)),
+    }
+}
+#[cfg(any(all(test, feature = "synthetic-born-joined-qualification"), wholepact_financial_rendered_host_semantic_ci))]
 pub(in crate::host) fn with_delivery_observer_v2<T>(
     observer: fn(DeliveryObservationSiteV2, DeliveryObservationOutcomeV2),
     f: impl FnOnce() -> T,
 ) -> T {
-    struct Restore(Option<fn(DeliveryObservationSiteV2, DeliveryObservationOutcomeV2)>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            DELIVERY_OBSERVER_V2.with(|cell| cell.set(self.0));
-        }
-    }
-    let old = DELIVERY_OBSERVER_V2.with(|cell| cell.replace(Some(observer)));
-    let _restore = Restore(old);
+    let _scope = delivery_observer_scope(observer);
     f()
 }
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+fn semantic_delivery_scope() -> DeliveryObserverScope {
+    let scope = delivery_observer_scope(observe_semantic_delivery);
+    SEMANTIC_DELIVERY_SCOPE.with(|cell| cell.set(true));
+    scope
+}
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+fn observe_semantic_delivery(site: DeliveryObservationSiteV2, outcome: DeliveryObservationOutcomeV2) {
+    if let Some((stage, class)) = semantic_delivery_code(site, outcome) {
+        wholepact_financial_coordinator_origin::financial_ci_host_diagnostics::latch_failure(stage, class);
+    }
+}
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+fn semantic_delivery_code(site: DeliveryObservationSiteV2, outcome: DeliveryObservationOutcomeV2) -> Option<(
+    wholepact_financial_coordinator_origin::financial_ci_host_diagnostics::Stage,
+    wholepact_financial_coordinator_origin::financial_ci_host_diagnostics::Class,
+)> {
+    use DeliveryObservationSiteV2 as S;
+    use DeliveryObservationOutcomeV2 as O;
+    use wholepact_financial_coordinator_origin::financial_ci_host_diagnostics::{Stage, Class};
+    // Only the reviewed local preparation/recipient-opening observations are
+    // projected here; no final export, commit or delivery hook is activated.
+    let stage = match site {
+        S::SourceOpen => Stage::DeliverySourceOpen,
+        S::SourceInspection => Stage::DeliverySourceInspection,
+        S::SourcePlan => Stage::DeliverySourcePlan,
+        S::RecipientPrepare => Stage::DeliveryRecipientPrepare,
+        S::ExportPreview => Stage::DeliveryExportPreview,
+        S::NativeCheck => Stage::DeliveryNativeCheck,
+        S::SourceCheck => Stage::DeliverySourceCheck,
+        S::SourceScopePredicate => Stage::DeliverySourceScopePredicate,
+        S::ProofRolePredicate => Stage::DeliveryProofRolePredicate,
+        S::MaterialActionPredicate => Stage::DeliveryMaterialActionPredicate,
+        S::MaterialScopePredicate => Stage::DeliveryMaterialScopePredicate,
+        S::PreparationSourceBefore => Stage::PreparationSourceBefore,
+        S::PreparationApproval => Stage::PreparationApproval,
+        S::PreparationSourceAfter => Stage::PreparationSourceAfter,
+        S::HistoricalApprovalDeadline => Stage::HistoricalApprovalDeadline,
+        S::HistoricalApprovalForeground => Stage::HistoricalApprovalForeground,
+        S::OriginalDisclosureSelector => Stage::OriginalDisclosureSelector,
+        S::MaterialRestrictionCapture => Stage::MaterialRestrictionCapture,
+        S::PairConfirmation => Stage::PairConfirmation,
+        _ => return None,
+    };
+    let class = match outcome {
+        O::EngineDisclosureUnknown => Class::EngineDisclosureUnknown,
+        O::EngineDisclosureDenied => Class::EngineDisclosureDenied,
+        O::EngineRecoveryRequired => Class::EngineRecoveryRequired,
+        O::EngineIdempotencyConflict => Class::EngineIdempotencyConflict,
+        O::EngineRevisionConflict => Class::EngineRevisionConflict,
+        O::EngineDurableProposalConflict => Class::EngineDurableProposalConflict,
+        O::EngineDurableConstructionUnavailable => Class::EngineDurableConstructionUnavailable,
+        O::EngineDurableProfileUnavailable => Class::EngineDurableProfileUnavailable,
+        O::EngineResourceExhausted => Class::EngineResourceExhausted,
+        O::EngineUnclassified => Class::EngineUnclassified,
+        O::PredicateDenied => Class::PredicateDenied,
+        O::HostPlatform => Class::Platform,
+        O::HostTerminal => Class::Terminal,
+        O::HostPermission => Class::Permission,
+        O::HostLocked => Class::Locked,
+        O::HostInvalid => Class::Invalid,
+        O::HostAuthentication => Class::Authentication,
+        O::HostStorage => Class::Storage,
+        O::HostQuarantined => Class::Quarantined,
+        O::HostUnsupported => Class::Unsupported,
+        O::HostReceipt => Class::Receipt,
+        O::HostRecoverySemantic => Class::RecoverySemantic,
+        O::HostRecoveryBackupUnsupported => Class::RecoveryBackupUnsupported,
+        O::HostRecoveryFinancialUnsupported => Class::RecoveryFinancialUnsupported,
+        O::HostCompleteOriginRecoveryUnavailable => Class::CompleteOriginRecoveryUnavailable,
+        O::HostHistoricalExportIncomplete => Class::HistoricalExportIncomplete,
+        O::HostGenerationArchiveIncomplete => Class::GenerationArchiveIncomplete,
+        // Success and unrelated Origin/Bridge delivery outcomes do not latch.
+        _ => return None,
+    };
+    Some((stage, class))
+}
 fn observe_delivery(site: DeliveryObservationSiteV2, outcome: DeliveryObservationOutcomeV2) {
-    #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+    #[cfg(any(all(test, feature = "synthetic-born-joined-qualification"), wholepact_financial_rendered_host_semantic_ci))]
     DELIVERY_OBSERVER_V2.with(|cell| {
         if let Some(observer) = cell.get() {
             observer(site, outcome);
         }
     });
-    #[cfg(not(all(test, feature = "synthetic-born-joined-qualification")))]
+    #[cfg(not(any(all(test, feature = "synthetic-born-joined-qualification"), wholepact_financial_rendered_host_semantic_ci)))]
     let _ = (site, outcome);
 }
 fn engine_outcome(error: &wholepact_engine::ApiError) -> DeliveryObservationOutcomeV2 {
@@ -594,6 +696,20 @@ struct InspectionReadV2<'a, 'host> {
     export_preview: bool,
 }
 impl InspectionReadV2<'_, '_> {
+    fn check_approval(&self) -> Result<()> {
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if self.export_preview && SEMANTIC_DELIVERY_SCOPE.with(|cell| cell.get()) {
+            return self.approval.check_observed(|failure, error| {
+                use crate::terminal::historical::HistoricalApprovalFailure as F;
+                let site = match failure {
+                    F::Deadline => DeliveryObservationSiteV2::HistoricalApprovalDeadline,
+                    F::Foreground => DeliveryObservationSiteV2::HistoricalApprovalForeground,
+                };
+                observe_delivery(site, host_outcome(error));
+            });
+        }
+        self.approval.check()
+    }
     fn check(&self) -> Result<()> {
         if self.export_preview {
             host_result(
@@ -604,7 +720,7 @@ impl InspectionReadV2<'_, '_> {
         export_check_result(
             self.export_preview,
             DeliveryObservationSiteV2::NativeCheck,
-            self.approval.check(),
+            self.check_approval(),
         )?;
         export_check_result(
             self.export_preview,
@@ -614,7 +730,7 @@ impl InspectionReadV2<'_, '_> {
         export_check_result(
             self.export_preview,
             DeliveryObservationSiteV2::NativeCheck,
-            self.approval.check(),
+            self.check_approval(),
         )
     }
 }
@@ -2163,5 +2279,90 @@ mod tests {
                 LocalAction::ReadPrivateArtifact
             ));
         }
+    }
+}
+
+#[cfg(all(test, wholepact_financial_rendered_host_semantic_ci))]
+mod semantic_preparation_observation_tests {
+    use super::*;
+    use std::cell::RefCell;
+    thread_local! { static EVENTS: RefCell<Vec<(u8, DeliveryObservationSiteV2, DeliveryObservationOutcomeV2)>> = const { RefCell::new(Vec::new()) }; }
+    fn outer(site: DeliveryObservationSiteV2, outcome: DeliveryObservationOutcomeV2) {
+        EVENTS.with(|events| events.borrow_mut().push((1, site, outcome)));
+    }
+    fn inner(site: DeliveryObservationSiteV2, outcome: DeliveryObservationOutcomeV2) {
+        EVENTS.with(|events| events.borrow_mut().push((2, site, outcome)));
+    }
+    fn deny() { observe_delivery(DeliveryObservationSiteV2::SourceCheck, DeliveryObservationOutcomeV2::HostPermission); }
+    #[test]
+    fn lexical_scope_restores_nested_early_return_and_unwind() {
+        EVENTS.with(|events| events.borrow_mut().clear());
+        deny();
+        with_delivery_observer_v2(outer, || {
+            deny();
+            with_delivery_observer_v2(inner, || { deny(); });
+            let _: Result<()> = with_delivery_observer_v2(inner, || { deny(); Err(Error::Invalid) });
+            assert!(std::panic::catch_unwind(|| with_delivery_observer_v2(inner, || { deny(); panic!("synthetic scope unwind"); })).is_err());
+            deny();
+        });
+        deny();
+        EVENTS.with(|events| assert_eq!(events.borrow().iter().map(|v| v.0).collect::<Vec<_>>(), [1, 2, 2, 2, 1]));
+        assert!(!SEMANTIC_DELIVERY_SCOPE.with(|cell| cell.get()));
+    }
+    #[test]
+    fn semantic_marker_is_lexical_and_nested_qualification_does_not_inherit_it() {
+        assert!(!SEMANTIC_DELIVERY_SCOPE.with(|cell| cell.get()));
+        {
+            let _scope = semantic_delivery_scope();
+            assert!(SEMANTIC_DELIVERY_SCOPE.with(|cell| cell.get()));
+            with_delivery_observer_v2(outer, || assert!(!SEMANTIC_DELIVERY_SCOPE.with(|cell| cell.get())));
+            assert!(SEMANTIC_DELIVERY_SCOPE.with(|cell| cell.get()));
+            std::thread::spawn(|| {
+                assert!(!SEMANTIC_DELIVERY_SCOPE.with(|cell| cell.get()));
+                assert!(DELIVERY_OBSERVER_V2.with(|cell| cell.get().is_none()));
+            }).join().unwrap();
+        }
+        assert!(!SEMANTIC_DELIVERY_SCOPE.with(|cell| cell.get()));
+    }
+    #[test]
+    fn mapped_boundaries_are_distinct_and_success_or_final_effect_is_not_recorded() {
+        use DeliveryObservationSiteV2 as S;
+        use DeliveryObservationOutcomeV2 as O;
+        use wholepact_financial_coordinator_origin::financial_ci_host_diagnostics::{Stage, Class};
+        let cases = [
+            (S::SourceOpen, Stage::DeliverySourceOpen), (S::SourceInspection, Stage::DeliverySourceInspection),
+            (S::SourcePlan, Stage::DeliverySourcePlan), (S::RecipientPrepare, Stage::DeliveryRecipientPrepare),
+            (S::ExportPreview, Stage::DeliveryExportPreview), (S::NativeCheck, Stage::DeliveryNativeCheck),
+            (S::SourceCheck, Stage::DeliverySourceCheck), (S::SourceScopePredicate, Stage::DeliverySourceScopePredicate),
+            (S::ProofRolePredicate, Stage::DeliveryProofRolePredicate), (S::MaterialActionPredicate, Stage::DeliveryMaterialActionPredicate),
+            (S::MaterialScopePredicate, Stage::DeliveryMaterialScopePredicate),
+            (S::PreparationSourceBefore, Stage::PreparationSourceBefore), (S::PreparationApproval, Stage::PreparationApproval),
+            (S::PreparationSourceAfter, Stage::PreparationSourceAfter), (S::HistoricalApprovalDeadline, Stage::HistoricalApprovalDeadline),
+            (S::HistoricalApprovalForeground, Stage::HistoricalApprovalForeground), (S::OriginalDisclosureSelector, Stage::OriginalDisclosureSelector),
+            (S::MaterialRestrictionCapture, Stage::MaterialRestrictionCapture), (S::PairConfirmation, Stage::PairConfirmation),
+        ];
+        for (site, stage) in cases {
+            assert_eq!(semantic_delivery_code(site, O::HostPermission), Some((stage, Class::Permission)));
+            assert_eq!(semantic_delivery_code(site, O::ReturnedOk), None);
+        }
+        assert_eq!(semantic_delivery_code(S::ExportPreview, O::EngineRevisionConflict), Some((Stage::DeliveryExportPreview, Class::EngineRevisionConflict)));
+        assert_eq!(semantic_delivery_code(S::ProofRolePredicate, O::PredicateDenied), Some((Stage::DeliveryProofRolePredicate, Class::PredicateDenied)));
+        for site in [S::ExportCommit, S::ExportApproval, S::ExportProofCurrent, S::RecipientFrame] {
+            assert_eq!(semantic_delivery_code(site, O::HostPermission), None);
+        }
+    }
+    #[test]
+    fn borrowed_error_identity_and_single_operation_are_preserved() {
+        let calls = std::cell::Cell::new(0);
+        let value = Box::new(7u8);
+        let pointer = &*value as *const u8;
+        let result: std::result::Result<(), Box<u8>> = with_delivery_observer_v2(outer, || {
+            observed_result(DeliveryObservationSiteV2::ExportPreview, {
+                calls.set(calls.get() + 1);
+                Err(value)
+            }, |_| DeliveryObservationOutcomeV2::EngineUnclassified)
+        });
+        assert_eq!(calls.get(), 1);
+        assert_eq!(&*result.unwrap_err() as *const u8, pointer);
     }
 }

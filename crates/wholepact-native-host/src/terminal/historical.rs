@@ -4,6 +4,26 @@ use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+/// Finite identity of the actual check branch, not a post-error clock inference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HistoricalApprovalFailure { Deadline, Foreground }
+fn check_historical_approval(
+    deadline: Instant,
+    foreground_check: impl FnOnce() -> Result<()>,
+    observe: impl FnOnce(HistoricalApprovalFailure, &Error),
+) -> Result<()> {
+    if Instant::now() >= deadline {
+        let error = Error::Permission;
+        observe(HistoricalApprovalFailure::Deadline, &error);
+        return Err(error);
+    }
+    let result = foreground_check();
+    if let Err(error) = &result {
+        observe(HistoricalApprovalFailure::Foreground, error);
+    }
+    result
+}
+
 pub(crate) struct HistoricalApproval {
     terminal: Terminal,
     foreground_file: File,
@@ -17,10 +37,14 @@ impl HistoricalApproval {
     }
 
     pub(crate) fn check(&self) -> Result<()> {
-        if Instant::now() >= self.deadline {
-            return Err(Error::Permission);
-        }
-        foreground(&self.foreground_file)
+        check_historical_approval(self.deadline, || foreground(&self.foreground_file), |_, _| {})
+    }
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    pub(crate) fn check_observed(
+        &self,
+        observe: impl FnOnce(HistoricalApprovalFailure, &Error),
+    ) -> Result<()> {
+        check_historical_approval(self.deadline, || foreground(&self.foreground_file), observe)
     }
     #[cfg(test)]
     pub(crate) fn denied_for_test(expired: bool) -> Self {
@@ -1125,5 +1149,46 @@ impl Terminal {
                 .ok_or(Error::Permission)?,
             wall_until,
         })
+    }
+}
+
+#[cfg(test)]
+mod historical_check_observation_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    #[test]
+    fn expired_branch_does_not_call_foreground_and_preserves_permission() {
+        let foreground_calls = Cell::new(0);
+        let observed = Cell::new(None);
+        let result = check_historical_approval(Instant::now(), || {
+            foreground_calls.set(foreground_calls.get() + 1); Ok(())
+        }, |branch, error| {
+            assert!(matches!(error, Error::Permission)); observed.set(Some(branch));
+        });
+        assert!(matches!(result, Err(Error::Permission)));
+        assert_eq!(foreground_calls.get(), 0);
+        assert_eq!(observed.get(), Some(HistoricalApprovalFailure::Deadline));
+    }
+    #[test]
+    fn foreground_error_is_not_reclassified_and_payload_is_moved_unchanged() {
+        let payload = String::from("synthetic private error is never serialized");
+        let pointer = payload.as_ptr();
+        let observed = RefCell::new(Vec::new());
+        let result = check_historical_approval(Instant::now() + Duration::from_secs(120), || {
+            Err(Error::Receipt(payload))
+        }, |branch, error| {
+            assert!(matches!(error, Error::Receipt(text) if text.as_ptr() == pointer));
+            observed.borrow_mut().push(branch);
+        });
+        assert!(matches!(result, Err(Error::Receipt(text)) if text.as_ptr() == pointer));
+        assert_eq!(*observed.borrow(), [HistoricalApprovalFailure::Foreground]);
+    }
+    #[test]
+    fn successful_check_calls_foreground_once_without_observation() {
+        let calls = Cell::new(0);
+        assert!(check_historical_approval(Instant::now() + Duration::from_secs(120), || {
+            calls.set(calls.get() + 1); Ok(())
+        }, |_, _| panic!("successful check must not be observed")).is_ok());
+        assert_eq!(calls.get(), 1);
     }
 }

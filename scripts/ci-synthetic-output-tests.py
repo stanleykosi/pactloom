@@ -3227,7 +3227,19 @@ class DurableDeliveryOutputTests(unittest.TestCase):
         body=re.search(r'enum DeliveryObservationSiteV2\s*\{(.*?)\n\}',source,re.S).group(1)
         actual={name.strip() for name in body.split(',') if name.strip()}
         original={'SourceOpen','SourceInspection','SourcePlan','RecipientPrepare','ExportPreview','ExportApproval','ExportCommit','ExportPostcheck','NativeCheck','SourceCheck','FixedRead'}
-        self.assertEqual(actual,original|set(sites))
+        semantic_internal={'PreparationSourceBefore','PreparationSourceAfter','PreparationApproval','HistoricalApprovalDeadline','HistoricalApprovalForeground','OriginalDisclosureSelector','MaterialRestrictionCapture','PairConfirmation'}
+        self.assertEqual(actual,original|set(sites)|semantic_internal)
+        qualification=(ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/durable_proposal_v1/delivery_admission_v2.rs').read_text()
+        for exact in (
+            'S::PreparationSourceBefore | S::PreparationSourceAfter => B::DeliverySourceCheck,',
+            'S::PreparationApproval | S::HistoricalApprovalDeadline | S::HistoricalApprovalForeground => B::DeliveryNativeCheck,',
+            'S::OriginalDisclosureSelector => B::DeliveryExportPreview,',
+            'S::MaterialRestrictionCapture | S::PairConfirmation => B::DeliveryRecipientPrepare,',
+        ):self.assertIn(exact,qualification)
+        for site in semantic_internal:
+            self.assertNotIn('Delivery'+site,output.DURABLE_DELIVERY_BOUNDARIES)
+            with self.assertRaises(ValueError):
+                output.public_durable_delivery(json.dumps(dict(self.record(),result='failed',first_failure='Delivery'+site,first_outcome='PredicateDenied')))
         for site in sites:
             boundary='Delivery'+site
             self.assertIn(boundary,output.DURABLE_DELIVERY_BOUNDARIES)

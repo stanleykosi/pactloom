@@ -865,7 +865,13 @@ class HostStartupContractTests(unittest.TestCase):
         # identity, exact-target and genuine approval checks remain in force.
         self.assertIn('&& has_manual_session_permissions(&client.permissions)',command)
         export=(host/'host/financial/durable_delivery_admission_v2/closed_review_v3/coordinated_export_v1.rs').read_text()
-        self.assertIn('self.require_manual_session()?;',export)
+        gate='host_result(DeliveryObservationSiteV2::NativeCheck, self.require_manual_session())?;'
+        entry=export.split('fn private_original_coordinated_delivery_export_v1(',1)[1]
+        entry=entry.split('let inspection =',1)[0]
+        self.assertEqual(entry.count(gate),1)
+        self.assertLess(entry.index(gate),entry.index('self.original_delivery_admission_owner_v2(root)'))
+        adapter=(host/'host/financial/durable_delivery_admission_v2.rs').read_text()
+        self.assertIn('fn host_result<T>(site: DeliveryObservationSiteV2, result: Result<T>) -> Result<T> {\n    observed_result(site, result, host_outcome)\n}',adapter)
         startup=(host/'host/durable_private_workspace_v1.rs').read_text()
         check=startup[startup.index('fn require_private_workspace_read_session_v1('):]
         self.assertIn('.contains(&wholepact_service::security::Permission::Read)',check)
@@ -2598,7 +2604,7 @@ class PairFailureDomainTests(unittest.TestCase):
     PAIR_CLASSES=frozenset('BridgeBinding BridgeConflict BridgeMissing BridgeUncertain BridgeLimit BridgePermission BridgeRecoveryRequired BridgeCompleteOriginRecoveryUnavailable BridgeVerification BridgeSignerOriginUnavailable BridgeJournal BridgeAuthority BridgeWallet BridgeIpc FrameUnclassified FrameDeadline FrameEof FrameCredentialsMissing FrameCredentialsMismatch FrameAncillaryRejected FrameTruncated FramePeerNotLive FrameCurrentCheck FrameIo FrameLimit FrameInvalidFrame FrameInvalidBudget'.split())
     def test_pair_domains_exact_and_relay_remains_io_only(self):
         self.assertEqual(len(self.PAIR_STAGES),20);self.assertEqual(len(self.PAIR_CLASSES),27)
-        self.assertEqual({s for s in O.C.HOST_FAILURE_STAGES if s.startswith('Pair')},self.PAIR_STAGES)
+        self.assertEqual({s for s in O.C.HOST_FAILURE_STAGES if s.startswith('Pair')},self.PAIR_STAGES|{'PairConfirmation'})
         self.assertEqual({c for c in O.C.HOST_FAILURE_CLASSES if c.startswith(('Bridge','Frame'))},self.PAIR_CLASSES)
         for stage in self.PAIR_STAGES:
             for cls in self.PAIR_CLASSES:
@@ -2645,3 +2651,68 @@ class PairFailureDomainTests(unittest.TestCase):
         rows=self.host_rows();rows[-1]['facts']=self.failure(stage='PairFinalCurrent',**{'class':'BridgePermission'})
         with self.assertRaises(F.S.C.Rejected) as error:native.close_after_normal_proof(rows,None,F.C.SEMANTIC_PROFILE)
         self.assertEqual(error.exception.code,'observer_failure');c.terminal_click.assert_not_called();native.next_snapshot.assert_not_called()
+
+
+class PreparationFailureDomainTests(unittest.TestCase):
+    """Closed preparation evidence cannot become success or authorize an input."""
+    setUp=HostExitDiagnosticTests.setUp
+    tearDown=HostExitDiagnosticTests.tearDown
+    record=HostExitDiagnosticTests.record
+    records=HostExitDiagnosticTests.records
+    write=HostExitDiagnosticTests.write
+    failure=HostExitDiagnosticTests.failure
+    host_file=HostExitDiagnosticTests.host_file
+    host_rows=HostExitDiagnosticTests.host_rows
+    STAGES=frozenset('DeliverySourceOpen DeliverySourceInspection DeliverySourcePlan DeliveryRecipientPrepare DeliveryExportPreview DeliveryNativeCheck DeliverySourceCheck DeliverySourceScopePredicate DeliveryProofRolePredicate DeliveryMaterialActionPredicate DeliveryMaterialScopePredicate PreparationSourceBefore PreparationApproval PreparationSourceAfter HistoricalApprovalDeadline HistoricalApprovalForeground OriginalDisclosureSelector MaterialRestrictionCapture PairConfirmation'.split())
+    CLASSES=frozenset('EngineDisclosureUnknown EngineDisclosureDenied EngineRecoveryRequired EngineIdempotencyConflict EngineRevisionConflict EngineDurableProposalConflict EngineDurableConstructionUnavailable EngineDurableProfileUnavailable EngineResourceExhausted EngineUnclassified PredicateDenied'.split())
+    def test_exact_preparation_domains_and_unchanged_closed_shape(self):
+        self.assertEqual(len(self.STAGES),19);self.assertEqual(len(self.CLASSES),11)
+        expected={s for s in O.C.HOST_FAILURE_STAGES if s.startswith(('Delivery','Preparation','HistoricalApproval')) or s in ('OriginalDisclosureSelector','MaterialRestrictionCapture','PairConfirmation')}
+        self.assertEqual(expected,self.STAGES)
+        self.assertEqual({c for c in O.C.HOST_FAILURE_CLASSES if c.startswith('Engine') or c=='PredicateDenied'},self.CLASSES)
+        for stage in self.STAGES:
+            for cls in self.CLASSES:
+                facts=self.failure(stage=stage,**{'class':cls});O.C.validate_host_failure_facts(facts)
+                self.assertEqual(set(facts),{'version','stage','class','relay'})
+                with self.assertRaises(O.C.Rejected):O.C.validate_host_relay_facts(dict(stage='Signer1Receive',**{'class':cls}))
+        for key,value in [('stage','PreparationPrivateText'),('class','EngineRawError'),('version',True),('version',2),('detail','private')]:
+            facts=self.failure(stage='PreparationApproval',**{'class':'EngineDisclosureDenied'});facts[key]=value
+            with self.assertRaises(O.C.Rejected):O.C.validate_host_failure_facts(facts)
+    def test_preparation_observation_blocks_snapshot_and_preserves_cached_projection(self):
+        from unittest import mock
+        facts=self.failure(stage='HistoricalApprovalDeadline',**{'class':'Permission'})
+        self.write(self.records());self.o.next_snapshot(self.o.deadline_ns)
+        rows=self.host_rows();rows[-1]['facts']=facts;self.host_file(rows)
+        now=time.monotonic_ns();bound=now+1000
+        with mock.patch.object(O.time,'monotonic_ns',side_effect=[now,now,now,bound,bound]):
+            with self.assertRaises(O.C.Rejected) as error:self.o.next_snapshot(bound)
+        self.assertEqual(error.exception.code,'observer_failure')
+        value=self.o.failure_diagnostics()['host_exit'];O.C.validate_host_exit_diagnostic(value)
+        self.assertEqual(value['foreground'],dict(availability='Observed',stage='HistoricalApprovalDeadline',relay=None,**{'class':'Permission'}))
+        facts['class']='private';value['foreground']['class']='private'
+        self.assertEqual(self.o.failure_diagnostics()['host_exit']['foreground']['class'],'Permission')
+    def test_preparation_record_still_one_slot_and_wrong_profile_rejected(self):
+        rows=self.host_rows();rows[-1]['facts']=self.failure(stage='DeliveryExportPreview',**{'class':'EngineDisclosureDenied'})
+        rows.append(self.record('HostFailureBoundary',self.failure(stage='PairConfirmation',**{'class':'Permission'}),3,role='Host'))
+        with self.assertRaises(O.C.Rejected) as error:O.C.validate_host_exit_cardinality(rows)
+        self.assertEqual(error.exception.code,'replay')
+        with self.assertRaises(O.C.Rejected):O.C.validate_record(rows[-1],O.C.EXTERNAL_PROFILE)
+    def test_each_new_preparation_stage_blocks_success_and_native_close(self):
+        import io,contextlib
+        from unittest import mock
+        S=F.load('ci-financial-supervisor')
+        for stage in self.STAGES:
+            value=O.C.unavailable_host_exit_diagnostic()
+            value['foreground']=dict(availability='Observed',stage=stage,relay=None,**{'class':'EngineUnclassified'})
+            runtime=S.RuntimeRecords('external',O.C.SEMANTIC_PROFILE);out=io.StringIO()
+            with contextlib.redirect_stdout(out):runtime(b'CI_FINANCIAL_HOST_EXIT_DIAGNOSTIC '+json.dumps(value).encode())
+            self.assertEqual(out.getvalue(),'')
+            candidate=dict(schema=1,profile=O.C.SEMANTIC_PROFILE,native_oracle_verified=True,fixture_cleaned=True,display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)
+            with self.assertRaises(S.Failure):runtime(b'CI_FINANCIAL_CANDIDATE '+json.dumps(candidate).encode())
+            with contextlib.redirect_stdout(out):runtime(b'CI_FINANCIAL_RESULT '+json.dumps(S.P.failure('observer_failure',O.C.SEMANTIC_PROFILE)).encode())
+            self.assertIn(stage,out.getvalue());self.assertEqual(runtime.finish(1)['code'],'observer_failure')
+            c=mock.Mock();fixture=mock.Mock(deadline_ns=time.monotonic_ns()+F.C.ORIGINAL_NS)
+            native=F.S.NativeScenario(c,fixture,mock.Mock(),expected_profile=F.C.SEMANTIC_PROFILE,host_view=mock.Mock())
+            rows=self.host_rows();rows[-1]['facts']=self.failure(stage=stage,**{'class':'EngineUnclassified'})
+            with self.assertRaises(F.S.C.Rejected) as error:native.close_after_normal_proof(rows,None,F.C.SEMANTIC_PROFILE)
+            self.assertEqual(error.exception.code,'observer_failure');c.terminal_click.assert_not_called();native.next_snapshot.assert_not_called()

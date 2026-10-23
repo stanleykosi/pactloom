@@ -14,7 +14,10 @@ class IntegrationTests(unittest.TestCase):
   self.assertEqual((HERE/'producer_artifacts.py').read_bytes(),(ROOT/'scripts/ci-financial-artifacts.py').read_bytes())
   for path,pin in L.CLEANUP_PINS.items():
    data=(HERE/path).read_bytes();self.assertEqual(hashlib.sha256(data).hexdigest(),pin)
-   self.assertEqual(data,b'financial-semantic\n' if path.endswith('/qualification-gate-mode') else (ROOT/pathlib.Path(path).relative_to('cleanup_snapshot')).read_bytes())
+   if path=='cleanup_snapshot/scripts/ci-financial-contract.py':
+    # Dormant P35 cleanup bytes stay pinned; fresh P40 uses its reviewed current contract.
+    self.assertEqual(hashlib.sha256((ROOT/'scripts/ci-financial-contract.py').read_bytes()).hexdigest(),'501993b6ee0bed7db09aa6d3722381e58e051c39cc6cae020bf5f42d47cadfa8')
+   else:self.assertEqual(data,b'financial-semantic\n' if path.endswith('/qualification-gate-mode') else (ROOT/pathlib.Path(path).relative_to('cleanup_snapshot')).read_bytes())
  def test_cleanup_dependency_closure_imports_without_execution(self):
   s=TRUSTED.module('cleanup_closure_probe',L.HERE/'cleanup_snapshot/scripts/ci-financial-supervisor.py')
   self.assertEqual(s.A.MANIFEST_VERSION,2);self.assertEqual(s.A.recipe(L.V.QUALIFICATION_PROFILE),L.V.A.recipe(L.V.QUALIFICATION_PROFILE))
@@ -24,7 +27,18 @@ class IntegrationTests(unittest.TestCase):
   self.assertIn('clean=S.cleanup(token,tag)',text);self.assertIn('clean=trusted_cleanup(trusted)',text)
   self.assertNotIn('S.build_inputs(',text);self.assertNotIn("'cargo'",text)
  def test_exact_private_workflow_wiring(self):
-  self.assertEqual((ROOT/'scripts/qualification-gate-mode').read_bytes(),b'financial-preparation-diagnostic\n')
+  self.assertEqual((ROOT/'scripts/qualification-gate-mode').read_bytes(),b'financial-semantic\n')
+  w=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
+  fresh=w.split('      - name: Fresh isolated two-signer financial UI',1)[1].split('      - name:',1)[0]
+  self.assertIn("steps.mode.outputs.gate == 'financial-semantic'",fresh)
+  self.assertIn('run: bash scripts/ci-financial-linux.sh',fresh)
+  for title in ('Fetch exact independent producer P and reviewed harness H without credentials','Acquire exact producer bundle with isolated read token','Actual synthetic financial runtime using verified producer binaries (not a fresh build)','Preserved P35 preparation, owned admissions and process-death reopen diagnostic (NOT full flow)'):
+   block=w.split('      - name: '+title,1)[1].split('      - name:',1)[0]
+   condition=next(line for line in block.splitlines() if line.strip().startswith('if:'))
+   self.assertNotIn("gate == 'financial-semantic'",condition)
+  cleanup=w.split('      - name: Verify financial containers, temporary images and build cache removed',1)[1].split('      - name:',1)[0]
+  self.assertIn("always() &&",cleanup);self.assertIn("gate == 'financial-semantic'",cleanup)
+  self.assertIn('scripts/ci-financial-supervisor.py cleanup',cleanup)
 if __name__=='__main__':unittest.main()
 
 class CleanupProfileTests(unittest.TestCase):

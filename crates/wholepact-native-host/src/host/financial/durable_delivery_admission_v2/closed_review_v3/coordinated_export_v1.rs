@@ -38,20 +38,28 @@ impl Host {
         &self, root: &Path, choices: &DeliveryChoicesV2, reviewer: (&str, &str),
         open_recipient: impl FnOnce(&FixedProposalIdentityV1, &str, u64, &DurableDeliveryPlanV2, &[DurableDeliveryMaterialScopeRefV2], &wholepact_signer::authority_bridge::durable_construction_v1::DurableConstructionHistoryRequestV1) -> Result<PreparedCoordinatedDurableReviewRecipientV1>,
     ) -> Result<(VerifiedImportedCoordinatedDurableReviewSessionV1, CoordinatedOriginalDeliveryExportV1)> {
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        let _observation_scope = semantic_delivery_scope();
         if !crate::terminal::coordinated_restriction_required() { return Err(Error::Permission); }
-        self.require_manual_session()?;
+        host_result(DeliveryObservationSiteV2::NativeCheck, self.require_manual_session())?;
         let owner = host_result(DeliveryObservationSiteV2::SourceOpen, self.original_delivery_admission_owner_v2(root))?;
-        let inspection = engine_result(DeliveryObservationSiteV2::SourceInspection, owner.coordinator().inspect_original_for_admission_v2(self.access()?, &owner))?;
-        let plan = source_plan(&owner, &inspection, choices)?;
-        plan.validate_origins().map_err(|_| Error::Invalid)?;
+        let inspection = engine_result(DeliveryObservationSiteV2::SourceInspection, owner.coordinator().inspect_original_for_admission_v2(host_result(DeliveryObservationSiteV2::NativeCheck, self.access())?, &owner))?;
+        let plan = host_result(DeliveryObservationSiteV2::SourcePlan, source_plan(&owner, &inspection, choices))?;
+        host_result(DeliveryObservationSiteV2::SourcePlan, plan.validate_origins().map_err(|_| Error::Invalid))?;
         // This read decision expires normally and is destroyed after preparation.
+        let mut preparation_source_first = true;
         let preparation = source_checked_approval_v2(
-            || current_source(self, &owner, &inspection),
-            || self.terminal.approve_historical("Approve LOCAL exact-byte preparation for closed original delivery. Read and fully verify the selected retained proof and BOTH original materials, and retain one exact encoded private payload in local memory under the ORIGINAL absolute ceilings. No recipient disclosure, transport, signing, submission or admission is authorized."),
+            || {
+                let site = if preparation_source_first { DeliveryObservationSiteV2::PreparationSourceBefore }
+                    else { DeliveryObservationSiteV2::PreparationSourceAfter };
+                preparation_source_first = false;
+                host_result(site, current_source(self, &owner, &inspection))
+            },
+            || host_result(DeliveryObservationSiteV2::PreparationApproval, self.terminal.approve_historical("Approve LOCAL exact-byte preparation for closed original delivery. Read and fully verify the selected retained proof and BOTH original materials, and retain one exact encoded private payload in local memory under the ORIGINAL absolute ceilings. No recipient disclosure, transport, signing, submission or admission is authorized.")),
         )?;
         let read = InspectionReadV2 { host: self, owner: &owner, inspection: &inspection, approval: &preparation, export_preview: true };
-        let prepared = engine_result(DeliveryObservationSiteV2::ExportPreview, owner.coordinator().prepare_original_delivery_v3(self.access()?, &read, &read, &read))?;
-        let original_disclosure = engine_result(DeliveryObservationSiteV2::ExportPreview,
+        let prepared = engine_result(DeliveryObservationSiteV2::ExportPreview, owner.coordinator().prepare_original_delivery_v3(host_result(DeliveryObservationSiteV2::NativeCheck, self.access())?, &read, &read, &read))?;
+        let original_disclosure = engine_result(DeliveryObservationSiteV2::OriginalDisclosureSelector,
             prepared.original_disclosure_selector_coordinated_v1(reviewer.0, reviewer.1))?;
         drop(read);
         drop(preparation);
@@ -59,6 +67,10 @@ impl Host {
         // happens in this continuation, before Host's final ExportExact response.
         let recipient = host_result(DeliveryObservationSiteV2::RecipientPrepare,
             open_recipient(prepared.fixed_identity(), prepared.payload_digest(), prepared.payload_length(), &plan, prepared.material_scopes(), &original_disclosure))?;
+        // Restore before final inspection, binding, export or commit. The
+        // recipient callback above includes the actual capture and Pair prompt.
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        drop(_observation_scope);
         if recipient.intent().delivery != plan || recipient.intent().fixed != *inspection.fixed_identity() { return Err(Error::Authentication); }
         let request = recipient.intent().request.clone();
         // A distinct current metadata-read decision, not renewal of preparation.
@@ -151,13 +163,13 @@ pub(in crate::host::financial) fn begin_original_coordinated_export_v1<'host>(
             if selection.import_operation_id == original_disclosure.operation_id
                 || selection.redisclosure_operation_id == original_disclosure.operation_id
             { return Err(Error::Authentication); }
-            material_delivery_restriction = Some(retained_result_v1::HostMaterialDeliveryRestrictionV1::capture(delivery, materials)?);
+            material_delivery_restriction = Some(host_result(DeliveryObservationSiteV2::MaterialRestrictionCapture, retained_result_v1::HostMaterialDeliveryRestrictionV1::capture(delivery, materials))?);
             let scope = PairScope {
                 account_id: selection.account_id.clone(), participant_id: selection.participant_id.clone(),
                 agreement_id: fixed.agreement_id.clone(), manifest_digest: fixed.manifest_digest.clone(),
                 history_read: true, authorization_export: false, preconstruction_export: true,
             };
-            host.terminal.confirm("Pair this exact original coordinated reviewer for independently approved receive/view. No native provider fallback or financial execution is authorized.")?;
+            host_result(DeliveryObservationSiteV2::PairConfirmation, host.terminal.confirm("Pair this exact original coordinated reviewer for independently approved receive/view. No native provider fallback or financial execution is authorized."))?;
             #[cfg(wholepact_financial_rendered_host_semantic_ci)]
             let mut client = CoordinatedOriginalClientV1::pair_observed(verifier, endpoint, scope)
                 .map_err(|failure| {

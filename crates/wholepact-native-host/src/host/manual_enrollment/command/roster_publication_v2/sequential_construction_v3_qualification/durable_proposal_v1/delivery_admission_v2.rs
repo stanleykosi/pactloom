@@ -995,6 +995,10 @@ fn delivery_observation_pair(
         DeliveryObservationOutcomeV2 as O, DeliveryObservationSiteV2 as S,
     };
     let boundary = match site {
+        S::PreparationSourceBefore | S::PreparationSourceAfter => B::DeliverySourceCheck,
+        S::PreparationApproval | S::HistoricalApprovalDeadline | S::HistoricalApprovalForeground => B::DeliveryNativeCheck,
+        S::OriginalDisclosureSelector => B::DeliveryExportPreview,
+        S::MaterialRestrictionCapture | S::PairConfirmation => B::DeliveryRecipientPrepare,
         S::ExportProofCurrent => B::DeliveryExportProofCurrent,
         S::ExportProofOrigin => B::DeliveryExportProofOrigin,
         S::ExportSourceBefore => B::DeliveryExportSourceBefore,
