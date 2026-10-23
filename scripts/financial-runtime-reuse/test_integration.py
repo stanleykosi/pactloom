@@ -5,8 +5,8 @@ HERE=pathlib.Path(__file__).resolve().parent
 ROOT=HERE.parents[1]
 class IntegrationTests(unittest.TestCase):
  def test_concrete_bound_v2_plan(self):
-  p=json.loads((HERE/'plan.json').read_text());self.assertEqual(p['harness']['source'],'8f066e01962016220e45febd9b0f17cc81587fd1')
-  self.assertEqual(p['harness']['source_tree'],'a2ddbd080af8fd550250c98408824a66a006b2a5')
+  p=json.loads((HERE/'plan.json').read_text());self.assertEqual(p['harness']['source'],'1059e0a8d39c4a04ba8f038fde886d45691e367e')
+  self.assertEqual(p['harness']['source_tree'],'54ad57378b85c74f9c8590a680d566b17023de26')
   self.assertEqual(L.validate_plan(p),p)
   self.assertEqual(p['producer'],L.V.PRODUCER);self.assertEqual(p['artifact_pins'],L.V.ARTIFACT_PINS);self.assertEqual(p['api_pins'],L.V.API_PINS)
   self.assertEqual(p['manifest_version'],2);self.assertEqual(p['build_recipe_version'],2);self.assertEqual(p['version'],6)
@@ -32,7 +32,7 @@ class WorkflowCustodyTests(unittest.TestCase):
  def test_exact_p_h_and_credential_cleanup_boundaries(self):
   w=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
   self.assertEqual(w.count('fetch_exact P 53a05883325fad2ee66886adea5cf67d34b7600b'),1)
-  self.assertEqual(w.count('fetch_exact H 8f066e01962016220e45febd9b0f17cc81587fd1'),1)
+  self.assertEqual(w.count('fetch_exact H 1059e0a8d39c4a04ba8f038fde886d45691e367e'),1)
   self.assertEqual(w.count('FINANCIAL_ARTIFACT_READ_TOKEN:'),1)
   runtime=w.split('      - name: Actual synthetic financial runtime',1)[1]
   self.assertNotIn('github.token',runtime);self.assertIn('env -i PATH=',runtime)

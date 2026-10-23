@@ -13,8 +13,8 @@
   },
   "harness": {
     "repository": "stanleykosi/pactloom",
-    "source": "8f066e01962016220e45febd9b0f17cc81587fd1",
-    "source_tree": "a2ddbd080af8fd550250c98408824a66a006b2a5"
+    "source": "1059e0a8d39c4a04ba8f038fde886d45691e367e",
+    "source_tree": "54ad57378b85c74f9c8590a680d566b17023de26"
   },
   "artifact_pins": {
     "archive_sha256": "0b158864d3fce1ced7fc2fea83f60de9acc7492a408e869cb34f369a57ce11f3",
@@ -31,9 +31,9 @@
   "reviewed_runtime_changes": {
     "scripts/ci-financial-container.py": "a8ad996195f7392bc7fe09c205d79ce3c2642b32fd25448e98ce6dbc8386aace",
     "scripts/ci-financial-fixture.py": "1a4ebac385dcaf56141af8403f23ea5ebce008cd5453894c51f6541bc77023eb",
-    "scripts/ci-financial-flow.py": "8936811a2e48530e0bc572e563b7c61a68ed4c77344923ed86b32931d16ecad4",
+    "scripts/ci-financial-flow.py": "fde19149854c5458e691ab2a1eafc4bfadf7e2b22a674134a43ca72435677443",
     "scripts/tests/test_ci_financial_fixture_diagnostics.py": "8397b3f2e3e6831263f16690ea4c84d288bbceb10bc7f9f5f79e5a6812c86151",
-    "scripts/tests/test_ci_financial_observer.py": "5adf7dd937c571029b7705a7008c73aa3aaf018540a654ecaf6bd2a8b26be412"
+    "scripts/tests/test_ci_financial_observer.py": "680e2e9fac575134bf8e79cdbfff0b4a978466fa9c9331f06f272cb6c8fb9526"
   },
   "diagnostic_compatibility": {
     "version": 1,
