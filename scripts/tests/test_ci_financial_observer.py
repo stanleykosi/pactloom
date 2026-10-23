@@ -641,7 +641,7 @@ class HostStartupContractTests(unittest.TestCase):
         return flow
     def acknowledge(self,flow):
         flow.pending_startup=flow.startup_index;flow.startup_submitted();flow.startup_waiting=False
-    def test_whole_real_prompt_sequence_has_exact_read_only_responses_and_separate_latches(self):
+    def test_whole_real_prompt_sequence_has_exact_prepare_responses_and_separate_latches(self):
         flow=self.flow();actual=[]
         for index,prompt in enumerate(self.PROMPTS):
             text='\n'.join(self.PROMPTS[:index+1]);line=flow.expected_host_line(text)
@@ -652,7 +652,7 @@ class HostStartupContractTests(unittest.TestCase):
             self.acknowledge(flow)
         self.assertEqual(actual,[('public',self.fixture._data['profile']),('public',self.fixture._data['workspace']),
             ('secret',None),('secret',None),('public','APPROVE 0123456789abcdef'),
-            ('public','synthetic-roster-host'),('public','OWNED'),('public',''),('public','READ'),('public',''),
+            ('public','synthetic-roster-host'),('public','OWNED'),('public',''),('public','PREPARE'),('public',''),
             ('public',str(self.root/'coordinated-host-runtime-session.token')),
             ('public','APPROVE fedcba9876543210'),('public',self.fixture._data['session_commands_file'])])
         self.assertEqual(flow.startup_index,13)
@@ -842,6 +842,36 @@ class HostStartupContractTests(unittest.TestCase):
         precedent=source[source.index('pub(super) fn session_inputs'):source.index('fn open_inputs')]
         for value in ('"synthetic-roster-host"','"OWNED"','if read_only { "READ" }','Input::CapturedPath'):
             self.assertIn(value,precedent)
+    def test_synthetic_prepare_selection_satisfies_native_export_permission_membership(self):
+        import re
+        host=ROOT.parent/'crates/wholepact-native-host/src'
+        enrollment=(host/'host.rs').read_text()
+        branches=enrollment[enrollment.index('let permissions = match mode.as_str()'):enrollment.index('let browser_origin = self.terminal.ask')]
+        grants={mode:set(re.findall(r'Permission::(\w+)',body)) for mode,body in
+                re.findall(r'"(READ|PREPARE)" => BTreeSet::from\(\[(.*?)\]\)',branches,re.S)}
+        command=(host/'host/manual_enrollment/command.rs').read_text()
+        membership=command[command.index('fn has_manual_session_permissions('):]
+        membership=membership[:membership.index('#[cfg(test)]')]
+        self.assertIn('.all(|permission| permissions.contains(permission))',membership)
+        required=set(re.findall(r'Permission::(\w+)',membership))
+        self.assertEqual(required,{'Read','Coordinate','Disclose'})
+        self.assertEqual(grants['READ'],{'Read'})
+        self.assertFalse(required<=grants['READ'],'READ-only fixture setup is not full-export permission')
+        mode=self.fixture.host_startup_value('mode')
+        self.assertEqual(mode,'PREPARE');self.assertTrue(required<=grants[mode])
+        self.assertEqual(grants[mode]-required,{'Propose','Intent'})
+        self.assertTrue(grants[mode].isdisjoint({'AuthorizeRequest','Submit','Administer'}))
+        # Membership is necessary, not sufficient authority. Native session,
+        # identity, exact-target and genuine approval checks remain in force.
+        self.assertIn('&& has_manual_session_permissions(&client.permissions)',command)
+        export=(host/'host/financial/durable_delivery_admission_v2/closed_review_v3/coordinated_export_v1.rs').read_text()
+        self.assertIn('self.require_manual_session()?;',export)
+        startup=(host/'host/durable_private_workspace_v1.rs').read_text()
+        check=startup[startup.index('fn require_private_workspace_read_session_v1('):]
+        self.assertIn('.contains(&wholepact_service::security::Permission::Read)',check)
+        self.assertEqual([self.fixture.host_startup_value(k) for k in ('principal','scope','shared','origin')],
+                         ['synthetic-roster-host','OWNED','',''])
+
     def test_credential_wrong_owner_and_symlink_profile_rejected(self):
         from unittest import mock
         with mock.patch.object(F.S.F.os,'getuid',return_value=os.getuid()+1):
