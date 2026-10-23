@@ -10,7 +10,8 @@ import unittest
 spec = importlib.util.spec_from_file_location('financial_artifacts', pathlib.Path(__file__).parents[1] / 'ci-financial-artifacts.py')
 A = importlib.util.module_from_spec(spec); spec.loader.exec_module(A)
 IDENTITY = dict(repository='stanleykosi/pactloom', source='a'*40, source_tree='b'*40, run_id=123, attempt=1)
-CLOSURE = {'Cargo.lock': 'a'*64, 'crates/example/src/lib.rs': 'b'*64}
+CLOSURE = {'Cargo.lock': 'a'*64, 'crates/example/src/lib.rs': 'b'*64,
+           **{path:'c'*64 for path in A.BUILD_SCRIPTS}}
 
 class BundleTests(unittest.TestCase):
     def setUp(self):
@@ -68,7 +69,7 @@ class BundleTests(unittest.TestCase):
 
     def test_recipe_not_merely_asserted(self):
         value = self.export(); value = copy.deepcopy(value)
-        value['recipe']['observed_rustflags'] = ''
+        value['recipe']['observed_rustflags'] = '--cfg wholepact_financial_ci'
         with self.assertRaises(A.Rejected): A.validate_manifest(value, IDENTITY, CLOSURE)
 
     def test_recipe_booleans_are_not_numbers(self):

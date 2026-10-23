@@ -52,16 +52,19 @@ class LaunchTests(unittest.TestCase):
                  patch.object(S,'export_compiled_artifacts'), \
                  patch.object(S,'encrypted_build_environment',side_effect=lambda root,env:env), \
                  patch.object(S,'build_command',side_effect=command),patch.object(S,'select_artifact',side_effect=artifact), \
+                 patch.object(S,'validate_compiler_cfg') as cfg_check, \
                  contextlib.redirect_stdout(io.StringIO()):
                 S.build_inputs(root,'a'*40)
             builds=[c for c in calls if '--message-format=json' in c[1]]
             self.assertEqual({n for n,_,_ in builds},set(S.FEATURES))
             for name,args,env in builds:
-                self.assertEqual(env.get('RUSTFLAGS'),
-                    S.A.recipe(S.I.profile())['observed_rustflags']
-                    if name=='coordinator-observed' else None)
+                self.assertNotIn('RUSTFLAGS',env)
+                self.assertNotIn('CARGO_ENCODED_RUSTFLAGS',env)
+                self.assertEqual(env[S.A.MODE_ENV],
+                    S.A.recipe(S.I.profile())['cfg_delivery']['artifact_modes'][name])
                 self.assertTrue(set(env)<=S.BUILD_ENV_KEYS)
             self.assertEqual(len([c for c in calls if '--list' in c[1]]),1)
+            self.assertEqual([call.args[1] for call in cfg_check.call_args_list],list(S.I.ARTIFACT_FILES))
 
     def test_old_pixel_only_build_does_not_enable_semantic_cfg(self):
         with patch.object(S.I,'profile',return_value=S.P.C.EXTERNAL_PROFILE):
@@ -112,8 +115,10 @@ class LaunchTests(unittest.TestCase):
     def test_financial_bundle_recipe_matches_actual_build(self):
         self.assertEqual(S.A.RECIPE['coordinator_features'],S.FEATURE)
         self.assertEqual(S.A.RECIPE['rustc'],S.B.RUSTC)
-        self.assertEqual(S.A.RECIPE['observed_rustflags'],
-                         '--cfg wholepact_financial_ci --cfg wholepact_financial_external_ci')
+        self.assertEqual(S.A.RECIPE['observed_rustflags'],'')
+        self.assertEqual(S.A.RECIPE['cfg_delivery']['effective_cfgs']['coordinator-observed'],
+                         ['wholepact_financial_ci','wholepact_financial_external_ci'])
+        self.assertEqual(S.A.RECIPE['build_recipe_version'],2)
         for name in S.A.NAMES:
             args=S.build_recipe(name)
             self.assertEqual(args[args.index('--features')+1],S.A.RECIPE[
@@ -123,13 +128,15 @@ class LaunchTests(unittest.TestCase):
     def test_bundle_preserved_outside_cleaned_build_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             base=pathlib.Path(tmp);repo=base/'source';repo.mkdir()
-            (repo/'Cargo.lock').write_bytes(b'fabricated lock')
+            source_files={'Cargo.lock':b'fabricated lock',**{name:b'fabricated build script' for name in S.A.BUILD_SCRIPTS}}
+            for name,raw in source_files.items():
+                path=repo/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(raw)
             build=base/'ephemeral-build';build.mkdir();inputs=build/'artifacts';inputs.mkdir()
             for name in S.A.NAMES:(inputs/name).write_bytes(b'\x7fELFfabricated '+name.encode())
             output=base/'github-output';output.touch()
             env=dict(RUNNER_TEMP=str(base),GITHUB_REPOSITORY='stanleykosi/pactloom',
                      GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1',GITHUB_OUTPUT=str(output))
-            rows=b'100644 blob '+b'c'*40+b'\tCargo.lock\0'
+            rows=b''.join(b'100644 blob '+b'c'*40+b'\t'+name.encode()+b'\0' for name in source_files)
             with patch.dict(S.os.environ,env),patch.object(S,'REPO',repo), \
                  patch.object(S,'exact_source') as guard, \
                  patch.object(S,'checked',side_effect=[b'b'*40+b'\n',rows]), \
@@ -140,7 +147,7 @@ class LaunchTests(unittest.TestCase):
             bundle=base/'wholepact-financial-build-123-1'/'build.tar'
             self.assertTrue(bundle.is_file())
             self.assertEqual(output.read_text(),'artifact_bundle_ready=true\n')
-            expected={'Cargo.lock':S.hashlib.sha256(b'100644\0fabricated lock').hexdigest()}
+            expected={name:S.hashlib.sha256(b'100644\0'+raw).hexdigest() for name,raw in source_files.items()}
             value=S.A.verify_bundle(bundle,dict(repository='stanleykosi/pactloom',source='a'*40,
                     source_tree='b'*40,run_id=123,attempt=1),expected,S.I.profile())
             self.assertEqual(set(value['files']),set(S.A.NAMES))

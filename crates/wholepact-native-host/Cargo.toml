@@ -1,5 +1,6 @@
 [package]
 name = "wholepact-native-host"
+build = "build.rs"
 default-run = "wholepact-native-host"
 version.workspace = true
 edition.workspace = true

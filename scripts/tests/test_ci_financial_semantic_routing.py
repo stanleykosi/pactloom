@@ -44,11 +44,13 @@ class SemanticRoutingTests(unittest.TestCase):
  def test_semantic_recipe_does_not_change_production_or_old_recipe(self):
   old=A.recipe(C.EXTERNAL_PROFILE);new=A.recipe(C.SEMANTIC_PROFILE)
   self.assertEqual(old,A.RECIPE)
-  self.assertEqual(new['observed_rustflags'],old['observed_rustflags']+' '+A.SEMANTIC_CFG)
+  self.assertEqual(new['observed_rustflags'],'');self.assertEqual(old['observed_rustflags'],'')
+  self.assertEqual(new['cfg_delivery']['effective_cfgs']['coordinator-observed'],
+                   old['cfg_delivery']['effective_cfgs']['coordinator-observed']+['wholepact_financial_rendered_host_semantic_ci'])
   self.assertEqual(new['qualification_profile'],C.SEMANTIC_PROFILE)
   self.assertEqual(new['production_rustflags'],'');self.assertEqual(new['setup_rustflags'],'')
-  self.assertEqual({k:v for k,v in new.items() if k not in ('observed_rustflags','qualification_profile')},
-                   {k:v for k,v in old.items() if k!='observed_rustflags'})
+  self.assertEqual({k:v for k,v in new.items() if k not in ('cfg_delivery','qualification_profile')},
+                   {k:v for k,v in old.items() if k not in ('cfg_delivery','qualification_profile')})
   with self.assertRaises(Exception):A.recipe('unreviewed')
  def test_artifact_manifest_cannot_cross_profile(self):
   from test_ci_financial_artifacts import IDENTITY,CLOSURE

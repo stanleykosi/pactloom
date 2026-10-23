@@ -103,6 +103,27 @@ pub(crate) struct PresentedCoordinatedV3SourceEntryV1 {
     presentation: SignerV3SourceEntryPresentationV1,
 }
 
+// Observe only selected public metadata. The proposed display is an exact
+// selection-bound field; it is NOT a place for a generated summary. The native
+// review renders the complete authenticated presentation and its fixed notice.
+// Only prepare calls this in production, after original peer/root/clock checks.
+fn observe_selected_public_facts(
+    root: &Path,
+    facts: &mut SignerV3SourceEntryFactsV1,
+    host_instance: &str,
+    wall: u64,
+    remaining: u64,
+) -> Result<()> {
+    facts.canonical_root = root.to_str().ok_or(Error::InvalidData)?.to_owned();
+    facts.public_source_files_json = public_files(root)?;
+    facts.original_host_process_instance = host_instance.to_owned();
+    facts.reviewed_at_ms = wall;
+    facts.expires_at_ms = wall.checked_add(remaining).ok_or(Error::Locked)?;
+    facts.source_selection_digest = facts.calculate_source_selection_digest()?;
+    facts.validate()?;
+    Ok(())
+}
+
 impl PreparedCoordinatedV3SourceEntryV1 {
     /// Inputs are ordinary proposed selections. The original issuer supplies
     /// actor/channel provenance; this preparation cannot open any private data.
@@ -137,21 +158,7 @@ impl PreparedCoordinatedV3SourceEntryV1 {
         if remaining == 0 {
             return Err(Error::Locked);
         }
-        facts.canonical_root = root.to_str().ok_or(Error::InvalidData)?.to_owned();
-        facts.public_source_files_json = public_files(root)?;
-        facts.original_host_process_instance = host.instance().to_owned();
-        facts.reviewed_at_ms = wall;
-        facts.expires_at_ms = wall.checked_add(remaining).ok_or(Error::Locked)?;
-        facts.source_selection_digest = facts.calculate_source_selection_digest()?;
-        facts.display = serde_json::to_string_pretty(&serde_json::json!({
-            "purpose":"initial-original-v3-source-entry-only",
-            "root":facts.canonical_root,"account_id":facts.account_id,
-            "original_enrollment":facts.original_enrollment_ref,"original_manifest":facts.original_manifest_ref,
-            "owner_certificate":facts.owner_certificate_digest,"witness_disclosure":facts.witness_disclosure_json,
-            "source_selection":facts.source_selection_digest,"original_host":facts.original_host_process_instance,
-            "notice":"Unlock and audit only these originals. No TLS credential, preparation Read, receive, admission, wallet or signing is approved."
-        })).map_err(|_| Error::InvalidData)?;
-        facts.validate()?;
+        observe_selected_public_facts(root, &mut facts, host.instance(), wall, remaining)?;
         host.check_alive()?;
         Ok(Self {
             facts,
@@ -398,3 +405,43 @@ pub(crate) use coordinated_redisclosure_v1::{CoordinatedRedisclosureReadV1,Coord
 #[path = "coordinated_source_entry_v1/coordinated_delivery_source_v1.rs"]
 mod coordinated_delivery_source_v1;
 pub(crate) use coordinated_delivery_source_v1::{CoordinatedPreparingDeliverySourceV1,CoordinatedPreparedDeliverySourceV1};
+
+#[cfg(test)]
+mod initial_entry_display_regression {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use wholepact_financial_coordinator_origin::{SignerContinueRoleV1,SignerV3SourceEntrySelectionV1};
+
+    #[test]
+    fn observed_public_facts_preserve_both_owner_proposals_and_bind_metadata() {
+        for role in [SignerContinueRoleV1::Signer1,SignerContinueRoleV1::Signer2] {
+            let directory=tempfile::tempdir().unwrap();
+            std::fs::set_permissions(directory.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
+            let path=directory.path().join("public-synthetic-metadata");
+            std::fs::write(&path,b"public synthetic metadata only").unwrap();
+            std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o600)).unwrap();
+            let hash=match role {SignerContinueRoleV1::Signer1=>"ab",SignerContinueRoleV1::Signer2=>"ef"}.repeat(32);
+            let selection=SignerV3SourceEntrySelectionV1 {
+                canonical_root:directory.path().to_str().unwrap().into(),account_id:hash.clone(),
+                original_enrollment_ref:hash.clone(),original_manifest_ref:hash.clone(),owner_certificate_digest:hash.clone(),
+                witness_disclosure_json:"{}".into(),witness_disclosure_digest:hash.clone(),session_digest:hash,
+                display:"Exact selected public proposal; no source unlock approved.".into(),source_expires_at_ms:300_000,
+            };
+            selection.validate().unwrap();
+            let mut facts=selection.proposed_facts(&"cd".repeat(32)).unwrap();
+            observe_selected_public_facts(directory.path(),&mut facts,&"cd".repeat(32),1_000,120_000).unwrap();
+            facts.validate().unwrap();
+            let selected=serde_json::to_value(&selection).unwrap();let observed=serde_json::to_value(&facts).unwrap();
+            for field in ["canonical_root","account_id","original_enrollment_ref","original_manifest_ref","owner_certificate_digest","witness_disclosure_json","witness_disclosure_digest","session_digest","display","source_expires_at_ms"] {
+                assert_eq!(selected[field],observed[field],"{field}");
+            }
+            assert!(facts.public_source_files_json.contains("public-synthetic-metadata"));
+            assert_eq!(facts.original_host_process_instance,"cd".repeat(32));
+            assert_eq!(facts.reviewed_at_ms,1_000);assert_eq!(facts.expires_at_ms,121_000);
+            assert_eq!(facts.source_selection_digest,facts.calculate_source_selection_digest().unwrap());
+            let mut changed=facts.clone();changed.public_source_files_json="{}".into();
+            assert_ne!(changed.calculate_source_selection_digest().unwrap(),facts.source_selection_digest);
+            assert!(changed.validate().is_err());
+        }
+    }
+}

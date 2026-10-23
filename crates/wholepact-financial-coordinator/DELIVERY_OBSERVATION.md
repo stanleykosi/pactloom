@@ -96,6 +96,67 @@ consent. Raw records and pixels are never published; only strict finite projecte
 results leave the disposable gate. All native/runtime qualification remains
 isolated approved CI only; local source work executes none of it.
 
+## Financial build selection: v2 compatibility change
+
+The financial profiles now use `WHOLEPACT_FINANCIAL_BUILD_MODE`, not global
+financial `RUSTFLAGS`. This change is intentional: the identical reviewed
+`build.rs` files in Coordinator, Coordinator-origin and Native Host emit the
+same financial cfgs locally, so unrelated dependencies do not inherit them.
+It does not change the separate `wholepact_delivery_ci` profile described above.
+
+| Build | Explicit mode | Effective financial cfgs |
+|---|---|---|
+| Production Coordinator / pristine setup | `production` | None |
+| Pixel-observed Coordinator | `observed-pixel` | `wholepact_financial_ci`, `wholepact_financial_external_ci` |
+| Semantic-observed Coordinator | `observed-semantic` | Both preceding cfgs plus `wholepact_financial_rendered_host_semantic_ci` |
+
+Absent mode remains production for ordinary developer builds. Empty, malformed
+or unknown modes fail closed. Qualification always selects the mode explicitly,
+including resetting pristine setup to `production`. Its actual dependency graph
+contains only Native Host of the three script-owning packages; Coordinator's
+production/observed graphs contain all three.
+
+For example, after preparing the existing pinned encrypted-storage environment,
+source/type checks from the workspace root use:
+
+```sh
+env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS WHOLEPACT_FINANCIAL_BUILD_MODE=production \
+  rustup run 1.99.0 cargo check --locked --no-default-features \
+  -p wholepact-financial-coordinator --bin wholepact-financial-coordinator \
+  --features coordinated-financial-runtime
+
+env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS WHOLEPACT_FINANCIAL_BUILD_MODE=observed-pixel \
+  rustup run 1.99.0 cargo check --locked --no-default-features \
+  -p wholepact-financial-coordinator --bin wholepact-financial-coordinator \
+  --features coordinated-financial-runtime
+
+env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS WHOLEPACT_FINANCIAL_BUILD_MODE=observed-semantic \
+  rustup run 1.99.0 cargo check --locked --no-default-features \
+  -p wholepact-financial-coordinator --bin wholepact-financial-coordinator \
+  --features coordinated-financial-runtime
+```
+
+These are source checks, not native runtime qualification. The actual pristine
+setup compile still uses `cargo test --no-run --locked --release
+--no-default-features -p wholepact-native-host --lib --features
+durable-proposal,synthetic-born-joined-qualification`, with the same two global
+flag variables unset and `WHOLEPACT_FINANCIAL_BUILD_MODE=production` explicitly.
+No setup executable or native fixture is authorized to run by these instructions.
+
+**Legacy financial global-cfg commands are intentionally rejected**, including
+duplicates and `CARGO_ENCODED_RUSTFLAGS` forms, rather than silently mixing recipes.
+Remove those cfgs and use the selector above. Ordinary unrelated developer flags
+(for example `RUSTFLAGS=-Dwarnings`) remain supported by the build scripts; the
+qualified CI supervisor retains its stricter credential-free environment policy
+and permits neither global flag channel. Do not replace this with final-target-only
+`cargo rustc -- --cfg ...`: the Origin and Host dependencies also need the cfgs.
+
+New producers use manifest/recipe v2 with exact script scope, mode and effective
+cfg records bound into full source provenance. Historical v1 bundles and their
+verifiers remain unchanged and cannot be relabeled as v2. Full release/native
+proofs, production/observed separation, private-data limits and cleanup remain
+mandatory. Dependency reuse is not evidence of a measured speedup.
+
 ### Semantic qualification: native failure boundaries
 
 Only the separately compiled rendered-Host semantic CI profile may append

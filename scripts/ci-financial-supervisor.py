@@ -228,7 +228,7 @@ def exact_source(sha):
 
 BUILD_LOG_LIMIT = 64 * 1024
 BUILD_ENV_KEYS = frozenset(('PATH', 'HOME', 'CARGO_HOME', 'CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS',
-    'CARGO_INCREMENTAL', 'RUSTUP_HOME', 'RUSTFLAGS', 'WHOLEPACT_BUILD_JOBS',
+    'CARGO_INCREMENTAL', 'RUSTUP_HOME', A.MODE_ENV, 'WHOLEPACT_BUILD_JOBS',
     'WHOLEPACT_SQLCIPHER_PREFIX', 'SQLCIPHER_LIB_DIR', 'SQLCIPHER_INCLUDE_DIR',
     'SQLCIPHER_STATIC', 'PKG_CONFIG_ALL_STATIC', 'PKG_CONFIG_PATH',
     'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_TERMINAL_PROMPT'))
@@ -421,6 +421,73 @@ def build_recipe(name):
     return args
 
 
+def select_build_environment(environment, name, profile):
+    require(name in FEATURES and profile in (A.PIXEL_PROFILE,A.SEMANTIC_PROFILE), 'compile','artifact_profile')
+    require(type(environment) is dict and set(environment)<=BUILD_ENV_KEYS
+            and all(type(value) is str for value in environment.values()), 'compile','build_environment')
+    require(A.MODE_ENV not in environment or environment[A.MODE_ENV] in
+            ('production','observed-pixel','observed-semantic'), 'compile','build_environment')
+    # Always explicitly reset production/setup; never inherit an observed mode.
+    selected=dict(environment)
+    selected[A.MODE_ENV]=A.recipe(profile)['cfg_delivery']['artifact_modes'][name]
+    return selected
+
+
+def validate_compiler_cfg(raw, name, target, profile):
+    """Verify actual Cargo script output, including fresh/cached script records.
+
+    This never trusts filenames or binary inequality as proof of cfg selection.
+    Cargo's exact-source custom-build records bind package IDs to script paths.
+    """
+    require(name in FEATURES and profile in (A.PIXEL_PROFILE,A.SEMANTIC_PROFILE), 'compile','artifact_profile')
+    delivery=A.recipe(profile)['cfg_delivery']
+    expected=set(delivery['artifact_script_crates'][name])
+    manifests={str(REPO/'crates'/crate/'Cargo.toml'):crate for crate in A.CFG_CRATES}
+    packages={};outputs=[]
+    for line in raw.splitlines():
+        require(len(line)<=2*1024*1024, 'compile','record_limit')
+        try:row=json.loads(line)
+        except (ValueError,UnicodeDecodeError):continue
+        if type(row) is not dict:continue
+        manifest=row.get('manifest_path')
+        if row.get('reason')=='compiler-artifact':
+            item=row.get('target',{})
+            if type(item) is not dict or item.get('kind')!=['custom-build']:continue
+            source=item.get('src_path')
+            require(type(manifest) is str and type(source) is str, 'compile','artifact_profile')
+            local=pathlib.Path(manifest).is_relative_to(REPO) or pathlib.Path(source).is_relative_to(REPO)
+            if not local:continue
+            # No unreviewed source-local script may silently expand the scope.
+            require(manifest in manifests, 'compile','artifact_profile')
+            crate=manifests[row['manifest_path']];package=row.get('package_id')
+            require(crate in expected and type(package) is str and package and package not in packages
+                    and crate not in packages.values()
+                    and item.get('name')=='build-script-build'
+                    and item.get('src_path')==str(REPO/'crates'/crate/'build.rs'), 'compile','artifact_profile')
+            packages[package]=crate
+        elif row.get('reason')=='build-script-executed':
+            outputs.append(row)
+    require(set(packages.values())==expected, 'compile','artifact_profile')
+    seen=set()
+    for row in outputs:
+        cfgs=row.get('cfgs');package=row.get('package_id')
+        require(type(package) is str and package and type(cfgs) is list
+                and all(type(cfg) is str for cfg in cfgs), 'compile','artifact_profile')
+        if package not in packages:
+            require(not any(cfg.startswith('wholepact_financial_') for cfg in cfgs), 'compile','artifact_profile')
+            continue
+        require(package not in seen and cfgs==delivery['effective_cfgs'][name]
+                and row.get('linked_libs')==[] and row.get('linked_paths')==[] and row.get('env')==[],
+                'compile','artifact_profile')
+        out=row.get('out_dir')
+        require(type(out) is str, 'compile','artifact_path')
+        directory=pathlib.Path(out)
+        require(directory.is_absolute() and directory.is_dir() and not directory.is_symlink()
+                and directory.resolve(strict=True).is_relative_to(target.resolve(strict=True)), 'compile','artifact_path')
+        seen.add(package)
+    require(seen==set(packages), 'compile','artifact_profile')
+
+
 def export_compiled_artifacts(artifacts, sha):
     # Host-only output established before any container/fixture starts. This
     # directory is never mounted into a container. No environment dump or logs.
@@ -489,10 +556,10 @@ def build_inputs(root, sha):
             'toolchain','toolchain_version')
     exact_source(sha);env=encrypted_build_environment(root,env)
     for name in I.ARTIFACT_FILES:
-        exact_source(sha);selected=dict(env);setup=name=='pristine-setup'
-        if name=='coordinator-observed':selected['RUSTFLAGS']=A.recipe(I.profile())['observed_rustflags']
+        exact_source(sha);selected=select_build_environment(env,name,I.profile());setup=name=='pristine-setup'
         args=build_recipe(name)
         raw=build_command(name,args,'compile',selected,seconds=1800,limit=32*1024*1024)
+        validate_compiler_cfg(raw,name,root/'target',I.profile())
         artifact=select_artifact(raw,name,root/'target')
         shutil.copyfile(artifact,inputs/name);(inputs/name).chmod(0o555)
         if setup:

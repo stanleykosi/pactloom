@@ -7970,6 +7970,20 @@ mod v3_ui_tests {
         assert!(v3_text_bounded("{\n\t\"ordinary\": 1\n}"));
     }
     #[test]
+    fn v3_review_matches_all_selected_fields_including_display() {
+        for owner in [Role::Signer1,Role::Signer2] {
+            let h=match owner {Role::Signer1=>"ab",Role::Signer2=>"ef"}.repeat(32);
+            let s=SignerV3SourceEntrySelectionV1 {canonical_root:"/public/synthetic/source".into(),account_id:h.clone(),original_enrollment_ref:h.clone(),original_manifest_ref:h.clone(),owner_certificate_digest:h.clone(),witness_disclosure_json:"{}".into(),witness_disclosure_digest:h.clone(),session_digest:h,display:"Exact proposed public display".into(),source_expires_at_ms:300_000};
+            let f=s.proposed_facts(&"cd".repeat(32)).unwrap();assert!(v3_selection_matches(&s,&f));
+            for name in ["canonical_root","account_id","original_enrollment_ref","original_manifest_ref","owner_certificate_digest","witness_disclosure_json","witness_disclosure_digest","session_digest","display","source_expires_at_ms"] {
+                let mut value=serde_json::to_value(&f).unwrap();
+                if name=="source_expires_at_ms" {value[name]=serde_json::json!(f.source_expires_at_ms+1);}
+                else {value[name]=serde_json::Value::String(format!("{}x",value[name].as_str().unwrap()));}
+                let changed:wholepact_financial_coordinator_origin::SignerV3SourceEntryFactsV1=serde_json::from_value(value).unwrap();assert!(!v3_selection_matches(&s,&changed),"{name}");
+            }
+        }
+    }
+    #[test]
     fn initial_v3_password_never_is_a_writer_final_or_legacy_phase() {
         assert_ne!(Phase::V3Password, Phase::Password);
         assert_ne!(Phase::V3Opening, Phase::Opening);

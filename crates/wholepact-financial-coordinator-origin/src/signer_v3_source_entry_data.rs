@@ -313,6 +313,32 @@ pub(super) mod tests {
         }
     }
     #[test]
+    fn exact_selection_fields_and_display_remain_bound_for_both_roles() {
+        use crate::signer_continue_channel::SignerContinueRoleV1;
+        for role in [SignerContinueRoleV1::Signer1,SignerContinueRoleV1::Signer2] {
+            let s=selection();let f=facts();assert!(s.matches(&f));
+            for name in ["canonical_root","account_id","original_enrollment_ref","original_manifest_ref","owner_certificate_digest","witness_disclosure_json","witness_disclosure_digest","session_digest","display","source_expires_at_ms"] {
+                let mut value=serde_json::to_value(&f).unwrap();
+                if name=="source_expires_at_ms" {value[name]=serde_json::json!(f.source_expires_at_ms+1);}
+                else {value[name]=serde_json::Value::String(format!("{}x",value[name].as_str().unwrap()));}
+                let changed:SignerV3SourceEntryFactsV1=serde_json::from_value(value).unwrap();assert!(!s.matches(&changed),"{name}");
+            }
+            let h="ab".repeat(32);
+            let mut p=SignerV3SourceEntryPresentationV1 {
+                actor:FinancialActorContextV1 {profile:crate::financial_workflow_clock::PROFILE.into(),coordinator_process_instance:h.clone(),coordinator_focus_epoch:1,signer_role:role,signer_process_instance:h.clone(),common_image_measurement:h.clone(),session_challenge:h.clone()},
+                facts:f,notice:NOTICE.into(),sender_key_fingerprint:h.clone(),recipient_key_fingerprint:h.clone(),request_challenge:h.clone(),offer_challenge:h,
+                native_ceiling_ms:120_000,entry_ceiling_ms:120_000,source_ceiling_ms:300_000,presentation_digest:String::new(),
+            };
+            p.presentation_digest=p.calculate_presentation_digest().unwrap();p.validate().unwrap();
+            let mut changed=p.clone();changed.facts.display.push('x');
+            // Selection digest intentionally excludes display; the complete
+            // presentation digest and exact proposal comparator bind it.
+            assert_eq!(changed.facts.calculate_source_selection_digest().unwrap(),p.facts.source_selection_digest);
+            assert_ne!(changed.calculate_presentation_digest().unwrap(),p.presentation_digest);
+            assert!(!s.matches(&changed.facts));assert!(changed.validate().is_err());
+        }
+    }
+    #[test]
     fn pending_selection_cannot_substitute_offered_source() {
         let s = selection();
         let f = facts();

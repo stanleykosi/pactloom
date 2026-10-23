@@ -1,5 +1,6 @@
 [package]
 name = "wholepact-financial-coordinator-origin"
+build = "build.rs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
