@@ -24,7 +24,7 @@ class IntegrationTests(unittest.TestCase):
   self.assertIn('clean=S.cleanup(token,tag)',text);self.assertIn('clean=trusted_cleanup(trusted)',text)
   self.assertNotIn('S.build_inputs(',text);self.assertNotIn("'cargo'",text)
  def test_exact_private_workflow_wiring(self):
-  self.assertEqual((ROOT/'scripts/qualification-gate-mode').read_bytes(),b'financial-semantic-reuse\n')
+  self.assertEqual((ROOT/'scripts/qualification-gate-mode').read_bytes(),b'financial-preparation-diagnostic\n')
 if __name__=='__main__':unittest.main()
 
 class CleanupProfileTests(unittest.TestCase):
