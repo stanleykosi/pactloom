@@ -2448,3 +2448,137 @@ class InputBudgetDiagnosticTests(unittest.TestCase):
                                       widget_states=[[5]*len(F.C.INPUT_WIDGET_TAGS) for _ in range(3)]))
         F.C.validate_input_diagnostic(value)
         self.assertLess(len('CI_FINANCIAL_INPUT_DIAGNOSTIC '+json.dumps(value,separators=(',',':'))),8192)
+
+class InitialPairObservationWaitTests(unittest.TestCase):
+    """Real FullFlow/NativeScenario scheduling with bounded observer/controller doubles.
+
+    Run33 proves absent Pair and idle64, not its eventual arrival. Delayed events
+    here test scheduling only; they are not native Pair completion evidence.
+    """
+    def harness(self,*,target='Signer1',ticket_at=80,deadline=100,change=None):
+        from unittest import mock
+        class ReachedPair(Exception):pass
+        state=dict(generation=0,clock=1,wheels=[],effects=[],clicked=False,deadlines=[],observations=[])
+        role_records=[dict(kind='SignerMilestone',facts=dict(owner=target,step='EntryOpened'))]
+        if target=='Signer2':role_records.append(dict(kind='SignerMilestone',facts=dict(owner='Signer1',step='SigningRetired')))
+        class Observer:
+            expected_profile=F.C.EXTERNAL_PROFILE
+            def read(self):
+                if change=='native_failure' and state['generation']>=70:return role_records+[dict(kind='Failure')]
+                return role_records
+            def next_snapshot(self,bound):
+                if state['clicked']:raise ReachedPair()
+                state['deadlines'].append(bound);state['generation']+=1;state['clock']+=1
+                F.C.require(state['clock']<bound,'deadline')
+                g=state['generation'];widgets=[dict(tag='ScrollRegion',owner=None,enabled=True,rect=[0,0,1280,800]),
+                    dict(tag='HostOutput',owner=None,enabled=True,rect=[10,100,600,340]),
+                    dict(tag='BeginHostLine',owner=None,enabled=True,rect=[10,350,200,380]),
+                    dict(tag='ConfigureV3',owner='Signer2',enabled=True,rect=[10,700,200,730])]
+                if ticket_at is not None and g>=ticket_at:
+                    widgets.append(dict(tag='ReviewV3Pair',owner='Signer2' if change=='wrong_pair_owner' else target,enabled=change!='disabled',rect=[10,600,200,630]))
+                s=observed_snapshot(phase='Selecting',subphase='None',owner=None,view_generation=g,
+                    focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=widgets,
+                    host_observation=dict(revision=16,nonws_end=100,context_valid=True,entry='Idle',editor=None,view=None))
+                if g>=70:
+                    if change=='revoked':s.update(phase='Revoked')
+                    if change=='focus':s['focused']=False
+                    if change=='secret':s['secret_input']=True
+                    if change=='host':s['host_input']=True;s['host_observation']['entry']='Writing';s['widgets']=[]
+                    if change=='phase':s.update(phase='Waiting')
+                    if change=='stable_phase' and g>ticket_at:s.update(phase='Waiting')
+                state['observations'].append((g,s['phase']));return s
+        controller=mock.Mock()
+        def wheel(direction):
+            state['wheels'].append(direction);state['effects'].append((state['generation'],'wheel'))
+        controller.scroll_up.side_effect=lambda *a:wheel('up')
+        controller.scroll_down.side_effect=lambda *a:wheel('down')
+        controller.wait_render_progress.side_effect=lambda:state['effects'].append((state['generation'],'progress'))
+        def click(x,y):
+            self.assertEqual((x,y),(105,615));state['effects'].append((state['generation'],'click'));state['clicked']=True
+        controller.click.side_effect=click
+        fixture=mock.Mock(deadline_ns=deadline)
+        fixture.check.side_effect=lambda:F.C.require(state['clock']<deadline,'deadline')
+        operator=mock.Mock()
+        flow=F.FullFlow(controller,fixture,Observer(),None,operator)
+        flow.startup_index=13;flow.host_lines=16;flow.startup_focus_seen=True
+        flow.host_occurrences.frontier=100;flow.host_occurrences.last_end=100;flow.host_occurrences.last_revision=16
+        flow.done.add(('Selecting','None','ConfigureV3','Signer1',None))
+        if target=='Signer2':flow.done.add(('Selecting','None','ConfigureV3','Signer2',None))
+        # Selector files are independent of this initial Pair stage.
+        fixture.source_path.return_value='/nonexistent-run33-synthetic-selector'
+        return flow,controller,state,role_records,ReachedPair
+    def test_run33_shape_before_rejects_and_after_passively_reaches_real_enabled_pair(self):
+        from unittest import mock
+        for target in ('Signer1','Signer2'):
+            with self.subTest(target=target):
+                before,c,state,records,stop=self.harness(target=target)
+                with mock.patch.object(before,'wait_initial_pair_after_sweep',return_value=False):
+                    with self.assertRaises(F.C.Rejected) as e:before.run()
+                self.assertEqual(e.exception.code,'input_budget');self.assertEqual(e.exception.input_budget['site'],'idle_sweep')
+                self.assertEqual(len(state['wheels']),64);c.click.assert_not_called()
+                flow,c,state,records,stop=self.harness(target=target)
+                with self.assertRaises(stop):flow.run()
+                self.assertEqual(state['wheels'],['up']*8+['down']*56)
+                self.assertEqual(flow.scrolls[('Selecting','None','idle_sweep',None)],64)
+                self.assertEqual([effect for generation,effect in state['effects'] if 65<=generation<80],[])
+                c.click.assert_called_once_with(105,615);self.assertEqual(flow.actions,1)
+                self.assertTrue(flow.used(dict(phase='Selecting',subphase='None'),'ReviewV3Pair',target))
+                self.assertEqual(set(state['deadlines']),{100});self.assertEqual(flow.fixture.deadline_ns,100)
+                c.type_ascii.assert_not_called();c._command.assert_not_called();c.focus.assert_not_called()
+    def test_never_arriving_or_disabled_pair_keeps_original_deadline_no_extra_effects(self):
+        for change in (None,'disabled','wrong_pair_owner'):
+            with self.subTest(change=change):
+                flow,c,state,records,stop=self.harness(ticket_at=None if change is None else 80,change=change)
+                with self.assertRaises(F.C.Rejected) as e:flow.run()
+                self.assertEqual(e.exception.code,'deadline');self.assertEqual(set(state['deadlines']),{100})
+                self.assertEqual(len(state['wheels']),64);self.assertEqual(flow.scrolls[('Selecting','None','idle_sweep',None)],64)
+                self.assertFalse(any(g>=65 for g,effect in state['effects']));c.click.assert_not_called()
+    def test_failure_protection_and_real_phase_changes_keep_normal_paths(self):
+        for change,code in [('native_failure','observer_failure'),('revoked','source_failure'),('focus','input_phase'),('secret','input_phase'),('stable_phase','input_phase')]:
+            with self.subTest(change=change):
+                flow,c,state,records,stop=self.harness(change=change)
+                with self.assertRaises(F.C.Rejected) as e:flow.run()
+                self.assertEqual(e.exception.code,code);c.click.assert_not_called();self.assertEqual(len(state['wheels']),64)
+        flow,c,state,records,stop=self.harness(change='phase',deadline=200)
+        with self.assertRaises(F.C.Rejected) as e:flow.run()
+        self.assertEqual(e.exception.code,'input_budget');self.assertEqual(flow.location['phase'],'Waiting')
+        self.assertEqual(flow.scrolls[('Waiting','None','idle_sweep',None)],64)
+    def test_host_pump_and_operator_continue_while_source_navigation_is_paused(self):
+        from unittest import mock
+        flow,c,state,records,stop=self.harness(ticket_at=None)
+        records.append(dict(kind='SignerMilestone',facts=dict(owner='Signer1',step='AdmissionAudited')))
+        original=flow.pump_host;calls=[]
+        def pump(s):calls.append(state['generation']);return original(s)
+        with mock.patch.object(flow,'pump_host',side_effect=pump):
+            with self.assertRaises(F.C.Rejected) as e:flow.run()
+        self.assertEqual(e.exception.code,'deadline');self.assertIn(90,calls)
+        self.assertEqual(flow.operator.signal.call_count,len(calls));self.assertEqual(flow.host_action,'NoPending')
+    def test_wait_eligibility_is_narrow_and_never_resets_budget(self):
+        for case in ('unopened','paired','pending','prepared','startup','role','subphase','owner','protected','unfocused','host_context','host_closed','under','over'):
+            with self.subTest(case=case):
+                flow,c,state,records,stop=self.harness();s=flow.snapshot();flow.scrolls[('Selecting','None','idle_sweep',None)]=64
+                target='Signer1'
+                if case=='unopened':records.clear();flow.records=[]
+                elif case=='paired':flow.records.append(dict(kind='SignerMilestone',facts=dict(owner='Signer1',step='Paired')))
+                elif case=='pending':flow.pending_host=('public','unused')
+                elif case=='prepared':flow.host_prepared=('unused','unused')
+                elif case=='startup':flow.startup_index=12
+                elif case=='role':target=None
+                elif case=='subphase':s['subphase']='SetupNeeded'
+                elif case=='owner':s['owner']='Signer1'
+                elif case=='protected':s['host_input']=True
+                elif case=='unfocused':s['focused']=False
+                elif case=='host_context':s['host_observation']['context_valid']=False
+                elif case=='host_closed':s['host_observation']['entry']='Closed'
+                elif case=='under':flow.scrolls[('Selecting','None','idle_sweep',None)]=63
+                elif case=='over':flow.scrolls[('Selecting','None','idle_sweep',None)]=65
+                old=dict(flow.scrolls);self.assertFalse(flow.wait_initial_pair_after_sweep(s,target));self.assertEqual(flow.scrolls,old)
+                c.click.assert_not_called();c.wait_render_progress.assert_not_called();c.scroll_down.assert_not_called()
+
+    def test_host_writing_still_uses_existing_protected_pump_path(self):
+        flow,c,state,records,stop=self.harness(ticket_at=None,change='host')
+        with self.assertRaises(F.C.Rejected) as e:flow.run()
+        self.assertEqual(e.exception.code,'deadline');self.assertEqual(len(state['wheels']),64)
+        self.assertTrue(any(g>=70 and effect=='progress' for g,effect in state['effects']))
+        self.assertFalse(any(g>=70 and effect!='progress' for g,effect in state['effects']))
+        c.click.assert_not_called();c.type_ascii.assert_not_called()

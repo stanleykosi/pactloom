@@ -186,6 +186,25 @@ class FullFlow:
         count=self.scrolls.get(key,0);C.input_budget(count<64,'idle_sweep',count)
         self.scrolls[key]=count+1
         return self.scroll(s,'ScrollRegion',None,'up' if count<8 else 'down')
+    def wait_initial_pair_after_sweep(self,s,target):
+        # Initial Pair is issued asynchronously by the original Host/Signer
+        # after EntryOpened. A finite navigation budget is not its native clock.
+        # Once the same 64 gestures are spent, permit ONLY fresh observations;
+        # never renew navigation, select the other role, or infer Pair readiness.
+        key=(s['phase'],s['subphase'],'idle_sweep',s['owner'])
+        if not (s['phase']=='Selecting' and s['subphase']=='None' and s['owner'] is None
+                and target in ('Signer1','Signer2') and self.host_startup_complete
+                and self.pending_host is None and self.host_prepared is None
+                and s['focused'] and not(s['secret_input'] or s['host_input'])
+                and s['host_observation']['context_valid'] and s['host_observation']['entry']=='Idle'
+                and self.milestone(target,'EntryOpened') and not self.milestone(target,'Paired')
+                and self.scrolls.get(key,0)==64):return False
+        # Only the existing snapshot reader waits; no controller command is sent.
+        # Its fresh-generation guard and every original deadline still apply.
+        # The outer loop continues Host pumping/operator service and scans actual
+        # enabled actions BEFORE returning here; no action is synthesized here.
+        return True
+
     def field(self,s,tag,owner,value):
         key=(s['phase'],tag,owner)
         if key in self.filled:return True
@@ -687,7 +706,7 @@ class FullFlow:
                     if selected:continue
                 if phase in RESULT_PHASES and self.find(s,'SelectNextV3',owner) and not self.used(s,'SelectNextV3',owner):
                     self.press(s,'SelectNextV3',owner);continue
-                self.idle_scan(s)
+                if not self.wait_initial_pair_after_sweep(s,target):self.idle_scan(s)
             elif phase=='Waiting':self.idle_scan(s)
             # All other phases wait actual observations under original deadline.
             # No phase change, request, outcome or authority is fabricated here.
