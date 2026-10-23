@@ -22,6 +22,7 @@ use wholepact_financial_coordinator_origin::{
 };
 impl super::coordinated_service_worker_v1::ServiceOriginV1 for Origin {
     fn close_failed_worker(&mut self) { self.close_for_failed_worker_v1(); }
+    fn close_failed_worker_error(&mut self) { self.close_for_failed_worker_error_v1(); }
     fn complete_owned(self, result: Result<()>) -> ! {
         self.complete(result.map_err(|_| std::io::Error::other("original completed-pair role stopped")))
     }

@@ -2718,6 +2718,35 @@ class PreparationFailureDomainTests(unittest.TestCase):
             with self.assertRaises(F.S.C.Rejected) as error:native.close_after_normal_proof(rows,None,F.C.SEMANTIC_PROFILE)
             self.assertEqual(error.exception.code,'observer_failure');c.terminal_click.assert_not_called();native.next_snapshot.assert_not_called()
 
+class ExportFailureDomainTests(unittest.TestCase):
+    """Post-recipient observations remain finite failures, never success proof."""
+    setUp=HostExitDiagnosticTests.setUp
+    tearDown=HostExitDiagnosticTests.tearDown
+    record=HostExitDiagnosticTests.record
+    records=HostExitDiagnosticTests.records
+    write=HostExitDiagnosticTests.write
+    failure=HostExitDiagnosticTests.failure
+    host_file=HostExitDiagnosticTests.host_file
+    host_rows=HostExitDiagnosticTests.host_rows
+    STAGES=frozenset('ExportRecipientBinding ExportMetadataSource ExportMetadataMaterials ExportMetadataApproval ExportRecipientBind ExportFinalApproval ExportConsent ExportCommit ExportVerifiedWait'.split())
+    def test_exact_export_domains_and_unchanged_closed_shape(self):
+        self.assertEqual(len(self.STAGES),9)
+        self.assertEqual({s for s in O.C.HOST_FAILURE_STAGES if s.startswith('Export')},self.STAGES)
+        for stage in self.STAGES:
+            for cls in O.C.HOST_FAILURE_CLASSES:
+                facts=self.failure(stage=stage,**{'class':cls})
+                O.C.validate_host_failure_facts(facts)
+                self.assertEqual(set(facts),{'version','stage','class','relay'})
+            record=self.record('HostFailureBoundary',self.failure(stage=stage),2,role='Host')
+            O.C.validate_record(record,O.C.SEMANTIC_PROFILE)
+            with self.assertRaises(O.C.Rejected):O.C.validate_record(record,O.C.EXTERNAL_PROFILE)
+            with self.assertRaises(O.C.Rejected):O.C.validate_host_exit_cardinality([record,record])
+        for key,value in [('stage','ExportPrivateText'),('class','ExportRawError'),('version',True),('detail','private')]:
+            facts=self.failure(stage='ExportMetadataSource');facts[key]=value
+            with self.assertRaises(O.C.Rejected):O.C.validate_host_failure_facts(facts)
+    test_each_export_stage_blocks_success_and_native_close=PreparationFailureDomainTests.test_each_new_preparation_stage_blocks_success_and_native_close
+
+
 class SelectionHandoffTests(unittest.TestCase):
     """Actual FullFlow/NativeScenario schedule; no real input or native authority."""
     def harness(self,*,advance=5,target='Signer1',change=None,coverage=False,deadline=200,profile=F.C.EXTERNAL_PROFILE):

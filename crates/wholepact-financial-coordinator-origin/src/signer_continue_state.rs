@@ -442,8 +442,18 @@ impl Core {
         if self.retired_roots.fetch_or(1<<index,Ordering::AcqRel)&(1<<index)!=0{return Err(rejected("retirement tombstone duplicated"));}Ok(())
     }
     pub(super) fn close(&self) {
+        self.close_after_restriction(|| {});
+    }
+    /// Explicit failed-worker boundary only. Denial remains before observation;
+    /// closing the original edge remains unconditional after the best effort.
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    pub(super) fn close_with_failure_observation(&self) {
+        self.close_after_restriction(crate::financial_observer::financial_ci_flush_actor_failure_before_edge_close);
+    }
+    fn close_after_restriction(&self, observe: impl FnOnce()) {
         self.phase.revoke();
         self.alive.store(false, Ordering::Release);
+        observe();
         self.peer.shutdown();
     }
     pub(super) fn pending(&self) -> bool {

@@ -81,3 +81,32 @@ pub(crate) fn pair(error: &wholepact_signer::authority_bridge::durable_review_ip
     };
     latch_failure(stage, class);
 }
+
+/// Same finite engine categories as the existing delivery observer. Borrowed
+/// classification precedes the caller's unchanged native Error conversion.
+pub(crate) fn engine(stage:Stage,error:&wholepact_engine::ApiError) {
+ let class=match error.code.as_str() {
+  "DISCLOSURE_UNKNOWN"=>Class::EngineDisclosureUnknown,
+  "DISCLOSURE_DENIED"=>Class::EngineDisclosureDenied,
+  "RECOVERY_REQUIRED"|"DURABLE_PROPOSAL_RECOVERY_REQUIRED"=>Class::EngineRecoveryRequired,
+  "IDEMPOTENCY_CONFLICT"=>Class::EngineIdempotencyConflict,
+  "REVISION_CONFLICT"=>Class::EngineRevisionConflict,
+  "DURABLE_PROPOSAL_CONFLICT"=>Class::EngineDurableProposalConflict,
+  "DURABLE_CONSTRUCTION_UNAVAILABLE"=>Class::EngineDurableConstructionUnavailable,
+  "DURABLE_PROFILE_UNAVAILABLE"=>Class::EngineDurableProfileUnavailable,
+  "RESOURCE_EXHAUSTED"=>Class::EngineResourceExhausted,
+  _=>Class::EngineUnclassified,
+ };
+ latch_failure(stage,class);
+}
+pub(crate) fn bridge(stage:Stage,error:&wholepact_signer::authority_bridge::BridgeError) {
+ use wholepact_signer::authority_bridge::BridgeError as E;
+ let class=match error {
+  E::Binding=>Class::BridgeBinding,E::Conflict=>Class::BridgeConflict,E::Missing=>Class::BridgeMissing,
+  E::Uncertain=>Class::BridgeUncertain,E::Limit=>Class::BridgeLimit,E::Permission=>Class::BridgePermission,
+  E::RecoveryRequired=>Class::BridgeRecoveryRequired,E::CompleteOriginRecoveryUnavailable=>Class::BridgeCompleteOriginRecoveryUnavailable,
+  E::Verification=>Class::BridgeVerification,E::SignerOriginUnavailable=>Class::BridgeSignerOriginUnavailable,
+  E::Journal(_)=>Class::BridgeJournal,E::Authority(_)=>Class::BridgeAuthority,E::Wallet(_)=>Class::BridgeWallet,E::Ipc=>Class::BridgeIpc,
+ };
+ latch_failure(stage,class);
+}

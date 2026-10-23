@@ -65,8 +65,16 @@ impl SigningCore {
         self.restricted.store(true, Ordering::Release);
     }
     fn close(&self) {
+        self.close_after_restriction(|| {});
+    }
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    fn close_with_failure_observation(&self) {
+        self.close_after_restriction(crate::financial_observer::financial_ci_flush_actor_failure_before_edge_close);
+    }
+    fn close_after_restriction(&self, observe: impl FnOnce()) {
         self.restrict();
         self.alive.store(false, Ordering::Release);
+        observe();
         self.peer.shutdown();
     }
     fn step(&self, from: u8, to: u8) -> Result<()> {
@@ -233,6 +241,20 @@ impl WitnessFinancialSigningOriginV1 {
         self.core.close();
         self.leaf.take();
     }
+    /// Called only for the owned monitor's actual Err, never generic Drop.
+    /// The existing outer conversion already reduces that error to IoOther.
+    pub fn close_for_failed_worker_error_v1(&mut self) {
+        self.failed = true;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        {
+            use crate::financial_ci_actor_diagnostics as d;
+            d::driver(d::DriverStage::WitnessWork, d::Class::IoOther);
+            self.core.close_with_failure_observation();
+        }
+        #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
+        self.core.close();
+        self.leaf.take();
+    }
     pub fn retain_cleanup_deadline(&mut self, original: Instant) -> Result<Instant> {
         let value = self
             .core
@@ -274,7 +296,14 @@ impl WitnessFinancialSigningOriginV1 {
         #[cfg(wholepact_financial_rendered_host_semantic_ci)]
         if let Err(error)=&result {crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::WitnessReceive,error,None);}
 
-        if result.is_err() {
+        if let Err(_error) = &result {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            {
+                use crate::financial_ci_actor_diagnostics as d;
+                d::driver(d::DriverStage::Receive, d::classify_io(_error.kind()));
+                self.core.close_with_failure_observation();
+            }
+            #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
             self.core.close();
         }
         result

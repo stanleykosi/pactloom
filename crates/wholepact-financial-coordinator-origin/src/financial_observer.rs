@@ -385,7 +385,43 @@ pub fn financial_ci_flush_host_diagnostics() {
  if let Ok(mut slot)=WRITER.lock(){if let Some(w)=slot.as_mut(){flush_host_diagnostics_locked(w);}}
 }
 
-/// Final actor-local summary only after the original work and owned joins return.
+/// Failure-only snapshot after denial publication and before an explicit
+/// failed-worker edge close. A busy/poisoned writer is unavailable, never waited
+/// for here. The original writer bounds and attempted-once reporter apply;
+/// append failure is swallowed and cannot replace or skip original teardown.
+/// This snapshot does not assert joins/disposal or include later slot values.
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+pub(crate) fn financial_ci_flush_actor_failure_before_edge_close() {
+ best_effort_actor_observation(|| {
+  if let Ok(mut slot)=WRITER.try_lock(){if let Some(w)=slot.as_mut(){
+   if w.pid!=unsafe{libc::getpid()}{return;}
+   let mut reporter=w.actor_diagnostic;
+   reporter.flush_failure(crate::financial_ci_actor_diagnostics::sample_failure(),|f|emit_locked(w,"ActorFailureBoundary",&f).map_err(|_|()));
+   w.actor_diagnostic=reporter;
+  }}
+ });
+}
+/// Only the new observation is isolated. This does not catch panic=abort,
+/// allocation aborts or process death, and never changes an original failure.
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+fn best_effort_actor_observation(observe: impl FnOnce()) {
+ let _=std::panic::catch_unwind(std::panic::AssertUnwindSafe(observe));
+}
+#[cfg(all(test,wholepact_financial_rendered_host_semantic_ci))]
+mod early_actor_observation_tests {
+ use super::*;
+ #[test] fn success_and_unwind_return_to_original_teardown() {
+  for panics in [false,true] {
+   let calls=std::cell::Cell::new(0);
+   best_effort_actor_observation(||{calls.set(calls.get()+1);if panics{panic!("synthetic observer panic");}});
+   calls.set(calls.get()+10);
+   assert_eq!(calls.get(),11);
+  }
+ }
+}
+
+/// Final actor-local summary after the original work and owned joins return.
+/// An earlier attempted failure snapshot is never retried or enriched.
 /// No evidence operation changes or replaces an original result.
 #[cfg(wholepact_financial_rendered_host_semantic_ci)]
 pub fn financial_ci_flush_actor_diagnostics(){

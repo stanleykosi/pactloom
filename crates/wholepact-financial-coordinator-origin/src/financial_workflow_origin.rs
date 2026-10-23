@@ -142,6 +142,9 @@ impl SignerFinancialWorkflowOriginV1 {
     pub fn close_for_failed_worker_v1(&mut self){
         self.failed=true;
         let _=self.restrict();
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        self.core.close_with_failure_observation();
+        #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
         self.core.close();
         self.leaf.take();
     }
@@ -156,7 +159,17 @@ impl SignerFinancialWorkflowOriginV1 {
         if self.cleanup.is_none(){self.cleanup=Some(self.clocks.first_cleanup_ceiling(Instant::now())?);}Ok(())
     }
     pub fn try_receive(&mut self)->Result<Option<SignerFinancialWorkflowRequestV1>>{
-        let result=self.receive_inner();if result.is_err(){self.core.close();}result
+        let result=self.receive_inner();
+        if let Err(_error)=&result {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            {
+                crate::financial_ci_actor_diagnostics::work_fallback(crate::financial_ci_actor_diagnostics::DriverStage::Receive,_error);
+                self.core.close_with_failure_observation();
+            }
+            #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
+            self.core.close();
+        }
+        result
     }
     fn receive_inner(&mut self)->Result<Option<SignerFinancialWorkflowRequestV1>>{
         self.transport_check()?;

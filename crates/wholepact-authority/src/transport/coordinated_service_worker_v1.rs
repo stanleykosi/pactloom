@@ -8,11 +8,13 @@ use std::thread::JoinHandle;
 
 pub(super) trait ServiceOriginV1 {
     fn close_failed_worker(&mut self);
+    fn close_failed_worker_error(&mut self);
     fn complete_owned(self, result: Result<()>) -> !;
 }
 #[cfg(feature = "coordinated-witness-financial-history")]
 impl ServiceOriginV1 for wholepact_financial_coordinator_origin::WitnessFinancialHistoryOriginV1 {
     fn close_failed_worker(&mut self) { self.close_for_failed_worker_v1(); }
+    fn close_failed_worker_error(&mut self) { self.close_for_failed_worker_error_v1(); }
     fn complete_owned(self, result: Result<()>) -> ! {
         self.complete(result.map_err(|_| std::io::Error::other("initial owner-history role stopped")))
     }
@@ -20,6 +22,7 @@ impl ServiceOriginV1 for wholepact_financial_coordinator_origin::WitnessFinancia
 #[cfg(feature = "coordinated-witness-financial-signing")]
 impl ServiceOriginV1 for wholepact_financial_coordinator_origin::WitnessFinancialSigningOriginV1 {
     fn close_failed_worker(&mut self) { self.close_for_failed_worker_v1(); }
+    fn close_failed_worker_error(&mut self) { self.close_for_failed_worker_error_v1(); }
     fn complete_owned(self, result: Result<()>) -> ! {
         self.complete(result.map_err(|_| std::io::Error::other("original financial-signing role stopped")))
     }
@@ -38,11 +41,14 @@ impl<O: ServiceOriginV1, G, E> ServiceWorkerOwnerV1<O, G, E> {
         Self { origin: Some(origin), stopped: Arc::new(AtomicBool::new(false)),
             worker: None, serve_tx: None, event_tx, event_rx }
     }
-    fn close_and_join(&mut self) -> Result<()> {
+    fn close_and_join(&mut self, actual_work_error: bool) -> Result<()> {
         // Publish restriction and close the actual edge BEFORE dropping a queued
         // grant or waiting on a worker. The parent can observe failure meanwhile.
         self.stopped.store(true, Ordering::Release);
-        if let Some(origin) = self.origin.as_mut() { origin.close_failed_worker(); }
+        if let Some(origin) = self.origin.as_mut() {
+            if actual_work_error { origin.close_failed_worker_error(); }
+            else { origin.close_failed_worker(); }
+        }
         drop(self.serve_tx.take());
         if let Some(worker) = self.worker.take() {
             worker.join().map_err(|_| AuthorityError::Storage)??;
@@ -55,7 +61,7 @@ impl<O: ServiceOriginV1, G, E> ServiceWorkerOwnerV1<O, G, E> {
         if result.is_ok() && self.worker.is_some() { result = Err(AuthorityError::Permission); }
         if result.is_err() {
             // Preserve the original work error; cleanup cannot turn it into success.
-            let _ = self.close_and_join();
+            let _ = self.close_and_join(true);
         }
         let origin = self.origin.take().expect("owned service origin retained until completion");
         drop(self);
@@ -64,7 +70,7 @@ impl<O: ServiceOriginV1, G, E> ServiceWorkerOwnerV1<O, G, E> {
 }
 impl<O: ServiceOriginV1, G, E> Drop for ServiceWorkerOwnerV1<O, G, E> {
     fn drop(&mut self) {
-        if self.origin.is_some() || self.worker.is_some() { let _ = self.close_and_join(); }
+        if self.origin.is_some() || self.worker.is_some() { let _ = self.close_and_join(false); }
     }
 }
 
@@ -78,9 +84,19 @@ mod tests {
             assert!(self.stop.as_ref().unwrap().load(Ordering::Acquire));
             self.events.lock().unwrap().push("edge_closed");
         }
-        fn complete_owned(self, _: Result<()>) -> ! { panic!("not invoked by pure ownership test") }
+        fn close_failed_worker_error(&mut self) {
+            assert!(self.stop.as_ref().unwrap().load(Ordering::Acquire));
+            self.events.lock().unwrap().push("failure_observed");
+            self.close_failed_worker();
+        }
+        fn complete_owned(self, result: Result<()>) -> ! {
+            self.events.lock().unwrap().push("completed");
+            std::panic::panic_any(Completed(result))
+        }
     }
     impl Drop for FakeOrigin { fn drop(&mut self) { self.events.lock().unwrap().push("origin_dropped"); } }
+    #[derive(Debug)]
+    struct Completed(Result<()>);
     struct Event(Arc<Mutex<Vec<&'static str>>>);
     impl Drop for Event { fn drop(&mut self) { self.0.lock().unwrap().push("queue_dropped"); } }
     fn prepared(events: Arc<Mutex<Vec<&'static str>>>) -> ServiceWorkerOwnerV1<FakeOrigin, (), Event> {
@@ -104,5 +120,41 @@ mod tests {
             panic!("synthetic monitor unwind");
         }).is_err());
         assert_eq!(*events.lock().unwrap(), ["edge_closed", "origin_dropped", "queue_dropped"]);
+    }
+
+    #[test]
+    fn actual_monitor_error_observes_before_edge_queue_and_join_and_keeps_original_error() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut owner = prepared(events.clone());
+        let (tx, rx) = mpsc::sync_channel(1);
+        owner.serve_tx = Some(tx);
+        let worker_events = events.clone();
+        owner.worker = Some(std::thread::spawn(move || {
+            assert!(rx.recv().is_err());
+            worker_events.lock().unwrap().push("worker_finished");
+            Err(AuthorityError::Storage)
+        }));
+        let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            owner.complete(Err(AuthorityError::Conflict))
+        })).unwrap_err();
+        assert_eq!(ended.downcast_ref::<Completed>().unwrap().0, Err(AuthorityError::Conflict));
+        assert_eq!(*events.lock().unwrap(), ["failure_observed", "edge_closed", "worker_finished", "queue_dropped", "completed", "origin_dropped"]);
+    }
+    #[test]
+    fn actual_success_does_not_observe_failure_or_close_an_edge() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let owner = prepared(events.clone());
+        let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| owner.complete(Ok(())))).unwrap_err();
+        assert_eq!(ended.downcast_ref::<Completed>().unwrap().0, Ok(()));
+        assert_eq!(*events.lock().unwrap(), ["queue_dropped", "completed", "origin_dropped"]);
+    }
+    #[test]
+    fn outstanding_worker_still_prevents_success_and_uses_actual_error_path() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut owner = prepared(events.clone());
+        owner.worker = Some(std::thread::spawn(|| Ok(())));
+        let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| owner.complete(Ok(())))).unwrap_err();
+        assert_eq!(ended.downcast_ref::<Completed>().unwrap().0, Err(AuthorityError::Permission));
+        assert_eq!(*events.lock().unwrap(), ["failure_observed", "edge_closed", "queue_dropped", "completed", "origin_dropped"]);
     }
 }

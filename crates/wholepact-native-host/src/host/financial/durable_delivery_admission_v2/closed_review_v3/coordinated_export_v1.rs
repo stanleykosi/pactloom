@@ -4,6 +4,19 @@ use super::*;
 use wholepact_engine::durable_construction_v1::review_export_coordinated_v1::{CoordinatedDurableReviewExportScopeV1, LocalCoordinatedDurableReviewExportConsentV1};
 use wholepact_signer::authority_bridge::durable_review_ipc_v3::coordinated_v1::{PreparedCoordinatedDurableReviewRecipientV1, VerifiedImportedCoordinatedDurableReviewSessionV1};
 
+// Observe only an already-returned error. These direct semantic-only hooks do
+// not reactivate the earlier preparation observer over final-effect callbacks.
+macro_rules! export_observed {
+    ($kind:ident,$stage:ident,$operation:expr) => {{
+        let result=$operation;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error)=&result {
+            crate::financial_ci_host_failure::$kind(crate::financial_ci_host_failure::Stage::$stage,error);
+        }
+        result
+    }};
+}
+
 #[derive(Serialize)]
 pub(in crate::host::financial) struct CoordinatedOriginalDeliveryExportV1 {
     pub request: DurableDeliveryAdmissionRequestV2,
@@ -71,41 +84,41 @@ impl Host {
         // recipient callback above includes the actual capture and Pair prompt.
         #[cfg(wholepact_financial_rendered_host_semantic_ci)]
         drop(_observation_scope);
-        if recipient.intent().delivery != plan || recipient.intent().fixed != *inspection.fixed_identity() { return Err(Error::Authentication); }
+        if recipient.intent().delivery != plan || recipient.intent().fixed != *inspection.fixed_identity() { return export_observed!(native,ExportRecipientBinding,Err(Error::Authentication)); }
         let request = recipient.intent().request.clone();
         // A distinct current metadata-read decision, not renewal of preparation.
         let final_inspection = source_checked_approval_v2(
-            || { owner.check_closed_source_v3()?; current_materials(&inspection) },
-            || self.terminal.approve_historical("Inspect exact closed original export metadata for the actually prepared coordinated original recipient. Read only the retained source/policy identity and exact payload commitment under both ORIGINAL material ceilings. No private payload export, financial admission, signing or submission is authorized."),
+            || { export_observed!(native,ExportMetadataSource,owner.check_closed_source_v3())?; export_observed!(native,ExportMetadataMaterials,current_materials(&inspection)) },
+            || export_observed!(native,ExportMetadataApproval,self.terminal.approve_historical("Inspect exact closed original export metadata for the actually prepared coordinated original recipient. Read only the retained source/policy identity and exact payload commitment under both ORIGINAL material ceilings. No private payload export, financial admission, signing or submission is authorized.")),
         )?;
         let read = ClosedConsentV3 { host: self, owner: &owner, inspection: &inspection, approval: &final_inspection, export: None };
         let closed = engine_result(DeliveryObservationSiteV2::ExportPreview,
-            prepared.bind_prepared_coordinated_recipient_v1(recipient, self.access()?, &read, &read, &read))?;
+            export_observed!(engine,ExportRecipientBind,prepared.bind_prepared_coordinated_recipient_v1(recipient, export_observed!(native,ExportRecipientBind,self.access())?, &read, &read, &read)))?;
         let export_scope = closed.scope().clone();
         let detail = format!(
             "EXPORT EXACT COORDINATED ORIGINAL DELIVERY V1\n{}\n{}\nDisclose the full retained private candidate, viewing keys, notes and witnesses ONLY to this prepared coordinated original reviewer and exact original source/process/read context. No transport socket or export grant has waited for this review. After this final response, a one-use prompt-free channel must match the exact preparation. Changed, expired, locked or restarted preparation is refused without fallback. Retain DisclosedOrUnknown before the first private byte; failure cannot undo disclosure. This does not sign, submit, acquire, reserve or activate financial execution. Prospective admission requires its own native decision.",
-            serde_json::to_string(&inspection)?, serde_json::to_string(&export_scope)?
+            export_observed!(native,ExportFinalApproval,serde_json::to_string(&inspection).map_err(Error::from))?, export_observed!(native,ExportFinalApproval,serde_json::to_string(&export_scope).map_err(Error::from))?
         );
-        bound_original_delivery_review_v2(&detail)?;
-        let prompt_bounds = original_review_prompt_bounds(&final_inspection, &inspection)?;
-        let approval = host_result(DeliveryObservationSiteV2::ExportApproval, self.terminal.approve_durable_delivery_original_v3(
+        export_observed!(native,ExportFinalApproval,bound_original_delivery_review_v2(&detail))?;
+        let prompt_bounds = export_observed!(native,ExportFinalApproval,original_review_prompt_bounds(&final_inspection, &inspection))?;
+        let approval = export_observed!(native,ExportFinalApproval,host_result(DeliveryObservationSiteV2::ExportApproval, self.terminal.approve_durable_delivery_original_v3(
             &final_inspection, &detail,
-            || { read.check()?; engine_result(DeliveryObservationSiteV2::ExportApproval, closed.check_current_v3(self.access()?, &read, &read, &read)) },
-            || { owner.check_closed_source_v3()?; current_materials(&inspection) },
+            || { export_observed!(native,ExportFinalApproval,read.check())?; engine_result(DeliveryObservationSiteV2::ExportApproval, export_observed!(engine,ExportFinalApproval,closed.check_current_v3(export_observed!(native,ExportFinalApproval,self.access())?, &read, &read, &read))) },
+            || { export_observed!(native,ExportMetadataSource,owner.check_closed_source_v3())?; export_observed!(native,ExportMetadataMaterials,current_materials(&inspection)) },
             prompt_bounds.as_ref(),
-        ))?;
+        )))?;
         drop(read);
         drop(final_inspection);
         let consent = CoordinatedClosedExportConsentV1 { inner: ClosedConsentV3 { host: self, owner: &owner, inspection: &inspection, approval: &approval, export: None }, export: &export_scope };
-        consent.check()?;
+        export_observed!(native,ExportConsent,consent.check())?;
         let delivered = observed_engine_result(DeliveryObservationSiteV2::ExportCommit,
-            closed.deliver_coordinated_v1(self.access()?, &consent, &consent, &consent, &consent, approval.deadline()));
+            export_observed!(engine,ExportCommit,closed.deliver_coordinated_v1(export_observed!(native,ExportCommit,self.access())?, &consent, &consent, &consent, &consent, approval.deadline())));
         let (retention, bytes_received) = delivered.map_err(|error| {
             if error.code == "DISCLOSURE_UNKNOWN" { unknown() } else { Error::from(error) }
         })?;
         // Actual coordinated verification is a separate read-bound worker result.
         // A data receipt cannot promote itself into an admission owner.
-        let verified = bytes_received.await_verified_v3().map_err(|_| unknown())?;
+        let verified = export_observed!(bridge,ExportVerifiedWait,bytes_received.await_verified_v3()).map_err(|_| unknown())?;
         // The export action is over. Coordinated verified import is independently
         // bounded by its read permission, not by Host's now-finished action120.
         observe_delivery(DeliveryObservationSiteV2::ExportCommit, DeliveryObservationOutcomeV2::ReturnedOk);

@@ -1,14 +1,14 @@
-name: Deadline identity preflight only
+name: Close observation preflight only
 on:
   push:
-    branches: [checkpoint/deadline-preflight-p44]
+    branches: [checkpoint/close-preflight-p45]
 permissions: {}
 concurrency:
-  group: deadline-preflight-p44
+  group: close-preflight-p45
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/deadline-preflight-p44' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/close-preflight-p45' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -30,6 +30,19 @@ jobs:
           public_git -C source checkout --detach FETCH_HEAD
           test "$(public_git -C source rev-parse HEAD)" = "$SOURCE_COMMIT"
           test -z "$(public_git -C source status --porcelain --untracked-files=all)"
+      - name: Exact historical P40 adapter test fixture and Python preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c http.extraheader= init H
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c http.extraheader= -C H fetch --no-tags --depth=1 https://github.com/stanleykosi/pactloom.git 99501f5853a4516fc94a6361f39cb4373048f01f
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c http.extraheader= -C H checkout --detach FETCH_HEAD
+          test "$(env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c http.extraheader= -C H rev-parse HEAD)" = 99501f5853a4516fc94a6361f39cb4373048f01f
+          echo '2b251c9f0bcce7a227d7e7f37f2a7a51c049f6b0e30e36ee3c11adce19c6dce0  H/scripts/ci-financial-supervisor.py' | sha256sum --check --status
+          cd source
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B -m unittest discover -s scripts/tests -p 'test*financial*.py'
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B scripts/ci-financial-launch-tests.py
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B -m unittest discover -s scripts/financial-runtime-reuse -p 'test_*.py'
       - name: Pinned compiler, API fences and focused deadline regressions
         shell: bash
         working-directory: source
@@ -65,18 +78,29 @@ jobs:
           env = dict(os.environ)
           env['WHOLEPACT_FINANCIAL_BUILD_MODE'] = 'production'
           print(run(rustup+['python3', '-I', '-B', 'scripts/tests/test_v3_deadline_identity.py'], env=env, timeout=180))
+          print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-close-trace.py', '--source', str(repo), '--out', str(root/'close-traces'), '--run'], env=env, timeout=180))
           package = 'wholepact-financial-coordinator-origin'
           feature = 'coordinated-financial-workflow-v1'
           environments = {}
           for profile in ['minimal', 'production', 'observed-pixel', 'observed-semantic']:
               env = dict(os.environ)
               env['WHOLEPACT_FINANCIAL_BUILD_MODE'] = 'production' if profile == 'minimal' else profile
-              target = root/('target-'+profile)
+              target = root/'target-shared'
               env['CARGO_TARGET_DIR'] = str(target)
               environments[profile] = env
               args = rustup+['cargo', 'check', '--locked', '-p', package, '--lib', '--no-default-features', '--message-format=json']
               if profile != 'minimal': args += ['--features', feature]
               rows = [json.loads(line) for line in run(args, env=env).splitlines() if line.startswith('{')]
+              scripts = [row for row in rows if row.get('reason') == 'compiler-artifact' and row.get('target', {}).get('kind') == ['custom-build'] and row.get('manifest_path') == str(repo/'crates'/package/'Cargo.toml')]
+              assert len(scripts) == 1 and scripts[0]['target']['src_path'] == str(repo/'crates'/package/'build.rs'), profile
+              package_id = scripts[0]['package_id']
+              cfg_rows = [row for row in rows if row.get('reason') == 'build-script-executed' and row.get('package_id') == package_id]
+              expected_cfg = [] if profile in ['minimal','production'] else ['wholepact_financial_ci','wholepact_financial_external_ci'] + (['wholepact_financial_rendered_host_semantic_ci'] if profile == 'observed-semantic' else [])
+              assert len(cfg_rows) == 1 and cfg_rows[0]['cfgs'] == expected_cfg, profile
+              assert cfg_rows[0]['linked_libs'] == [] and cfg_rows[0]['linked_paths'] == [] and cfg_rows[0]['env'] == [], profile
+              for row in rows:
+                  if row.get('reason') == 'build-script-executed' and row.get('package_id') != package_id:
+                      assert not any(cfg.startswith('wholepact_financial_') for cfg in row.get('cfgs', [])), profile
               meta = [pathlib.Path(f) for row in rows if row.get('reason') == 'compiler-artifact' and row.get('target', {}).get('name') == 'wholepact_financial_coordinator_origin' for f in row.get('filenames', []) if f.endswith('.rmeta')]
               assert len(meta) == 1 and meta[0].is_file(), profile
               def probe(symbol, expected):
@@ -104,12 +128,55 @@ jobs:
           exe = executables[0]
           prefix = 'financial_workflow_clock::tests::'
           names = [prefix+n for n in ['fixed_full_workflow_clocks_share_one_original_epoch', 'full_offsets_shorten_and_never_restart_at_receive', 'full_cleanup_is_capped_without_action_extension', 'original_cleanup_retention_never_renews_and_floor_only_crosses_edges']]
-          assert len(names) == 4
+          packet_prefix = 'financial_workflow_channel::v3_delivery_packet_roundtrip_tests::'
+          names += [packet_prefix+n for n in ['prepared_packet_roundtrip_and_denials', 'receive_display_packet_roundtrip_and_denials', 'received_packet_roundtrip_and_denials', 'admit_read_display_packet_roundtrip_and_denials']]
+          assert len(names) == 8
           for name in names:
               listing = run([exe, '--list', '--exact', name], env=env, timeout=30)
               assert [line for line in listing.splitlines() if line.endswith(': test')] == [name+': test'], name
               result = run([exe, '--exact', name, '--test-threads=1'], env=env, timeout=30)
               assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in result, name
               print(name+': passed')
-          print('Four clock tests and four source-extracted inert-carrier regressions passed. Compiler/API preflight only; not authority-flow, native/full qualification, deployment or settlement.')
+          print('Four clock, four actual packet round-trip tests, and four source-extracted inert-carrier regressions passed. Compiler/API preflight only; not authority-flow, native/full qualification, deployment or settlement.')
           PY
+  affected-contexts:
+    needs: preflight
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/close-preflight-p45' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Fetch exact public event source without credentials
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          umask 022
+          public_git() {
+            env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" \
+              GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+              git -c credential.helper= -c http.extraheader= "$@"
+          }
+          public_git init source
+          public_git -C source fetch --no-tags --depth=1 https://github.com/stanleykosi/pactloom.git "$SOURCE_COMMIT"
+          public_git -C source checkout --detach FETCH_HEAD
+          test "$(public_git -C source rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test -z "$(public_git -C source status --porcelain --untracked-files=all)"
+      - name: Actual affected semantic test-context typechecks (not full native build)
+        shell: bash
+        working-directory: source
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/close-contexts/home" "$RUNNER_TEMP/close-contexts/cargo" "$RUNNER_TEMP/close-contexts/target-shared"
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/close-contexts/home" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" rustup toolchain install 1.99.0 --profile minimal --no-self-update
+          test "$(env -i PATH="$PATH" HOME="$RUNNER_TEMP/close-contexts/home" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" rustup run 1.99.0 rustc --version)" = 'rustc 1.99.0 (b940084d7 2026-09-28)'
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/close-contexts/home" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" PREFLIGHT_ROOT="$RUNNER_TEMP/close-contexts" SOURCE_COMMIT="$SOURCE_COMMIT" python3 -I -B scripts/ci-close-preflight-contexts.py
+      - name: Remove exact job-owned preflight directories
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf -- "$RUNNER_TEMP/close-contexts"
