@@ -112,7 +112,23 @@ fn selected_seed(
     target: &ManualRosterIntentTarget<'_>,
     access: &Access,
 ) -> Result<PrivateWorkspaceSeedV1> {
-    target.check_current(access)?;
+    selected_seed_with_current_reads(
+        engine, target, access,
+        || target.check_current(access),
+        || target.members(access).map(<[_]>::to_vec),
+    )
+}
+// One shared selection body preserves all original identity, access, record,
+// and roster predicates. Only source.check_current supplies the lexical pinned
+// reader; every other caller retains the original full projection behavior.
+fn selected_seed_with_current_reads(
+    engine: &Engine,
+    target: &ManualRosterIntentTarget<'_>,
+    access: &Access,
+    mut check_current: impl FnMut() -> Result<()>,
+    members: impl FnOnce() -> Result<Vec<wholepact_store::manual_enrollment::ManualEnrollmentRosterMember>>,
+) -> Result<PrivateWorkspaceSeedV1> {
+    check_current()?;
     let envelope = engine.load(access, &target.agreement().agreement_id)?;
     crate::planning::check_proposer(&envelope, access)?;
     if target.principal_id() != access.principal_id
@@ -139,7 +155,7 @@ fn selected_seed(
         return Err(denied());
     }
     // One actual checked roster snapshot, kept alive through all selections.
-    let actual_members = target.members(access)?.to_vec();
+    let actual_members = members()?;
     let mut members = Vec::new();
     let mut owners = BTreeMap::new();
     let mut accounts = BTreeSet::new();
@@ -167,7 +183,7 @@ fn selected_seed(
         );
     }
     members.sort_by(|a, b| a.identity.account_id.cmp(&b.identity.account_id));
-    target.check_current(access)?;
+    check_current()?;
     Ok(PrivateWorkspaceSeedV1 {
         agreement: envelope.view.agreement,
         terms_history: envelope.view.terms_history,
@@ -271,11 +287,19 @@ impl PrivateDurableWorkspaceSourceV1<'_> {
             &self.seed.owner_client_id,
             &self.seed.agreement.agreement_id,
         )?;
-        self.target.check_current(access)?;
-        if seed_digest(&selected_seed(self.engine, &self.target, access)?)? != self.seed_digest {
+        // The original principal check remains first. Audit once, then keep all
+        // original check positions under this same-connection read observation.
+        // The observation ends here; neither consent nor a source result is
+        // cached across calls, and no proof connection is touched.
+        let read = self.target.original_source_read_v3(access)?;
+        if seed_digest(&selected_seed_with_current_reads(
+            self.engine, &self.target, access,
+            || read.check_current(access),
+            || read.members(access).map(<[_]>::to_vec),
+        )?)? != self.seed_digest {
             return Err(denied());
         }
-        self.target.check_current(access)
+        read.check_current(access)
     }
     pub fn source_digest(&self) -> &str {
         &self.seed_digest

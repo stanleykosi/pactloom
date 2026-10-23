@@ -25,15 +25,18 @@ class IntegrationTests(unittest.TestCase):
   self.assertIn('clean=S.cleanup(token,tag)',text);self.assertIn('clean=trusted_cleanup(trusted)',text)
   self.assertNotIn('S.build_inputs(',text);self.assertNotIn("'cargo'",text)
  def test_exact_private_workflow_wiring(self):
-  self.assertEqual((ROOT/'scripts/qualification-gate-mode').read_bytes(),b'financial-semantic-reuse\n')
+  self.assertEqual((ROOT/'scripts/qualification-gate-mode').read_bytes(),b'financial-semantic\n')
   w=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
-  runtime=w.split('      - name: Actual synthetic financial runtime using verified producer binaries (not a fresh build)',1)[1].split('      - name:',1)[0]
-  self.assertIn("if: steps.mode.outputs.gate == 'financial-semantic-reuse'",runtime)
-  self.assertIn('launch_adapter.py" run',runtime)
-  for title in ('Fresh isolated two-signer financial UI','Preserve exact credential-free compiled financial bundle','Preserved P35 preparation, owned admissions and process-death reopen diagnostic (NOT full flow)'):
+  fresh=w.split('      - name: Fresh isolated two-signer financial UI',1)[1].split('      - name:',1)[0]
+  self.assertIn("steps.mode.outputs.gate == 'financial-semantic'",fresh)
+  self.assertIn('run: bash scripts/ci-financial-linux.sh',fresh)
+  for title in ('Fetch exact independent producer P and reviewed harness H without credentials','Acquire exact producer bundle with isolated read token','Actual synthetic financial runtime using verified producer binaries (not a fresh build)','Preserved P35 preparation, owned admissions and process-death reopen diagnostic (NOT full flow)'):
    block=w.split('      - name: '+title,1)[1].split('      - name:',1)[0]
    condition=next(line for line in block.splitlines() if line.strip().startswith('if:'))
-   self.assertNotIn("gate == 'financial-semantic-reuse'",condition)
+   self.assertNotIn("gate == 'financial-semantic'",condition)
+  cleanup=w.split('      - name: Verify financial containers, temporary images and build cache removed',1)[1].split('      - name:',1)[0]
+  self.assertIn("always() &&",cleanup);self.assertIn("gate == 'financial-semantic'",cleanup)
+  self.assertIn('scripts/ci-financial-supervisor.py cleanup',cleanup)
 if __name__=='__main__':unittest.main()
 
 class CleanupProfileTests(unittest.TestCase):

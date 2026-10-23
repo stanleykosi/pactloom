@@ -2716,3 +2716,140 @@ class PreparationFailureDomainTests(unittest.TestCase):
             rows=self.host_rows();rows[-1]['facts']=self.failure(stage=stage,**{'class':'EngineUnclassified'})
             with self.assertRaises(F.S.C.Rejected) as error:native.close_after_normal_proof(rows,None,F.C.SEMANTIC_PROFILE)
             self.assertEqual(error.exception.code,'observer_failure');c.terminal_click.assert_not_called();native.next_snapshot.assert_not_called()
+
+class SelectionHandoffTests(unittest.TestCase):
+    """Actual FullFlow/NativeScenario schedule; no real input or native authority."""
+    def harness(self,*,advance=5,target='Signer1',change=None,coverage=False,deadline=200,profile=F.C.EXTERNAL_PROFILE):
+        from unittest import mock
+        class ReachedReview(Exception):pass
+        state=dict(generation=0,clock=1,clicked=False,finished=False,effects=[],deadlines=[])
+        records=[dict(kind='SignerMilestone',facts=dict(owner=target,step=step)) for step in ('EntryOpened','Paired','AdmissionAudited')]
+        if target=='Signer2':records.append(dict(kind='SignerMilestone',facts=dict(owner='Signer1',step='SigningRetired')))
+        def widget(tag,x,owner=target,enabled=True):return dict(tag=tag,owner=owner,enabled=enabled,rect=[x,100,x+40,140])
+        class Observer:
+            expected_profile=profile
+            def host_view(self,*args,**kwargs):raise AssertionError('unexpected Host capture')
+            def read(self):return records+[dict(kind='Failure')] if change=='native_failure' and state['clicked'] else records
+            def next_snapshot(self,bound):
+                if state['finished']:raise ReachedReview()
+                state['generation']+=1;state['clock']+=1;state['deadlines'].append(bound)
+                F.C.require(state['clock']<bound,'deadline');g=state['generation']
+                advanced=state['clicked'] and advance is not None and g>=advance
+                if change=='unconsumed_phase' and g>=2:advanced=True
+                phase='V3EnrollmentReview' if advanced else 'V3Paired'
+                widgets=([widget('ReviewAcknowledgement',500),widget('FinalV3Enrollment',700)] if advanced else
+                    [widget('ReviewV3Enrollment',100,owner='Signer2' if change=='wrong_owner' else target,enabled=change!='disabled'),widget('SelectNextV3',300)])
+                widgets.append(widget('ScrollRegion',900,owner=None))
+                s=observed_snapshot(phase=phase,subphase='None',owner=target,view_generation=g,focused=True,
+                    secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=widgets,
+                    host_observation=dict(revision=17 if state['clicked'] and coverage else 16,nonws_end=200 if state['clicked'] and coverage else 100,context_valid=True,entry='Idle',editor=None,view=None))
+                if profile==F.C.SEMANTIC_PROFILE:s['host_view_id']=None
+                if state['clicked'] and not advanced:
+                    if change=='invalid_host':s['host_observation']['context_valid']=False
+                    if change=='closed_host':s['host_observation']['entry']='Closed'
+                    if change=='focus':s['focused']=False
+                    if change=='revoked':s['phase']='Revoked'
+                    if change=='secret':s['secret_input']=True
+                    if change=='host':s['host_input']=True;s['host_observation']['entry']='Writing';s['widgets']=[]
+                return s
+        c=mock.Mock();fixture=mock.Mock(deadline_ns=deadline)
+        fixture.check.side_effect=lambda:F.C.require(state['clock']<deadline,'deadline')
+        operator=mock.Mock();flow=F.FullFlow(c,fixture,Observer(),None,operator)
+        flow.startup_index=13;flow.startup_focus_seen=True;flow.host_lines=17;flow.commands_instruction_observed=True
+        flow.host_occurrences.frontier=100;flow.host_occurrences.last_end=100;flow.host_occurrences.last_revision=16
+        def click(x,y):
+            state['effects'].append((state['generation'],'click',x))
+            if x==120:
+                state['clicked']=True
+                if coverage:flow.host_ignored=(17,200,0);flow.host_coverage_context=(17,200)
+                if change=='prepared':flow.host_prepared=('not-dispatched','not-input')
+            elif x==720:state['finished']=True
+        c.click.side_effect=click
+        c.wait_render_progress.side_effect=lambda:state['effects'].append((state['generation'],'progress',None))
+        c.scroll_up.side_effect=lambda *a:state['effects'].append((state['generation'],'wheel',None))
+        c.scroll_down.side_effect=c.scroll_up.side_effect
+        return flow,c,state,ReachedReview
+    def test_old_loop_fails_on_competing_fallback_or_host_coverage(self):
+        from unittest import mock
+        for coverage in (False,True):
+            flow,c,state,stop=self.harness(coverage=coverage)
+            with mock.patch.object(flow,'selection_handoff_pending',return_value=False):
+                with self.assertRaises(F.C.Rejected) as error:flow.run()
+            self.assertEqual(error.exception.code,'input_phase')
+            self.assertEqual(flow.location,dict(phase='V3Paired',subphase='None',owner='Signer1'))
+            self.assertEqual([x for _,effect,x in state['effects'] if effect=='click'],[120])
+            self.assertEqual(flow.actions,1)
+    def test_after_dispatch_observation_only_then_real_guarded_review(self):
+        for role in ('Signer1','Signer2'):
+            for coverage in (False,True):
+                flow,c,state,stop=self.harness(target=role,advance=10,coverage=coverage)
+                with self.assertRaises(stop):flow.run()
+                self.assertEqual([x for _,effect,x in state['effects'] if effect=='click'],[120,520,720])
+                self.assertEqual([e for e in state['effects'] if 4<=e[0]<10],[])
+                self.assertEqual(flow.actions,3);self.assertIsNone(flow.pending_selection)
+                self.assertEqual(set(state['deadlines']),{200});self.assertEqual(flow.fixture.deadline_ns,200)
+                flow.operator.signal.assert_any_call(role,'audit_stop',flow.records[2])
+                c.type_ascii.assert_not_called();c.focus.assert_not_called();c._command.assert_not_called()
+    def test_no_transition_keeps_original_deadline_and_one_effect(self):
+        flow,c,state,stop=self.harness(advance=None,deadline=30)
+        with self.assertRaises(F.C.Rejected) as error:flow.run()
+        self.assertEqual(error.exception.code,'deadline');self.assertEqual(flow.actions,1)
+        self.assertEqual([e for e in state['effects'] if e[0]>=4],[])
+        self.assertEqual(set(state['deadlines']),{30});self.assertEqual(flow.pending_selection,('V3Paired','None','Signer1'))
+    def test_first_unconsumed_action_phase_change_still_rejects(self):
+        flow,c,state,stop=self.harness(change='unconsumed_phase')
+        with self.assertRaises(F.C.Rejected) as error:flow.run()
+        self.assertEqual(error.exception.code,'input_phase');c.click.assert_not_called()
+        self.assertIsNone(flow.pending_selection);self.assertEqual(flow.actions,0)
+    def test_wait_does_not_hide_failure_focus_protection_or_host_preparation(self):
+        for change,code in [('native_failure','observer_failure'),('revoked','source_failure'),('focus','input_phase'),('secret','input_phase'),('host','input_phase'),('prepared','input_phase'),('invalid_host','input_phase'),('closed_host','input_phase')]:
+            flow,c,state,stop=self.harness(advance=10,change=change)
+            with self.assertRaises(F.C.Rejected) as error:flow.run()
+            self.assertEqual(error.exception.code,code,change);self.assertEqual(flow.actions,1)
+            self.assertEqual([x for _,effect,x in state['effects'] if effect=='click'],[120])
+    def test_disabled_and_wrong_owner_never_latch_a_selection(self):
+        for change in ('disabled','wrong_owner'):
+            flow,c,state,stop=self.harness(change=change)
+            s=flow.snapshot()
+            with self.assertRaises(F.C.Rejected) as error:flow.press(s,'ReviewV3Enrollment','Signer1')
+            self.assertEqual(error.exception.code,'input_disabled')
+            self.assertIsNone(flow.pending_selection);self.assertEqual(flow.actions,0);c.click.assert_not_called()
+    def test_select_next_dispatch_also_waits_without_second_input(self):
+        flow,c,state,stop=self.harness(change='disabled',advance=None,deadline=30)
+        with self.assertRaises(F.C.Rejected) as error:flow.run()
+        self.assertEqual(error.exception.code,'deadline')
+        self.assertEqual([x for _,effect,x in state['effects'] if effect=='click'],[320])
+        self.assertEqual([e for e in state['effects'] if e[0]>=4],[])
+        self.assertEqual(flow.pending_selection,('V3Paired','None','Signer1'));self.assertEqual(flow.actions,1)
+    def test_actual_semantic_profile_reproduces_and_passively_resumes_under_original_bound(self):
+        from unittest import mock
+        for coverage in (False,True):
+            old,c,state,stop=self.harness(profile=F.C.SEMANTIC_PROFILE,coverage=coverage)
+            with mock.patch.object(F.S.time,'monotonic_ns',side_effect=lambda:state['clock']),mock.patch.object(old,'selection_handoff_pending',return_value=False):
+                with self.assertRaises(F.C.Rejected) as error:old.run()
+            self.assertEqual(error.exception.code,'input_phase');self.assertEqual(old.actions,1)
+            flow,c,state,stop=self.harness(profile=F.C.SEMANTIC_PROFILE,coverage=coverage,advance=10)
+            with mock.patch.object(F.S.time,'monotonic_ns',side_effect=lambda:state['clock']),mock.patch.object(flow.native,'wait_ceiling',wraps=flow.native.wait_ceiling) as ceiling:
+                # NativeScenario retained the actual bound callback at construction.
+                self.assertEqual(flow.native.wait_ceiling(),200)
+                with self.assertRaises(stop):flow.run()
+                self.assertGreater(ceiling.call_count,1)
+            self.assertEqual([e for e in state['effects'] if 4<=e[0]<10],[])
+            self.assertEqual([x for _,effect,x in state['effects'] if effect=='click'],[120,520,720])
+            self.assertEqual(set(state['deadlines']),{200});self.assertEqual(flow._startup_ceiling,200)
+        flow,c,state,stop=self.harness(profile=F.C.SEMANTIC_PROFILE,advance=None,deadline=30)
+        with mock.patch.object(F.S.time,'monotonic_ns',side_effect=lambda:state['clock']):
+            with self.assertRaises(F.C.Rejected) as error:flow.run()
+        self.assertEqual(error.exception.code,'deadline');self.assertEqual(flow.actions,1)
+        self.assertEqual(set(state['deadlines']),{30});self.assertEqual(flow._startup_ceiling,30)
+    def test_native_click_snapshot_precedes_selection_transition_and_all_actions_exit(self):
+        import re
+        source=(ROOT.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
+        self.assertLess(source.index('if crate::financial_ci::finish('),source.index('let intent = self.intent.take();'))
+        self.assertLess(source.index('let intent = self.intent.take();'),source.index('self.apply_intent(intent, frame, &ctx)'))
+        tail=source.split('fn apply_intent(',1)[1]
+        expected=dict(ReviewV3Pair='V3PairReview',ReviewV3Enrollment='V3EnrollmentReview',ReviewV3Manifest='V3ManifestReview',ReviewV3RedisclosureRead='V3RedisclosureReadReview',ReviewV3Redisclose='V3RediscloseReview',ConfigureV3Owner='V3OwnerConfiguring',ReviewV3PrepareRead='V3PrepareReadReview',ReviewV3Receive='V3ReceiveReview',ReviewV3AdmitRead='V3AdmitReadReview',ReviewV3Admit='V3AdmitReview',ReviewV3Audit='V3AuditReview',ConfigureFinancialSetup='FinancialSetupConfiguring',Configure='Configuring',ConfigureV3='V3Configuring',SelectNextV3='Selecting')
+        self.assertEqual(set(expected),set(F.SELECT)|{'SelectNextV3'})
+        for action,phase in expected.items():
+            arm=re.split(r'Intent::'+action+r'\b',tail,maxsplit=1)[1].split('\n            Intent::',1)[0]
+            self.assertEqual(re.findall(r'self.transition\(Phase::(\w+), frame\)',arm),[phase],action)

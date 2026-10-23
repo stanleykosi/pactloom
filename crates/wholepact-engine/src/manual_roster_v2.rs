@@ -8,6 +8,35 @@ pub struct ManualRosterIntentTarget<'engine> {
     intent: ManualEnrollmentIntentTarget<'engine>,
     head: ManualEnrollmentRosterHead<'engine>,
 }
+/// Private lexical source read, never retained across permission callbacks.
+pub(crate) struct OriginalManualRosterSourceReadV3<'target, 'engine> {
+    target: &'target ManualRosterIntentTarget<'engine>,
+    read: wholepact_store::manual_enrollment::OriginalManualRosterReadV3<'target, 'engine>,
+}
+impl OriginalManualRosterSourceReadV3<'_, '_> {
+    pub(crate) fn check_current(&self, access: &Access) -> Result<()> {
+        self.target.intent.check_current(access)?;
+        self.read.check_current_v3().map_err(store_error)
+    }
+    pub(crate) fn members(
+        &self,
+        access: &Access,
+    ) -> Result<&[wholepact_store::manual_enrollment::ManualEnrollmentRosterMember]> {
+        self.check_current(access)?;
+        let members = self.read.members_v3().map_err(store_error)?;
+        for member in members {
+            let record = self.target.intent.store
+                .current_agreement_record(&member.scope.agreement_id)
+                .map_err(store_error)?;
+            let envelope = decode(&record)?;
+            if !access.permits_agreement(&record.id, &envelope.owner_client_id) {
+                return Err(manual_denied());
+            }
+        }
+        self.check_current(access)?;
+        Ok(members)
+    }
+}
 impl Engine {
     pub fn manual_roster_intent_target<'engine>(
         &'engine self,
@@ -69,6 +98,17 @@ impl ManualRosterIntentTarget<'_> {
     pub fn check_current(&self, access: &Access) -> Result<()> {
         self.intent.check_current(access)?;
         self.head.check_current().map_err(store_error)
+    }
+}
+impl<'engine> ManualRosterIntentTarget<'engine> {
+    pub(crate) fn original_source_read_v3(
+        &self,
+        access: &Access,
+    ) -> Result<OriginalManualRosterSourceReadV3<'_, 'engine>> {
+        // Preserve the original intent/access check BEFORE the full head read.
+        self.intent.check_current(access)?;
+        let read = self.head.original_read_v3().map_err(store_error)?;
+        Ok(OriginalManualRosterSourceReadV3 { target: self, read })
     }
 }
 

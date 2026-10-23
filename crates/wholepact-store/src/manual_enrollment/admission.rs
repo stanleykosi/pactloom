@@ -799,7 +799,7 @@ pub use selection_read_roster_v2::ManualRosterCandidateLocalExclusionsV2;
 
 #[path = "roster_head.rs"]
 mod roster_head;
-pub use roster_head::{ManualEnrollmentRosterHead, ManualEnrollmentRosterMember};
+pub use roster_head::{ManualEnrollmentRosterHead, ManualEnrollmentRosterMember, OriginalManualRosterReadV3};
 
 #[path = "roster_admission.rs"]
 mod roster_admission;

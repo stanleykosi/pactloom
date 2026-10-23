@@ -909,7 +909,7 @@ mod kernel;
 #[cfg(all(feature = "manual-admission", target_os = "linux"))]
 pub use admission::{
     ManualPermanentStopReceiptV1, ManualAuditAppendReceipt, ManualCandidateLocalExclusions, ManualEnrollmentRosterHead,
-    ManualEnrollmentRosterMember, ManualRosterCandidateLocalExclusionsV2,
+    ManualEnrollmentRosterMember, ManualRosterCandidateLocalExclusionsV2, OriginalManualRosterReadV3,
 };
 #[cfg(test)]
 mod tests;
