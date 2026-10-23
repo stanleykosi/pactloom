@@ -89,7 +89,7 @@ class Tests(unittest.TestCase):
   with self.assertRaises(V.A.Rejected):V.A.validate_manifest(original,old,self.inventory,V.QUALIFICATION_PROFILE)
 
 
- def test_p26_has_no_scenario_or_diagnostic_exception(self):
+ def test_p26_has_no_scenario_or_diagnostic_exception_without_annex(self):
   self.assertEqual(len(V.RUNTIME_ONLY),8)
   for path in ('scripts/ci-financial-scenario.py','scripts/ci-financial-contract.py'):
    self.assertNotIn(path,V.RUNTIME_ONLY)
@@ -129,3 +129,40 @@ class Tests(unittest.TestCase):
   self.assertEqual(manifest['recipe']['production_rustflags'],'')
 
 if __name__=='__main__':unittest.main()
+
+class ExactDiagnosticAnnexTests(unittest.TestCase):
+ def sources(self):
+  p={k:'a'*64 for k in V.RUNTIME_ONLY};p['Cargo.lock']='b'*64;p['scripts/ci-financial-scenario.py']='c'*64
+  h=p.copy()
+  for path,pair in V.DIAGNOSTIC_COMPATIBILITY['files'].items():
+   p[path]=pair['producer_mode_sha256'];h[path]=pair['harness_mode_sha256']
+  return p,h
+ def test_exact_reviewed_pairs_only_and_no_annex_requires_original_equality(self):
+  p,h=self.sources();annex=copy.deepcopy(V.DIAGNOSTIC_COMPATIBILITY)
+  self.assertEqual(set(V.equivalent(p,h,annex)),set(annex['files']))
+  self.assertEqual(V.equivalent(p,p),[])
+  for a,b,kw in ((p,h,{}),(p,p,{'diagnostic_compatibility':annex}),
+    (h,p,{'diagnostic_compatibility':annex}),(p,{**h,'Cargo.lock':'e'*64},{'diagnostic_compatibility':annex}),
+    (p,{**h,'scripts/ci-financial-scenario.py':'e'*64},{'diagnostic_compatibility':annex})):
+   with self.assertRaises(V.A.Rejected):V.equivalent(a,b,**kw)
+ def test_each_pair_required_actual_mode_bound_bytes(self):
+  p,h=self.sources();annex=copy.deepcopy(V.DIAGNOSTIC_COMPATIBILITY)
+  for path,pair in annex['files'].items():
+   for value in (p[path],'e'*64,hashlib.sha256(b'100755\0'+(pathlib.Path(__file__).resolve().parents[2]/path).read_bytes()).hexdigest()):
+    with self.assertRaises(V.A.Rejected):V.equivalent(p,{**h,path:value},annex)
+   with self.assertRaises(V.A.Rejected):V.equivalent({**p,path:'f'*64},h,annex)
+ def test_unknown_missing_swapped_or_mistyped_annex_fields_reject(self):
+  base=V.DIAGNOSTIC_COMPATIBILITY;bad=[{},base|{'version':True},base|{'version':2},base|{'name':'future'},base|{'extra':'x'}]
+  for path in base['files']:
+   missing=copy.deepcopy(base);del missing['files'][path];bad.append(missing)
+   extra=copy.deepcopy(base);extra['files']['scripts/ci-financial-scenario.py']=extra['files'][path].copy();bad.append(extra)
+   for key in base['files'][path]:
+    for value in (True,None,'100755' if key.endswith('_mode') else '0'*40):
+     changed=copy.deepcopy(base);changed['files'][path][key]=value;bad.append(changed)
+   swapped=copy.deepcopy(base)
+   for suffix in ('git_blob','sha256','mode_sha256'):
+    a,b='producer_'+suffix,'harness_'+suffix
+    swapped['files'][path][a],swapped['files'][path][b]=swapped['files'][path][b],swapped['files'][path][a]
+   bad.append(swapped)
+  for annex in bad:
+   with self.assertRaises(V.A.Rejected):V.validate_diagnostic_compatibility(annex)

@@ -18,14 +18,14 @@ PARSER_SHA='53ae1125701112917530d45c04df18e785afa8e973a9d9b7d0de0a77a95dee50'
 assert hashlib.sha256((HERE/'producer_artifacts.py').read_bytes()).hexdigest()==PARSER_SHA
 A=_reviewed_parser()
 QUALIFICATION_PROFILE='coordinated-financial-rendered-host-semantic-v1'
-POLICY='p26-rendered-host-semantic-reuse-v1'
+POLICY='p26-observation-diagnostics-reuse-v1'
 
 PRODUCER=dict(repository='stanleykosi/pactloom',source='8f1d67bdef50d886955d026e5fce2c8e8635ecbb',
  source_tree='82591c243dc981cafee4e768db3339ae31994ecc',run_id=39864693253,attempt=1)
 JOB_ID=120123827440
 # Exact existing runtime files, NOT a suffix/directory exclusion. Contract,
 # output projection, fixture profile/scenario, image and orchestration are fixed.
-# No source exceptions or annexes are accepted by the P26 v4 policy.
+# Original eight paths unchanged. The separate v5 annex admits only two exact reviewed diagnostic byte/mode pairs.
 RUNTIME_ONLY=frozenset((
  'scripts/ci-financial-container.py',
  'scripts/ci-financial-fixture.py',
@@ -37,6 +37,8 @@ RUNTIME_ONLY=frozenset((
  'scripts/tests/test_ci_financial_fixture_diagnostics.py',
 ))
 
+
+DIAGNOSTIC_COMPATIBILITY={'version': 1, 'name': 'observer30-exact-diagnostics-v1', 'files': {'scripts/ci-financial-contract.py': {'producer_git_blob': 'af880f7dbbcfce22c22ccc35b2828c3be5cf893d', 'producer_sha256': 'c273975d5384b6c0d61c15881cce8da77d57fe2a75c9fccac489892a8ea97bc2', 'producer_mode': '100644', 'producer_mode_sha256': '3c355c49a6b7c57f4ed5a59658fa9d6300fe916e3e87f2e9662216fcc50a49c4', 'harness_git_blob': '8cb62540f1405d9ed016ebf92c95edd0bb719244', 'harness_sha256': 'f495a9f6adc783b6c8ad6427e7f5f19d1237fdd9a9a385d34683314f03b700dd', 'harness_mode': '100644', 'harness_mode_sha256': '01b201d560c3f81eb4a20f9b204ac6116553964f1a09b9395d54242123216b41'}, 'scripts/ci-financial-supervisor.py': {'producer_git_blob': 'ab44f75fc60ae6e67ec9e8bf3981492effb5d6ab', 'producer_sha256': '3f7496bb716869622e77b37b061262c8053a7518a8b3a7f48f11be0ff0deb6fd', 'producer_mode': '100644', 'producer_mode_sha256': '1fab5efee2a6913acc944eaf2c821331edbaecbeb12b07a6fb167ec01a0477fb', 'harness_git_blob': '36d051b1666c5f434230b7ad3af0ada59356a5c9', 'harness_sha256': '50118fd69f010a06c93177095f1636aa652a12796ce7fceedb5364fc0f8d02ad', 'harness_mode': '100644', 'harness_mode_sha256': '0e752367fde4adc1adb58c5c40a05887152f753dfb51c8da27a043429f679710'}}}
 
 def require(ok,reason):
     if not ok:raise A.Rejected(reason)
@@ -71,11 +73,29 @@ def inventory_checkout(root,commit):
     return tree,result
 
 
-def equivalent(producer,current):
+def validate_diagnostic_compatibility(annex):
+    require(type(annex) is dict and set(annex)=={'version','name','files'},'diagnostic_annex_schema')
+    require(type(annex['version']) is int and annex['version']==1 and type(annex['name']) is str,'diagnostic_annex_type')
+    require(type(annex['files']) is dict and set(annex['files'])==set(DIAGNOSTIC_COMPATIBILITY['files']),'diagnostic_annex_paths')
+    for path,pair in annex['files'].items():
+        require(type(pair) is dict and set(pair)==set(DIAGNOSTIC_COMPATIBILITY['files'][path]),'diagnostic_annex_pair')
+        require(all(type(v) is str for v in pair.values()),'diagnostic_annex_type')
+    require(annex==DIAGNOSTIC_COMPATIBILITY,'diagnostic_annex_pin')
+    return annex
+
+
+def equivalent(producer,current,diagnostic_compatibility=None):
     A.closure(producer);A.closure(current)
     require(set(producer)==set(current),'tracked_path_set')
     changed=sorted(name for name in producer if producer[name]!=current[name])
-    require(set(changed)<=RUNTIME_ONLY,'native_or_unreviewed_input_changed')
+    exceptions=set()
+    if diagnostic_compatibility is not None:
+        annex=validate_diagnostic_compatibility(diagnostic_compatibility)
+        for path,pair in annex['files'].items():
+            require(path in changed and producer.get(path)==pair['producer_mode_sha256']
+                and current.get(path)==pair['harness_mode_sha256'],'diagnostic_annex_source')
+            exceptions.add(path)
+    require(set(changed)<=RUNTIME_ONLY|exceptions,'native_or_unreviewed_input_changed')
     return changed
 
 
@@ -94,7 +114,7 @@ def archive_digest(archive,pins):
     return digest
 
 
-def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventory,harness):
+def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventory,harness,diagnostic_compatibility=None):
     """Pins are independently reviewed API/log facts; never manifest-supplied.
 
     ZIP must contain exactly build.tar with independently pinned bytes.
@@ -129,13 +149,14 @@ def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventor
     require(harness['repository']==PRODUCER['repository'] and
         A.COMMIT.fullmatch(harness['source']) is not None and
         A.COMMIT.fullmatch(harness['source_tree']) is not None,'harness_identity')
-    changes=equivalent(producer_inventory,current_inventory)
+    changes=equivalent(producer_inventory,current_inventory,diagnostic_compatibility)
     require(not changes or (harness['source']!=PRODUCER['source'] and
         harness['source_tree']!=PRODUCER['source_tree']),'contradictory_harness_identity')
-    evidence=dict(schema=4,policy=POLICY,qualification_profile=QUALIFICATION_PROFILE,native_producer=PRODUCER.copy(),harness=harness.copy(),
+    evidence=dict(schema=5,policy=POLICY,qualification_profile=QUALIFICATION_PROFILE,native_producer=PRODUCER.copy(),harness=harness.copy(),
         original_manifest=original,current_source_inventory=current_inventory.copy(),
         permitted_runtime_changes=[name for name in changes if name in RUNTIME_ONLY],artifact_pins=pins.copy(),
         native_binaries_reused=True,native_binaries_freshly_compiled=False,
         runtime_verified=False,synthetic_full_native_verified=False,
         public_chain_verified=False,dispatch_requested=False)
+    if diagnostic_compatibility is not None:evidence['diagnostic_compatibility']=diagnostic_compatibility.copy()
     return evidence

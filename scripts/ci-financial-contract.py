@@ -358,6 +358,24 @@ def cached_progress_diagnostic(records,expected_profile):
         row[index]=min(2,row[index]+1)
     return validate_progress_diagnostic(value)
 
+# Cached actor-local observation timing, never current time or authority evidence.
+def validate_observation_timing_diagnostic(value):
+    exact(value,('version','availability','observer_remaining_ns','coordinator_last_elapsed_ns','last_phase'))
+    require(type(value['version']) is int and value['version']==1,'record_shape')
+    require(value['availability'] in ('Observed','Unavailable'),'record_shape')
+    remaining=value['observer_remaining_ns'];last=value['coordinator_last_elapsed_ns'];phase=value['last_phase']
+    if value['availability']=='Unavailable':
+        require(remaining is None and last is None and phase is None,'record_shape');return value
+    require(integer(remaining,1,ORIGINAL_NS),'record_shape')
+    require(last is None or integer(last,0,ORIGINAL_NS),'record_shape')
+    if phase is not None:
+        exact(phase,('phase','subphase','owner','first_elapsed_ns','last_elapsed_ns','snapshot_count'))
+        require(type(phase['phase']) is str and phase['phase'] in PHASES and type(phase['subphase']) is str and phase['subphase'] in SUBPHASES and phase['owner'] in (None,'Signer1','Signer2'),'record_shape')
+        require(last is not None and integer(phase['first_elapsed_ns'],0,last) and
+                integer(phase['last_elapsed_ns'],phase['first_elapsed_ns'],last) and
+                integer(phase['snapshot_count'],1,MAX_RECORDS),'record_shape')
+    return value
+
 # Failure-only harness observations, never native milestones or success evidence.
 HOST_DIAGNOSTIC_CATEGORIES=frozenset(('none','tail_not_visible','capture_guard','host_context','host_capture_changed','host_capture_count','host_capture_grammar','host_occurrence_replay','host_entry_changed','host_capture_limit'))
 HOST_DIAGNOSTIC_STAGES=frozenset(('Unobserved','Profile','Workspace','Storage','Financial','Enrollment','Commands','Operational','Approval'))

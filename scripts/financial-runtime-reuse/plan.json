@@ -1,6 +1,6 @@
 {
-  "version": 4,
-  "policy": "p26-rendered-host-semantic-reuse-v1",
+  "version": 5,
+  "policy": "p26-observation-diagnostics-reuse-v1",
   "qualification_profile": "coordinated-financial-rendered-host-semantic-v1",
   "producer": {
     "repository": "stanleykosi/pactloom",
@@ -11,8 +11,8 @@
   },
   "harness": {
     "repository": "stanleykosi/pactloom",
-    "source": "ca9272d8786c5152c538effdcc7ed10144ad0bac",
-    "source_tree": "c343ba9fa73fd6a5a77a8922552964a638578014"
+    "source": "d6ff33c5fa0186d4ba06a7debae756af34f705ec",
+    "source_tree": "b786e8e684e57e3133c3cabaa8eaa3ade18977a2"
   },
   "artifact_pins": {
     "archive_sha256": "f31d67a28c558cd273cc8060605182ba54c5a12108a523e010e631a957436db9",
@@ -25,8 +25,37 @@
     "run": "a35061569e2bc84815db8bda732967cb0a6ec3e5d0f3b6c785e4d81330d7d743"
   },
   "reviewed_runtime_changes": {
+    "scripts/ci-financial-container.py": "a0f3d65ac190a354364956b4e75f2c02f6ca9e4a702dbf8668d5331e97c7772c",
     "scripts/ci-financial-fixture.py": "8157587dda9f2bc1b6b4aebc897fa33c96965830f362138933a791b883d25ea2",
     "scripts/ci-financial-flow.py": "0fd2dba028892706df8bd0f5f7989b12d26f9e46b1b29b1cdf87dc236b5f47be",
-    "scripts/tests/test_ci_financial_observer.py": "e7d4130c01aead49c1a638aa88d116b113eb1f8fb8c244954a4da53e9b297588"
+    "scripts/ci-financial-observer.py": "b9a026c89823b395ff383c4ce51fbe81b09c4e56eb9e348953c46a1536839704",
+    "scripts/tests/test_ci_financial_fixture_diagnostics.py": "360275baa12892e29f00790fcb409012f38e7e00f23069dfc11a79380377422d",
+    "scripts/tests/test_ci_financial_observer.py": "45e4ba444df7799b790eeb11bceee275181af4e53af15ad040884d130b3f6777"
+  },
+  "diagnostic_compatibility": {
+    "version": 1,
+    "name": "observer30-exact-diagnostics-v1",
+    "files": {
+      "scripts/ci-financial-contract.py": {
+        "producer_git_blob": "af880f7dbbcfce22c22ccc35b2828c3be5cf893d",
+        "producer_sha256": "c273975d5384b6c0d61c15881cce8da77d57fe2a75c9fccac489892a8ea97bc2",
+        "producer_mode": "100644",
+        "producer_mode_sha256": "3c355c49a6b7c57f4ed5a59658fa9d6300fe916e3e87f2e9662216fcc50a49c4",
+        "harness_git_blob": "8cb62540f1405d9ed016ebf92c95edd0bb719244",
+        "harness_sha256": "f495a9f6adc783b6c8ad6427e7f5f19d1237fdd9a9a385d34683314f03b700dd",
+        "harness_mode": "100644",
+        "harness_mode_sha256": "01b201d560c3f81eb4a20f9b204ac6116553964f1a09b9395d54242123216b41"
+      },
+      "scripts/ci-financial-supervisor.py": {
+        "producer_git_blob": "ab44f75fc60ae6e67ec9e8bf3981492effb5d6ab",
+        "producer_sha256": "3f7496bb716869622e77b37b061262c8053a7518a8b3a7f48f11be0ff0deb6fd",
+        "producer_mode": "100644",
+        "producer_mode_sha256": "1fab5efee2a6913acc944eaf2c821331edbaecbeb12b07a6fb167ec01a0477fb",
+        "harness_git_blob": "36d051b1666c5f434230b7ad3af0ada59356a5c9",
+        "harness_sha256": "50118fd69f010a06c93177095f1636aa652a12796ce7fceedb5364fc0f8d02ad",
+        "harness_mode": "100644",
+        "harness_mode_sha256": "0e752367fde4adc1adb58c5c40a05887152f753dfb51c8da27a043429f679710"
+      }
+    }
   }
 }

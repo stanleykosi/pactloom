@@ -9,16 +9,16 @@ ROOT=HERE.parents[1]
 class IntegrationTests(unittest.TestCase):
  def test_concrete_plan_pins_and_exact_delta(self):
   plan=L.validate_plan(json.loads((HERE/'plan.json').read_text()))
-  self.assertEqual(plan['harness']['source'],'ca9272d8786c5152c538effdcc7ed10144ad0bac')
-  self.assertEqual(plan['harness']['source_tree'],'c343ba9fa73fd6a5a77a8922552964a638578014')
+  self.assertEqual(plan['harness']['source'],'d6ff33c5fa0186d4ba06a7debae756af34f705ec')
+  self.assertEqual(plan['harness']['source_tree'],'b786e8e684e57e3133c3cabaa8eaa3ade18977a2')
   self.assertEqual(plan['artifact_pins']['artifact_id'],12466205927)
-  self.assertEqual(set(plan['reviewed_runtime_changes']),{'scripts/ci-financial-fixture.py','scripts/ci-financial-flow.py','scripts/tests/test_ci_financial_observer.py'})
+  self.assertEqual(set(plan['reviewed_runtime_changes']),{'scripts/ci-financial-container.py','scripts/ci-financial-fixture.py','scripts/ci-financial-flow.py','scripts/ci-financial-observer.py','scripts/tests/test_ci_financial_fixture_diagnostics.py','scripts/tests/test_ci_financial_observer.py'})
   self.assertNotIn('launcher',plan)
   self.assertEqual(plan['policy'],L.V.POLICY)
   self.assertEqual(plan['qualification_profile'],L.V.QUALIFICATION_PROFILE)
-  self.assertEqual(plan['version'],4)
+  self.assertEqual(plan['version'],5)
   self.assertNotIn('transition_compatibility',plan)
-  self.assertNotIn('diagnostic_compatibility',plan)
+  self.assertEqual(plan['diagnostic_compatibility'],L.V.DIAGNOSTIC_COMPATIBILITY)
   for path,pin in plan['reviewed_runtime_changes'].items():
    data=(ROOT/path).read_bytes()
    self.assertEqual(hashlib.sha256(b'100644\0'+data).hexdigest(),pin)

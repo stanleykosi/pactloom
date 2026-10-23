@@ -242,7 +242,8 @@ def emit_cached_progress_failure(flow):
     # A rejected diagnostic must not replace the original failure result.
     if flow is None:return
     try:
-        value=C.cached_progress_diagnostic(flow.records,flow.expected_profile)
+        value=flow.observer.failure_diagnostics()['progress']
+        if value is None:return
         encoded=json.dumps(C.validate_progress_diagnostic(value),separators=(',',':'))
     except Exception:return
     print('CI_FINANCIAL_PROGRESS_DIAGNOSTIC '+encoded,flush=True)
@@ -261,10 +262,19 @@ def emit_cached_native_failure(flow):
     # No new read/clock/input here; unavailable cached evidence stays unavailable.
     if flow is None or flow.expected_profile!=C.SEMANTIC_PROFILE:return
     try:
-        value=C.cached_native_failure_diagnostic(flow.records,flow.expected_profile)
+        value=flow.observer.failure_diagnostics()['native']
         encoded=json.dumps(C.validate_native_failure_diagnostic(value),separators=(',',':'))
         print('CI_FINANCIAL_NATIVE_FAILURE_DIAGNOSTIC '+encoded,flush=True)
     except Exception:return # never replace the original failure or cleanup
+
+
+def emit_cached_observation_timing_failure(flow):
+    if flow is None:return
+    try:
+        value=flow.observer.failure_diagnostics()['timing']
+        encoded=json.dumps(C.validate_observation_timing_diagnostic(value),separators=(',',':'))
+        print('CI_FINANCIAL_OBSERVATION_TIMING_DIAGNOSTIC '+encoded,flush=True)
+    except Exception:return # preserve original failure; no late collection
 
 
 def main():
@@ -300,6 +310,7 @@ def main():
         emit_cached_progress_failure(flow)
         emit_cached_host_failure(flow)
         emit_cached_native_failure(flow)
+        emit_cached_observation_timing_failure(flow)
         # No raw exception/path/Host output escapes. Outer owner destroys whole
         # isolated namespace on failure; never report rescue cleanup as normal.
         print('CI_FINANCIAL_RESULT '+json.dumps(OUT.failure(code,expected_profile),separators=(',',':')),flush=True)

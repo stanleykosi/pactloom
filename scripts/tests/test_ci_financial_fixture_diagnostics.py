@@ -226,12 +226,13 @@ class CachedProgressDiagnostics(unittest.TestCase):
         self.assertEqual(stream.getvalue(),'')
     def test_container_uses_cached_records_only_and_invalid_cache_emits_nothing(self):
         flow=mock.Mock();flow.expected_profile=M.C.EXTERNAL_PROFILE
-        flow.records=[self.record('NormalFinished')]
+        flow.records=[]  # Stale flow cache must not control failure reporting.
+        flow.observer.failure_diagnostics.return_value={'progress':M.C.cached_progress_diagnostic([self.record('NormalFinished')],M.C.EXTERNAL_PROFILE)}
         out=io.StringIO()
         with contextlib.redirect_stdout(out):M.emit_cached_progress_failure(flow)
         value=json.loads(out.getvalue().split(' ',1)[1]);self.assertEqual(value['normal_counts'],[0,0,0,1])
         flow.observer.read.assert_not_called();flow.snapshot.assert_not_called()
-        flow.records=[self.record('NormalFinished')|{'private':'secret'}];out=io.StringIO()
+        flow.observer.failure_diagnostics.return_value={'progress':{'private':'secret'}};out=io.StringIO()
         with contextlib.redirect_stdout(out):M.emit_cached_progress_failure(flow)
         self.assertEqual(out.getvalue(),'')
     def test_main_failure_only_diagnostic_and_original_failure_preserved(self):
@@ -240,7 +241,8 @@ class CachedProgressDiagnostics(unittest.TestCase):
                 session=mock.Mock();session.flow.location=None
                 session.flow.expected_profile=M.C.EXTERNAL_PROFILE
                 session.flow.records=[self.record('NormalFinished')]
-                if invalid:session.flow.records[0]['private']='secret'
+                session.flow.observer.failure_diagnostics.return_value={'progress':M.C.cached_progress_diagnostic(session.flow.records,M.C.EXTERNAL_PROFILE)}
+                if invalid:session.flow.observer.failure_diagnostics.return_value={'progress':{'private':'secret'}}
                 if fail:session.run.side_effect=M.C.Rejected('normal_finish')
                 else:session.run.return_value=([],123,0)
                 for obj,name in ((M,'root_setup'),(M,'FixtureParent'),(M,'write_account'),(M.os,'setgroups'),
@@ -383,6 +385,62 @@ class ReviewerArtifactTests(unittest.TestCase):
         path=pathlib.Path(self.fixture.reviewer_selection_path('Signer1'))
         shutil.rmtree(self.root) # test-owned root only; same containment as native root cleanup
         self.assertFalse(path.exists());self.assertEqual(sentinel.read_text(),'untouched')
+
+class ObservationTimingProjectionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec=importlib.util.spec_from_file_location('timing_supervisor_tested',ROOT/'ci-financial-supervisor.py')
+        cls.S=importlib.util.module_from_spec(spec);spec.loader.exec_module(cls.S)
+    def value(self):
+        return dict(version=1,availability='Observed',observer_remaining_ns=1,
+                    coordinator_last_elapsed_ns=20,last_phase=dict(phase='V3Preparing',subphase='None',
+                    owner=None,first_elapsed_ns=10,last_elapsed_ns=20,snapshot_count=2))
+    def line(self,value):return b'CI_FINANCIAL_OBSERVATION_TIMING_DIAGNOSTIC '+json.dumps(value).encode()
+    def failed(self,profile):return b'CI_FINANCIAL_RESULT '+json.dumps(self.S.P.failure('deadline',profile)).encode()
+    def candidate(self,profile):return b'CI_FINANCIAL_CANDIDATE '+json.dumps(dict(schema=1,profile=profile,
+        native_oracle_verified=True,fixture_cleaned=True,display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)).encode()
+    def test_valid_timing_is_held_until_failure_for_both_profiles(self):
+        for profile in (M.C.EXTERNAL_PROFILE,M.C.SEMANTIC_PROFILE):
+            for value in (self.value(),dict(version=1,availability='Unavailable',observer_remaining_ns=None,coordinator_last_elapsed_ns=None,last_phase=None)):
+                records=self.S.RuntimeRecords('external',profile);out=io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    records(self.line(value));self.assertEqual(out.getvalue(),'')
+                    records(self.failed(profile))
+                self.assertEqual(records.finish(1),self.S.P.failure('deadline',profile))
+                lines=out.getvalue().splitlines();self.assertEqual(len(lines),2)
+                self.assertEqual(json.loads(lines[0].split(' ',1)[1]),value)
+                self.assertTrue(lines[1].startswith('CI_FINANCIAL_FAILURE '))
+    def test_timing_cannot_complete_runtime_or_accompany_success_or_repeat(self):
+        records=self.S.RuntimeRecords('external');records(self.line(self.value()))
+        for action in (lambda:records.finish(1),lambda:records(self.candidate(M.C.EXTERNAL_PROFILE)),lambda:records(self.line(self.value()))):
+            with self.assertRaises(self.S.Failure):action()
+    def test_old_failure_and_success_remain_unchanged_without_timing(self):
+        for profile in (M.C.EXTERNAL_PROFILE,M.C.SEMANTIC_PROFILE):
+            good=self.S.RuntimeRecords('external',profile);good(self.candidate(profile));self.assertTrue(good.finish(0)['native_oracle_verified'])
+            failed=self.S.RuntimeRecords('external',profile);out=io.StringIO()
+            with contextlib.redirect_stdout(out):failed(self.failed(profile))
+            self.assertNotIn('TIMING',out.getvalue());self.assertEqual(failed.finish(1)['code'],'deadline')
+    def test_unknown_fields_private_strings_types_and_bounds_fail_without_output(self):
+        valid=self.value();bad=[valid|{'private':'secret/path'},valid|{'version':True},valid|{'version':2},
+            valid|{'availability':'secret'},valid|{'observer_remaining_ns':True},valid|{'observer_remaining_ns':0},
+            valid|{'observer_remaining_ns':M.C.ORIGINAL_NS+1},valid|{'coordinator_last_elapsed_ns':True},
+            valid|{'coordinator_last_elapsed_ns':-1},valid|{'coordinator_last_elapsed_ns':M.C.ORIGINAL_NS+1},
+            valid|{'availability':'Unavailable'}]
+        for k,v in (('phase','secret'),('owner','secret'),('subphase','secret'),('snapshot_count',True),
+                    ('snapshot_count',0),('snapshot_count',M.C.MAX_RECORDS+1),('first_elapsed_ns',21),
+                    ('first_elapsed_ns',-1),('last_elapsed_ns',21),('last_elapsed_ns',True),('private','secret')):
+            bad.append(valid|{'last_phase':valid['last_phase']|{k:v}})
+        for value in bad:
+            out=io.StringIO()
+            with contextlib.redirect_stdout(out),self.assertRaises(self.S.Failure):self.S.RuntimeRecords('external')(self.line(value))
+            self.assertEqual(out.getvalue(),'')
+    def test_broken_timing_output_does_not_replace_original_failure(self):
+        records=self.S.RuntimeRecords('external');records(self.line(self.value()));emitted=[]
+        def emit(kind,value):
+            if kind=='OBSERVATION_TIMING_DIAGNOSTIC':raise BrokenPipeError('private unprinted exception')
+            emitted.append((kind,value))
+        with mock.patch.object(self.S,'emit',side_effect=emit):records(self.failed(M.C.EXTERNAL_PROFILE))
+        self.assertEqual(records.finish(1)['code'],'deadline');self.assertEqual(emitted,[('FAILURE',self.S.P.failure('deadline'))])
 
 if __name__=='__main__':unittest.main()
 

@@ -16,7 +16,7 @@ S=importlib.util.module_from_spec(spec);spec.loader.exec_module(S)
 
 class AdapterTests(unittest.TestCase):
  def plan(self):
-  return dict(version=4,policy=L.V.POLICY,qualification_profile=L.V.QUALIFICATION_PROFILE,producer=L.V.PRODUCER.copy(),harness=dict(repository='stanleykosi/pactloom',
+  return dict(version=5,diagnostic_compatibility=copy.deepcopy(L.V.DIAGNOSTIC_COMPATIBILITY),policy=L.V.POLICY,qualification_profile=L.V.QUALIFICATION_PROFILE,producer=L.V.PRODUCER.copy(),harness=dict(repository='stanleykosi/pactloom',
    source='c'*40,source_tree='d'*40),artifact_pins=dict(artifact_id=321,archive_sha256='a'*64,bundle_sha256='b'*64),
    api_pins=dict(run='a'*64,artifact='b'*64,job='c'*64),
    reviewed_runtime_changes={'scripts/ci-financial-observer.py':'d'*64})
@@ -27,10 +27,10 @@ class AdapterTests(unittest.TestCase):
    with self.assertRaises(L.V.A.Rejected):L.validate_plan({**p,key:value})
   p['producer']['source']='b85e126eee1067a17f34b21e4abf1c3b767db166'
   with self.assertRaises(L.V.A.Rejected):L.validate_plan(p)
- def test_p26_versioned_policy_rejects_every_annex(self):
+ def test_p26_versioned_policy_rejects_unreviewed_annex(self):
   p=self.plan();self.assertEqual(L.validate_plan(p),p)
-  for changed in ({**p,'version':1},{**p,'version':2},{**p,'version':3},{**p,'version':True},
-                  {**p,'diagnostic_compatibility':{}},{**p,'transition_compatibility':{}},
+  for changed in ({**p,'version':1},{**p,'version':2},{**p,'version':3},{**p,'version':4},{**p,'version':True},
+                  {k:v for k,v in p.items() if k!='diagnostic_compatibility'},{**p,'diagnostic_compatibility':{}},{**p,'transition_compatibility':{}},
                   {**p,'transition_compatibility':None}, {**p,'policy':'p23-rendered-host-semantic-reuse-v1'},
                   {**p,'qualification_profile':L.V.A.PIXEL_PROFILE},
                   {**p,'reviewed_runtime_changes':{'scripts/ci-financial-scenario.py':'a'*64}}):
@@ -140,6 +140,8 @@ class IdentityTests(unittest.TestCase):
   plan=self.plan();p_inv={k:'a'*64 for k in L.V.RUNTIME_ONLY};p_inv['Cargo.lock']='b'*64
   h_inv={**p_inv,**plan['reviewed_runtime_changes']}
   p_inv['scripts/ci-financial-scenario.py']='b'*64;h_inv['scripts/ci-financial-scenario.py']='b'*64
+  for path,pair in L.V.DIAGNOSTIC_COMPATIBILITY['files'].items():
+   p_inv[path]=pair['producer_mode_sha256'];h_inv[path]=pair['harness_mode_sha256']
   if change:h_inv.update(change)
   mapping={str(pathlib.Path('/P')):(L.V.PRODUCER['source_tree'],p_inv),
            str(pathlib.Path('/H')):(plan['harness']['source_tree'],h_inv),
@@ -147,7 +149,7 @@ class IdentityTests(unittest.TestCase):
   with patch.dict(os.environ,{'GITHUB_SHA':'f'*40}),patch.object(L,'HERE',pathlib.Path('/L/scripts')), \
        patch.object(L,'safe_environment'),patch.object(L.V,'inventory_checkout',side_effect=lambda root,sha:mapping[str(root)]):
    return L.verify_sources(plan,'/P','/H','/L')
- def test_version4_source_verification_keeps_runtime_hash_review_exact(self):
+ def test_version5_source_verification_keeps_runtime_hash_review_exact(self):
   self.identities()
   for changes in ({'Cargo.lock':'e'*64},
                   {'scripts/ci-financial-scenario.py':'e'*64},

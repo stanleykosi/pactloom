@@ -1,7 +1,7 @@
 """PRIVATE review candidate, no network or activation at import.
 
-Only semantic P26 producer is accepted under separate plan v4 policy. H may
-change only the original eight reviewed runtime paths; no annex is accepted. L is an independent
+Only semantic P26 producer is accepted under separate plan v5 policy. H may change the original eight reviewed runtime paths
+plus the two exact diagnostic byte/mode pairs bound by the mandatory observer30 annex. L is an independent
 exact CI event checkout. Missing artifact/H pins reject. No compiler invocation,
 context override, monkey-patch, native authority or success-gate change.
 """
@@ -140,10 +140,11 @@ def load_json(path):
 
 def validate_plan(plan):
     V.require(type(plan) is dict,'plan_schema')
-    V.require(type(plan.get('version')) is int and plan['version']==4,'plan_version')
-    keys={'version','producer','harness','artifact_pins','api_pins','reviewed_runtime_changes','policy','qualification_profile'}
+    V.require(type(plan.get('version')) is int and plan['version']==5,'plan_version')
+    keys={'version','producer','harness','artifact_pins','api_pins','reviewed_runtime_changes','policy','qualification_profile','diagnostic_compatibility'}
     V.require(set(plan)==keys,'plan_schema')
     V.require(plan['policy']==V.POLICY and plan['qualification_profile']==V.QUALIFICATION_PROFILE,'semantic_policy')
+    V.validate_diagnostic_compatibility(plan['diagnostic_compatibility'])
     V.require(plan['producer']==V.PRODUCER,'producer_pin')
     h=plan['harness']
     V.require(type(h) is dict and set(h)=={'repository','source','source_tree'}
@@ -193,7 +194,7 @@ def verify_sources(plan,producer_root,harness_root,launcher_root):
     l_sha=os.environ.get('GITHUB_SHA','');l_tree,l_inv=V.inventory_checkout(roots[2],l_sha)
     V.require(HERE.is_relative_to(roots[2]),'launcher_location')
     V.require(p_tree==V.PRODUCER['source_tree'] and h_tree==plan['harness']['source_tree'],'tree_identity')
-    changes=V.equivalent(p_inv,h_inv)
+    changes=V.equivalent(p_inv,h_inv,plan['diagnostic_compatibility'])
     V.require({k:h_inv[k] for k in changes if k in V.RUNTIME_ONLY}==plan['reviewed_runtime_changes'],'unreviewed_runtime_delta')
     return p_inv,h_inv,dict(repository=V.PRODUCER['repository'],source=l_sha,source_tree=l_tree)
 
@@ -223,7 +224,7 @@ def acquire_verified_inputs(root,staging,plan,p_inv,h_inv):
     with zipfile.ZipFile(archive) as z:
         with z.open('build.tar') as source,bundle.open('xb') as destination:shutil.copyfileobj(source,destination)
     bundle.chmod(0o400)
-    evidence=V.qualify(bundle,archive,plan['artifact_pins'],api['run'],api['artifact'],p_inv,h_inv,plan['harness'])
+    evidence=V.qualify(bundle,archive,plan['artifact_pins'],api['run'],api['artifact'],p_inv,h_inv,plan['harness'],plan['diagnostic_compatibility'])
     inputs=root/'artifacts';inputs.mkdir(mode=0o700)
     # The strict verifier has checked every header, name, mode and byte digest.
     # Stream the named entries to newly-created explicit paths; never extractall.
