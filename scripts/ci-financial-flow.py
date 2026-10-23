@@ -567,7 +567,11 @@ class FullFlow:
                 if s['phase'] in ('V3Receiving','ReturnReading'):return self.seek_waiting_host_control(s,'BeginHostLine')
                 return False
             if not button['enabled']:return False
-            if time.monotonic_ns()-self.last_ocr<self.ocr_delay:return False
+            # Cooldown suppresses repeated inspection of the SAME native output,
+            # not a new validated output occurrence. Capture/currentness/grammar
+            # and original budgets still decide whether any input is permitted.
+            same_capture_context=(self.last_capture is None or self.last_capture[:2]==context)
+            if same_capture_context and time.monotonic_ns()-self.last_ocr<self.ocr_delay:return False
             output=self.find(s,'HostOutput',None)
             if output is None:
                 if s['phase'] in ('V3Receiving','ReturnReading'):return self.seek_waiting_host_control(s,'HostOutput')

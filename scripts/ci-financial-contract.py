@@ -268,7 +268,7 @@ def validate_record(record, expected_profile=PROFILE):
 
 # Two independent authenticated actors: no cross-process ordering or cause claim.
 HOST_REAP_CONTEXTS=frozenset(('FinishPath','DropKillAttempted','RetirementTryReap'))
-HOST_FAILURE_STAGES=frozenset('TerminalSetup OriginalCustody RelaySetup StartupSelection HostOpen CommandsPath CommandsFileRead CommandsDecode CommandsCheck Reviewer1Message Reviewer1EndpointWait LaterWorkflow NormalClose RunnerReturn PairEndpointValidate PairScopeValidate PairOriginalCustody PairConnect PairEnableCredentials PairVerifySigner PairObservePeer PairCloneObserver PairRequestWrite PairResponseRead PairResponseDecode PairResponseValidate PairResponseDigest PairChannelDigest PairInitialCurrent PairStatusOpen PairStatusRead PairStatusDecode PairStatusValidate PairFinalCurrent DeliverySourceOpen DeliverySourceInspection DeliverySourcePlan DeliveryRecipientPrepare DeliveryExportPreview DeliveryNativeCheck DeliverySourceCheck DeliverySourceScopePredicate DeliveryProofRolePredicate DeliveryMaterialActionPredicate DeliveryMaterialScopePredicate PreparationSourceBefore PreparationApproval PreparationSourceAfter HistoricalApprovalDeadline HistoricalApprovalForeground OriginalDisclosureSelector MaterialRestrictionCapture PairConfirmation ExportRecipientBinding ExportMetadataSource ExportMetadataMaterials ExportMetadataApproval ExportRecipientBind ExportFinalApproval ExportConsent ExportCommit ExportVerifiedWait'.split())
+HOST_FAILURE_STAGES=frozenset('TerminalSetup OriginalCustody RelaySetup StartupSelection HostOpen CommandsPath CommandsFileRead CommandsDecode CommandsCheck Reviewer1Message Reviewer1EndpointWait LaterWorkflow NormalClose RunnerReturn PairEndpointValidate PairScopeValidate PairOriginalCustody PairConnect PairEnableCredentials PairVerifySigner PairObservePeer PairCloneObserver PairRequestWrite PairResponseRead PairResponseDecode PairResponseValidate PairResponseDigest PairChannelDigest PairInitialCurrent PairStatusOpen PairStatusRead PairStatusDecode PairStatusValidate PairFinalCurrent DeliverySourceOpen DeliverySourceInspection DeliverySourcePlan DeliveryRecipientPrepare DeliveryExportPreview DeliveryNativeCheck DeliverySourceCheck DeliverySourceScopePredicate DeliveryProofRolePredicate DeliveryMaterialActionPredicate DeliveryMaterialScopePredicate PreparationSourceBefore PreparationApproval PreparationSourceAfter HistoricalApprovalDeadline HistoricalApprovalForeground OriginalDisclosureSelector MaterialRestrictionCapture PairConfirmation ExportRecipientBinding ExportMetadataSource ExportMetadataMaterials ExportMetadataApproval ExportRecipientBind ExportFinalApproval ExportConsent ExportCommit ExportVerifiedWait AdmissionAuditRejected AdmissionAwaitingAudit AdmissionHistoryCurrent AdmissionHistoryDeadline AdmissionHistoryIntent AdmissionHistoryNonce AdmissionHistoryOpen AdmissionHistoryOwner AdmissionHistoryPrevious AdmissionHistoryResponseMatch AdmissionHistoryStatus AdmissionRequestChannel AdmissionRequestDeadline AdmissionRequestIntent AdmissionRequestNonce AdmissionResponseCheckAfter AdmissionResponseCheckBefore AdmissionResponseDeadlineAfter AdmissionResponseDeadlineBefore AdmissionResponseDecode AdmissionResponseFrame AdmissionResponsePeerAfter AdmissionResponsePeerBefore AdmissionUnknown'.split())
 HOST_FAILURE_CLASSES=frozenset('Platform Terminal Permission Locked Invalid Authentication Storage Quarantined Unsupported Receipt RecoverySemantic RecoveryBackupUnsupported RecoveryFinancialUnsupported CompleteOriginRecoveryUnavailable HistoricalExportIncomplete GenerationArchiveIncomplete IoNotFound IoPermissionDenied IoInterrupted IoWouldBlock IoInvalidInput IoInvalidData IoUnexpectedEof IoTimedOut IoOther BridgeBinding BridgeConflict BridgeMissing BridgeUncertain BridgeLimit BridgePermission BridgeRecoveryRequired BridgeCompleteOriginRecoveryUnavailable BridgeVerification BridgeSignerOriginUnavailable BridgeJournal BridgeAuthority BridgeWallet BridgeIpc FrameUnclassified FrameDeadline FrameEof FrameCredentialsMissing FrameCredentialsMismatch FrameAncillaryRejected FrameTruncated FramePeerNotLive FrameCurrentCheck FrameIo FrameLimit FrameInvalidFrame FrameInvalidBudget EngineDisclosureUnknown EngineDisclosureDenied EngineRecoveryRequired EngineIdempotencyConflict EngineRevisionConflict EngineDurableProposalConflict EngineDurableConstructionUnavailable EngineDurableProfileUnavailable EngineResourceExhausted EngineUnclassified PredicateDenied'.split())
 HOST_RELAY_STAGES=frozenset('LifecycleCheck DeadlineCheck HostAbsent CoordinatorLifetime Signer1Lifetime Signer2Lifetime CoordinatorReceive NormalControl CompletedPairControl RetirementControl DownstreamValidation TargetSelection Signer1Send Signer2Send RetirementObservation NormalObservation Signer1Receive Signer2Receive Signer1UpstreamValidation Signer2UpstreamValidation CoordinatorSend FinalLifecycleCheck'.split())
 HOST_RELAY_CLASSES=frozenset('IoNotFound IoPermissionDenied IoInterrupted IoWouldBlock IoInvalidInput IoInvalidData IoUnexpectedEof IoTimedOut IoOther'.split())
@@ -488,14 +488,30 @@ def cached_progress_diagnostic(records,expected_profile):
 
 # Cached actor-local observation timing, never current time or authority evidence.
 def validate_observation_timing_diagnostic(value):
-    exact(value,('version','availability','observer_remaining_ns','coordinator_last_elapsed_ns','last_phase'))
-    require(type(value['version']) is int and value['version']==1,'record_shape')
+    exact(value,('version','availability','observer_remaining_ns','coordinator_last_elapsed_ns','last_phase','phase_observed_ns_counts','coordinator_milestone_elapsed_ns'))
+    require(type(value['version']) is int and value['version']==2,'record_shape')
     require(value['availability'] in ('Observed','Unavailable'),'record_shape')
     remaining=value['observer_remaining_ns'];last=value['coordinator_last_elapsed_ns'];phase=value['last_phase']
     if value['availability']=='Unavailable':
-        require(remaining is None and last is None and phase is None,'record_shape');return value
+        require(remaining is None and last is None and phase is None and value['phase_observed_ns_counts'] is None and value['coordinator_milestone_elapsed_ns'] is None,'record_shape');return value
     require(integer(remaining,1,ORIGINAL_NS),'record_shape')
     require(last is None or integer(last,0,ORIGINAL_NS),'record_shape')
+    # Fixed owner rows None/Signer1/Signer2 and DIAGNOSTIC_PHASES columns.
+    # Each cell is [sum of observed contiguous same phase/subphase spans, count].
+    rows=value['phase_observed_ns_counts']
+    require(type(rows) is list and len(rows)==3,'record_shape')
+    total=0;observed_ns=0
+    for row in rows:
+        require(type(row) is list and len(row)==len(DIAGNOSTIC_PHASES),'record_shape')
+        for cell in row:
+            require(type(cell) is list and len(cell)==2 and integer(cell[0],0,ORIGINAL_NS) and integer(cell[1],0,MAX_RECORDS),'record_shape')
+            require(cell[1]>0 or cell[0]==0,'record_shape');total+=cell[1];observed_ns+=cell[0]
+    require(total<=MAX_RECORDS and (last is not None or total==0) and observed_ns<=(last or 0),'record_shape')
+    offsets=value['coordinator_milestone_elapsed_ns']
+    require(type(offsets) is list and len(offsets)==2,'record_shape')
+    for row in offsets:
+        require(type(row) is list and len(row)==len(SIGNER_STEPS),'record_shape')
+        require(all(x is None or (last is not None and integer(x,0,last)) for x in row),'record_shape')
     if phase is not None:
         exact(phase,('phase','subphase','owner','first_elapsed_ns','last_elapsed_ns','snapshot_count'))
         require(type(phase['phase']) is str and phase['phase'] in PHASES and type(phase['subphase']) is str and phase['subphase'] in SUBPHASES and phase['owner'] in (None,'Signer1','Signer2'),'record_shape')

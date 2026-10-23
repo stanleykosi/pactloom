@@ -392,16 +392,19 @@ class ObservationTimingProjectionTests(unittest.TestCase):
         spec=importlib.util.spec_from_file_location('timing_supervisor_tested',ROOT/'ci-financial-supervisor.py')
         cls.S=importlib.util.module_from_spec(spec);spec.loader.exec_module(cls.S)
     def value(self):
-        return dict(version=1,availability='Observed',observer_remaining_ns=1,
+        rows=[[[0,0] for _ in M.C.DIAGNOSTIC_PHASES] for _ in range(3)]
+        rows[0][M.C.DIAGNOSTIC_PHASES.index('V3Preparing')]=[10,2]
+        return dict(version=2,availability='Observed',observer_remaining_ns=1,
                     coordinator_last_elapsed_ns=20,last_phase=dict(phase='V3Preparing',subphase='None',
-                    owner=None,first_elapsed_ns=10,last_elapsed_ns=20,snapshot_count=2))
+                    owner=None,first_elapsed_ns=10,last_elapsed_ns=20,snapshot_count=2),
+                    phase_observed_ns_counts=rows,coordinator_milestone_elapsed_ns=[[None]*len(M.C.SIGNER_STEPS) for _ in range(2)])
     def line(self,value):return b'CI_FINANCIAL_OBSERVATION_TIMING_DIAGNOSTIC '+json.dumps(value).encode()
     def failed(self,profile):return b'CI_FINANCIAL_RESULT '+json.dumps(self.S.P.failure('deadline',profile)).encode()
     def candidate(self,profile):return b'CI_FINANCIAL_CANDIDATE '+json.dumps(dict(schema=1,profile=profile,
         native_oracle_verified=True,fixture_cleaned=True,display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)).encode()
     def test_valid_timing_is_held_until_failure_for_both_profiles(self):
         for profile in (M.C.EXTERNAL_PROFILE,M.C.SEMANTIC_PROFILE):
-            for value in (self.value(),dict(version=1,availability='Unavailable',observer_remaining_ns=None,coordinator_last_elapsed_ns=None,last_phase=None)):
+            for value in (self.value(),dict(version=2,availability='Unavailable',observer_remaining_ns=None,coordinator_last_elapsed_ns=None,last_phase=None,phase_observed_ns_counts=None,coordinator_milestone_elapsed_ns=None)):
                 records=self.S.RuntimeRecords('external',profile);out=io.StringIO()
                 with contextlib.redirect_stdout(out):
                     records(self.line(value));self.assertEqual(out.getvalue(),'')
@@ -421,7 +424,7 @@ class ObservationTimingProjectionTests(unittest.TestCase):
             with contextlib.redirect_stdout(out):failed(self.failed(profile))
             self.assertNotIn('TIMING',out.getvalue());self.assertEqual(failed.finish(1)['code'],'deadline')
     def test_unknown_fields_private_strings_types_and_bounds_fail_without_output(self):
-        valid=self.value();bad=[valid|{'private':'secret/path'},valid|{'version':True},valid|{'version':2},
+        valid=self.value();bad=[valid|{'private':'secret/path'},valid|{'version':True},valid|{'version':1},valid|{'version':3},
             valid|{'availability':'secret'},valid|{'observer_remaining_ns':True},valid|{'observer_remaining_ns':0},
             valid|{'observer_remaining_ns':M.C.ORIGINAL_NS+1},valid|{'coordinator_last_elapsed_ns':True},
             valid|{'coordinator_last_elapsed_ns':-1},valid|{'coordinator_last_elapsed_ns':M.C.ORIGINAL_NS+1},

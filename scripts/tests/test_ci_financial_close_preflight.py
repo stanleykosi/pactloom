@@ -49,3 +49,49 @@ class ContextPreflightTests(unittest.TestCase):
    with self.assertRaises(AssertionError):self.check(rows)
  def test_fixed_preflight_never_executes_runtime_or_changes_recipe(self):
   text=P.read_text();self.assertIn("'cargo','check'",text);self.assertNotIn('build_inputs(',text);self.assertNotIn('export_compiled_artifacts(',text);self.assertNotIn('docker',text);self.assertEqual(C.S.A.RECIPE['build_recipe_version'],3)
+
+class SignerAbsencePreflightTests(unittest.TestCase):
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.target=pathlib.Path(self.tmp.name);self.rows=[]
+  for crate in C.SIGNER_SCRIPTS:
+   package='path+file:///reviewed/'+crate+'#'+crate+'@0.1.0';out=self.target/crate;out.mkdir()
+   self.rows += [dict(reason='compiler-artifact',package_id=package,manifest_path=str(C.S.REPO/'crates'/crate/'Cargo.toml'),target=dict(kind=['custom-build'],name='build-script-build',src_path=str(C.S.REPO/'crates'/crate/'build.rs'))),dict(reason='build-script-executed',package_id=package,cfgs=[],linked_libs=[],linked_paths=[],env=[],out_dir=str(out))]
+  self.metadata=self.target/'libwholepact_signer-exact.rmeta';self.metadata.write_bytes(b'nonexecuted fixture')
+  self.rows.append(dict(reason='compiler-artifact',manifest_path=str(C.S.REPO/'crates/wholepact-signer/Cargo.toml'),profile=dict(test=False),features=list(C.SIGNER_FEATURES),filenames=[str(self.metadata)],target=dict(kind=['lib'],name='wholepact_signer',src_path=str(C.S.REPO/'crates/wholepact-signer/src/lib.rs'))))
+ def check(self,rows,cfgs=()):return C.signer_metadata(b'\n'.join(json.dumps(x).encode() for x in rows),self.target,cfgs)
+ def test_exact_non_test_metadata_and_two_script_scopes(self):
+  self.assertEqual(self.check(self.rows),self.metadata)
+  pixel=copy.deepcopy(self.rows)
+  for row in pixel:
+   if row['reason']=='build-script-executed':row['cfgs']=list(C.S.A.FINANCIAL_CFGS[:2])
+  self.assertEqual(self.check(pixel,C.S.A.FINANCIAL_CFGS[:2]),self.metadata)
+  with self.assertRaises(AssertionError):self.check(pixel)
+ def test_wrong_target_features_profile_or_metadata_rejected(self):
+  for field,value in [('features',[]),('features',list(C.SIGNER_FEATURES)+['extra']),('profile',dict(test=True)),('profile',dict(test=0)),('filenames',[]),('filenames',['/outside.rmeta'])]:
+   rows=copy.deepcopy(self.rows);rows[-1][field]=value
+   with self.assertRaises(AssertionError):self.check(rows)
+  for field,value in [('kind',['bin']),('name','other'),('src_path','/wrong.rs')]:
+   rows=copy.deepcopy(self.rows);rows[-1]['target'][field]=value
+   with self.assertRaises(AssertionError):self.check(rows)
+  with self.assertRaises(AssertionError):self.check(self.rows+[self.rows[-1]])
+ def test_absence_must_be_specific_method_e0599(self):
+  for _,method in C.SIGNER_PROBES:
+   row=dict(level='error',code=dict(code='E0599'),message='no function named '+method)
+   raw=json.dumps(row).encode();C.absent_method_diagnostic(1,raw,method)
+   for status,data in [(0,raw),(1,b''),(1,json.dumps(row|dict(code=dict(code='E0463'))).encode()),(1,json.dumps(row|dict(message='another method')).encode()),(1,raw+b'\n'+raw)]:
+    with self.assertRaises(AssertionError):C.absent_method_diagnostic(status,data,method)
+ def test_no_extra_cfg_consumer_or_side_effects(self):
+  for field,value in [('cfgs',list(C.S.A.FINANCIAL_CFGS)),('linked_libs',['x']),('env',[['X','y']]),('out_dir','/')]:
+   rows=copy.deepcopy(self.rows);rows[1][field]=value
+   with self.assertRaises(AssertionError):self.check(rows)
+  for rows in (self.rows[2:],self.rows+[self.rows[0]],self.rows+[dict(reason='build-script-executed',package_id='unexpected',cfgs=['wholepact_financial_ci'])]):
+   with self.assertRaises(AssertionError):self.check(rows)
+ def test_expected_signer_features_equal_actual_local_feature_closure(self):
+  import tomllib
+  features=tomllib.loads((C.S.REPO/'crates/wholepact-signer/Cargo.toml').read_text())['features'];seen=set()
+  def visit(name):
+   if name in seen:return
+   seen.add(name)
+   for child in features[name]:
+    if '/' not in child and not child.startswith('dep:'):visit(child)
+  visit('coordinated-financial-workflow-v1');self.assertEqual(sorted(seen),list(C.SIGNER_FEATURES))

@@ -17,6 +17,21 @@ macro_rules! export_observed {
     }};
 }
 
+// Retain actual local details only at this terminal propagation boundary.
+// Both variants execute the same implementation once and return the same error.
+macro_rules! admission_observed {
+    ($ordinary:expr,$observed:expr) => {{
+        #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
+        let result=$ordinary;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        let result=$observed.map_err(|failure| {
+            crate::financial_ci_host_failure::admission(&failure);
+            failure.into_error()
+        });
+        result
+    }};
+}
+
 #[derive(Serialize)]
 pub(in crate::host::financial) struct CoordinatedOriginalDeliveryExportV1 {
     pub request: DurableDeliveryAdmissionRequestV2,
@@ -313,9 +328,26 @@ fn validate_coordinated_status_v1(scope: &CoordinatedDurableReviewExportScopeV1,
     if status.intent_digest != scope.recipient.digest().map_err(|_| Error::Authentication)? {
         return Err(Error::Authentication);
     }
-    let audit = status.verified_audit().map_err(|_| Error::Receipt(
-        "The original V3 operation remains pending or unknown: complete authenticated Witness history has not established admission. Preserve the original operation; do not resend it".into(),
-    ))?;
+    let audit = status.verified_audit().map_err(|error| {
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        {
+            use wholepact_signer::authority_bridge::durable_review_ipc_v3::coordinated_v1::CoordinatedAdmissionStateV1;
+            use crate::financial_ci_host_failure::Stage;
+            // Observe only this terminal failure, never the recoverable status
+            // attempt preceding a separately approved successful history read.
+            let stage = match status.state {
+                CoordinatedAdmissionStateV1::AwaitingAudit => Stage::AdmissionAwaitingAudit,
+                CoordinatedAdmissionStateV1::Unknown => Stage::AdmissionUnknown,
+                CoordinatedAdmissionStateV1::Verified => Stage::AdmissionAuditRejected,
+            };
+            crate::financial_ci_host_failure::bridge(stage, &error);
+        }
+        #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
+        let _ = error;
+        Error::Receipt(
+            "The original V3 operation remains pending or unknown: complete authenticated Witness history has not established admission. Preserve the original operation; do not resend it".into(),
+        )
+    })?;
     validate_coordinated_original_audit_v1(scope, audit)
 }
 
@@ -333,7 +365,7 @@ pub(in crate::host::financial) struct RetainedOriginalCoordinatedAdmissionV1<'ho
 }
 impl<'host> RetainedCoordinatedVerifiedExportV1<'host> {
     pub(in crate::host::financial) fn request_admission(self) -> Result<RetainedOriginalCoordinatedAdmissionV1<'host>> {
-        let pending = self.verified.request_admission_retained_v1().map_err(|_| unknown())?;
+        let pending = admission_observed!(self.verified.request_admission_retained_v1(),self.verified.request_admission_retained_observed_v1()).map_err(|_| unknown())?;
         Ok(RetainedOriginalCoordinatedAdmissionV1 {
             host: self.host, workspace: self.workspace, pending, exported: self.exported,
             admitted: None, verification_started: false,
@@ -353,7 +385,7 @@ impl RetainedOriginalCoordinatedAdmissionV1<'_> {
             Ok(status) if status.verified_audit().is_ok() => status,
             _ => {
                 self.host.terminal.message("Coordinated admission is pending or uncertain. Read complete original Witness history under a new decision; no mutation will be resent.\n")?;
-                self.pending.read_original_status_retained_v1().map_err(|_| unknown())?
+                admission_observed!(self.pending.read_original_status_retained_v1(),self.pending.read_original_status_retained_observed_v1()).map_err(|_| unknown())?
             }
         };
         validate_coordinated_status_v1(&self.exported.export_scope, &status)?;

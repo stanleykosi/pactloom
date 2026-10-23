@@ -3126,3 +3126,78 @@ class ReceivingHostNavigationTests(unittest.TestCase):
 class ReturnReadingHostNavigationTests(ReceivingHostNavigationTests):
  def model(self,hidden,phase='ReturnReading',**kwargs):
   return super().model(hidden,phase=phase,**kwargs)
+
+class ChangedHostCaptureCooldownTests(unittest.TestCase):
+ model=ReceivingHostNavigationTests.model
+ def test_new_native_output_does_not_inherit_old_capture_cooldown(self):
+  f,c,state,d=self.model(None);initial=f.snapshot()
+  f.last_capture=(17,100,b'old-digest');f.last_ocr=time.monotonic_ns();f.ocr_delay=8_000_000_000
+  with self.assertRaises(CaptureReached):f.pump_host(initial)
+  c.click.assert_not_called();c.type_ascii.assert_not_called();self.assertEqual(f.host_lines,17)
+  self.assertEqual(f.fixture.deadline_ns,d)
+ def test_new_output_capture_changed_never_dispatches_input(self):
+  f,c,state,d=self.model(None);initial=f.snapshot()
+  f.last_capture=(17,100,b'old-digest');f.last_ocr=time.monotonic_ns();f.ocr_delay=8_000_000_000
+  f.native.capture_host.side_effect=F.S.HostObservationChanged()
+  self.assertTrue(f.pump_host(initial));self.assertIsNone(f.pending_host);self.assertIsNone(f.host_prepared)
+  c.click.assert_not_called();c.type_ascii.assert_not_called();self.assertEqual(f.fixture.deadline_ns,d)
+ def test_same_native_output_retains_cooldown(self):
+  f,c,state,d=self.model(None);initial=f.snapshot();h=initial['host_observation']
+  f.last_capture=(h['revision'],h['nonws_end'],b'old-digest');f.last_ocr=time.monotonic_ns();f.ocr_delay=8_000_000_000
+  self.assertFalse(f.pump_host(initial));f.native.capture_host.assert_not_called();c.click.assert_not_called()
+
+class CumulativeObservationTimingTests(unittest.TestCase):
+ setUp=LastValidatedObservationTests.setUp
+ tearDown=LastValidatedObservationTests.tearDown
+ record=LastValidatedObservationTests.record
+ records=LastValidatedObservationTests.records
+ write=LastValidatedObservationTests.write
+ def test_repeated_phase_spans_exclude_intervening_gaps_and_subphase_changes(self):
+  rows=self.records()
+  for i,r in enumerate(rows):r['elapsed_ns']=i+1
+  for elapsed,phase,sub in [(10,'V3Preparing','None'),(20,'V3Preparing','None'),(50,'V3Received','None'),(70,'V3Preparing','None'),(80,'V3Preparing','None'),(90,'V3Preparing','SetupNeeded'),(95,'V3Preparing','SetupNeeded')]:
+   snap=self.copy(self.snapshot);snap.update(phase=phase,subphase=sub,owner='Signer1',view_generation=len(rows))
+   rows.append(self.record('UiSnapshot',snap,len(rows)+1));rows[-1]['elapsed_ns']=elapsed
+  self.write(rows);self.o.read();v=self.o.failure_diagnostics()['timing']
+  self.assertEqual(v['version'],2)
+  self.assertEqual(v['phase_observed_ns_counts'][1][O.C.DIAGNOSTIC_PHASES.index('V3Preparing')],[25,6])
+  self.assertEqual(v['phase_observed_ns_counts'][1][O.C.DIAGNOSTIC_PHASES.index('V3Received')],[0,1])
+  self.assertEqual(v['phase_observed_ns_counts'][2][O.C.DIAGNOSTIC_PHASES.index('V3Preparing')],[0,0])
+  v['phase_observed_ns_counts'][1][0][0]=999
+  self.assertNotEqual(self.o.failure_diagnostics()['timing']['phase_observed_ns_counts'][1][0][0],999)
+ def test_milestone_offsets_are_coordinator_observations_only(self):
+  rows=self.records()
+  rows += [self.record('SignerMilestone',dict(owner='Signer1',step=O.C.SIGNER_STEPS[0]),4)]
+  rows[-1]['elapsed_ns']=10
+  # Same step from a Signer uses a different actor clock and must be ignored.
+  other=self.copy(rows[-1]);other.update(role='Signer1',elapsed_ns=999);rows.append(other)
+  v=self.o._project_diagnostics(rows)['timing'];v['observer_remaining_ns']=1
+  O.C.validate_observation_timing_diagnostic(v)
+  self.assertEqual(v['coordinator_milestone_elapsed_ns'][0][0],10)
+  self.assertTrue(all(x is None for x in v['coordinator_milestone_elapsed_ns'][1]))
+ def test_timing_v2_closed_shape_and_worst_case_wire_bound(self):
+  self.write(self.records());self.o.read();v=self.o.failure_diagnostics()['timing']
+  mutations=[]
+  for key,value in [('phase_observed_ns_counts',[]),('coordinator_milestone_elapsed_ns',[]),('version',1)]:
+   bad=self.copy(v);bad[key]=value;mutations.append(bad)
+  for cell in ([True,1],[0,True],[O.C.ORIGINAL_NS+1,1],[1,0],[0,O.C.MAX_RECORDS+1]):
+   bad=self.copy(v);bad['phase_observed_ns_counts'][0][0]=cell;mutations.append(bad)
+  bad=self.copy(v);bad['coordinator_milestone_elapsed_ns'][0][0]=True;mutations.append(bad)
+  for bad in mutations:
+   with self.assertRaises(O.C.Rejected):O.C.validate_observation_timing_diagnostic(bad)
+  worst=self.copy(v);worst['coordinator_last_elapsed_ns']=O.C.ORIGINAL_NS
+  worst['phase_observed_ns_counts']=[[[O.C.ORIGINAL_NS,O.C.MAX_RECORDS] for _ in O.C.DIAGNOSTIC_PHASES] for _ in range(3)]
+  worst['coordinator_milestone_elapsed_ns']=[[O.C.ORIGINAL_NS]*len(O.C.SIGNER_STEPS) for _ in range(2)]
+  # Deliberately exceeds aggregate counts: even maximal field widths fit the unchanged wire cap.
+  encoded='CI_FINANCIAL_OBSERVATION_TIMING_DIAGNOSTIC '+json.dumps(worst,separators=(',',':'))
+  self.assertLessEqual(len(encoded.encode()),8192)
+
+class AdmissionHostStageTests(unittest.TestCase):
+ def test_exact_twenty_four_admission_stages_are_closed(self):
+  expected={'AdmissionHistoryResponseMatch', 'AdmissionHistoryCurrent', 'AdmissionHistoryOpen', 'AdmissionResponseDecode', 'AdmissionResponseDeadlineAfter', 'AdmissionRequestNonce', 'AdmissionHistoryIntent', 'AdmissionHistoryDeadline', 'AdmissionResponseCheckAfter', 'AdmissionHistoryNonce', 'AdmissionResponseDeadlineBefore', 'AdmissionResponseCheckBefore', 'AdmissionResponsePeerBefore', 'AdmissionAwaitingAudit', 'AdmissionHistoryStatus', 'AdmissionRequestChannel', 'AdmissionHistoryOwner', 'AdmissionRequestDeadline', 'AdmissionResponsePeerAfter', 'AdmissionHistoryPrevious', 'AdmissionUnknown', 'AdmissionAuditRejected', 'AdmissionResponseFrame', 'AdmissionRequestIntent'}
+  self.assertEqual({s for s in O.C.HOST_FAILURE_STAGES if s.startswith('Admission')},expected)
+  for stage in expected:
+   v=dict(version=1,stage=stage,**{'class':'Receipt'},relay=None)
+   O.C.validate_host_failure_facts(v)
+  for stage in ('AdmissionOther',True,'AdmissionRequest raw','AdmissionRequest','AdmissionHistory'):
+   with self.assertRaises(O.C.Rejected):O.C.validate_host_failure_facts(dict(version=1,stage=stage,**{'class':'Receipt'},relay=None))

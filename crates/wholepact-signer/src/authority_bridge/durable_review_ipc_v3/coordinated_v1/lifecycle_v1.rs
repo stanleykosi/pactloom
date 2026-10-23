@@ -296,10 +296,24 @@ impl CoordinatedOriginalClientV1 {
         deadline: Instant,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<CoordinatedClosedResponseV1> {
+        let mut stage = CoordinatedAdmissionFailureStageV1::ResponseCheckBefore;
+        let mut frame_cause = None;
+        self.closed_response_detailed_v1(stream, deadline, check, &mut stage, &mut frame_cause)
+    }
+    pub(super) fn closed_response_detailed_v1(
+        &self, stream: &UnixStream, deadline: Instant, check: &dyn Fn() -> Result<()>,
+        stage: &mut CoordinatedAdmissionFailureStageV1,
+        frame_cause: &mut Option<wholepact_signer_origin::framing::FrameReadCause>,
+    ) -> Result<CoordinatedClosedResponseV1> {
+        *frame_cause = None;
+        *stage = CoordinatedAdmissionFailureStageV1::ResponseCheckBefore;
         check()?;
+        *stage = CoordinatedAdmissionFailureStageV1::ResponsePeerBefore;
         self.check_stream(stream)?;
+        *stage = CoordinatedAdmissionFailureStageV1::ResponseDeadlineBefore;
         require_before(deadline)?;
-        let bytes = wholepact_signer_origin::framing::read_frame_capped_checked_until(
+        *stage = CoordinatedAdmissionFailureStageV1::ResponseFrame;
+        let bytes = wholepact_signer_origin::framing::read_frame_capped_checked_observed_until(
             stream,
             &self.peer,
             MAX_METADATA_V3,
@@ -310,10 +324,17 @@ impl CoordinatedOriginalClientV1 {
                     .map_err(|_| wholepact_signer_origin::Error::Permission)
             },
         )
-        .map_err(|_| BridgeError::Ipc)?;
+        .map_err(|failure| {
+            *frame_cause = Some(failure.cause);
+            BridgeError::Ipc
+        })?;
+        *stage = CoordinatedAdmissionFailureStageV1::ResponseCheckAfter;
         check()?;
+        *stage = CoordinatedAdmissionFailureStageV1::ResponsePeerAfter;
         self.check_stream(stream)?;
+        *stage = CoordinatedAdmissionFailureStageV1::ResponseDeadlineAfter;
         require_before(deadline)?;
+        *stage = CoordinatedAdmissionFailureStageV1::ResponseDecode;
         wholepact_core::strict_json::parse_typed_json_with_byte_limit(&bytes, MAX_METADATA_V3)
             .map_err(|_| BridgeError::Binding)
     }

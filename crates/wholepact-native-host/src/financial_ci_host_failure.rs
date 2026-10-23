@@ -110,3 +110,53 @@ pub(crate) fn bridge(stage:Stage,error:&wholepact_signer::authority_bridge::Brid
  };
  latch_failure(stage,class);
 }
+
+/// Details remain local until an admission method actually returns Err to Host.
+/// Recoverable exchange/status failures never call this observer.
+pub(crate) fn admission(error: &wholepact_signer::authority_bridge::durable_review_ipc_v3::coordinated_v1::CoordinatedAdmissionFailureV1) {
+    use wholepact_signer::authority_bridge::durable_review_ipc_v3::coordinated_v1::CoordinatedAdmissionFailureStageV1 as S;
+    let stage = match error.stage() {
+        S::RequestDeadline=>Stage::AdmissionRequestDeadline,
+        S::RequestChannel=>Stage::AdmissionRequestChannel,
+        S::RequestIntent=>Stage::AdmissionRequestIntent,
+        S::RequestNonce=>Stage::AdmissionRequestNonce,
+        S::HistoryIntent=>Stage::AdmissionHistoryIntent,
+        S::HistoryOwner=>Stage::AdmissionHistoryOwner,
+        S::HistoryDeadline=>Stage::AdmissionHistoryDeadline,
+        S::HistoryNonce=>Stage::AdmissionHistoryNonce,
+        S::HistoryOpen=>Stage::AdmissionHistoryOpen,
+        S::HistoryCurrent=>Stage::AdmissionHistoryCurrent,
+        S::HistoryStatus=>Stage::AdmissionHistoryStatus,
+        S::HistoryPrevious=>Stage::AdmissionHistoryPrevious,
+        S::HistoryResponseMatch=>Stage::AdmissionHistoryResponseMatch,
+        S::ResponseCheckBefore=>Stage::AdmissionResponseCheckBefore,
+        S::ResponsePeerBefore=>Stage::AdmissionResponsePeerBefore,
+        S::ResponseDeadlineBefore=>Stage::AdmissionResponseDeadlineBefore,
+        S::ResponseFrame=>Stage::AdmissionResponseFrame,
+        S::ResponseCheckAfter=>Stage::AdmissionResponseCheckAfter,
+        S::ResponsePeerAfter=>Stage::AdmissionResponsePeerAfter,
+        S::ResponseDeadlineAfter=>Stage::AdmissionResponseDeadlineAfter,
+        S::ResponseDecode=>Stage::AdmissionResponseDecode,
+    };
+    if let Some(cause) = error.frame_cause() {
+        use wholepact_signer_origin::framing::FrameReadCause as F;
+        let class = match cause {
+            F::Unclassified=>Class::FrameUnclassified,
+            F::Deadline=>Class::FrameDeadline,
+            F::Eof=>Class::FrameEof,
+            F::CredentialsMissing=>Class::FrameCredentialsMissing,
+            F::CredentialsMismatch=>Class::FrameCredentialsMismatch,
+            F::AncillaryRejected=>Class::FrameAncillaryRejected,
+            F::Truncated=>Class::FrameTruncated,
+            F::PeerNotLive=>Class::FramePeerNotLive,
+            F::CurrentCheck=>Class::FrameCurrentCheck,
+            F::Io=>Class::FrameIo,
+            F::FrameLimit=>Class::FrameLimit,
+            F::InvalidFrame=>Class::FrameInvalidFrame,
+            F::InvalidBudget=>Class::FrameInvalidBudget,
+        };
+        latch_failure(stage,class);
+    } else {
+        bridge(stage,error.error());
+    }
+}

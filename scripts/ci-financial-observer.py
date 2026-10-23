@@ -93,8 +93,8 @@ class ObserverFiles:
         return records
     @staticmethod
     def _unavailable_timing():
-        return dict(version=1,availability='Unavailable',observer_remaining_ns=None,
-                    coordinator_last_elapsed_ns=None,last_phase=None)
+        return dict(version=2,availability='Unavailable',observer_remaining_ns=None,
+                    coordinator_last_elapsed_ns=None,last_phase=None,phase_observed_ns_counts=None,coordinator_milestone_elapsed_ns=None)
     def failure_diagnostics(self):
         """Bounded last-success copies only: no IO, clock reads, or proof use."""
         if self._diagnostics is None:
@@ -108,8 +108,10 @@ class ObserverFiles:
             host_counts=[0]*len(C.HOST_STEPS),normal_counts=[0]*len(C.NORMAL_DIAGNOSTIC_STEPS),
             phase_counts=[0]*len(C.DIAGNOSTIC_PHASES))
         native=dict(version=1,availability='Unavailable',**{name:'Unobserved' for name in C.NATIVE_FAILURE_COMPONENTS})
-        timing=dict(version=1,availability='Observed',observer_remaining_ns=None,
-                    coordinator_last_elapsed_ns=None,last_phase=None)
+        timing=dict(version=2,availability='Observed',observer_remaining_ns=None,
+                    coordinator_last_elapsed_ns=None,last_phase=None,
+                    phase_observed_ns_counts=[[[0,0] for _ in C.DIAGNOSTIC_PHASES] for _ in range(3)],
+                    coordinator_milestone_elapsed_ns=[[None]*len(C.SIGNER_STEPS) for _ in range(2)])
         host_exit=C.unavailable_host_exit_diagnostic()
         actor=C.unavailable_actor_diagnostic()
         prior_elapsed=None;ordered=True
@@ -130,12 +132,17 @@ class ObserverFiles:
             elapsed=record['elapsed_ns'];timing['coordinator_last_elapsed_ns']=elapsed
             if prior_elapsed is not None and elapsed<prior_elapsed:ordered=False
             prior_elapsed=elapsed
+            if kind=='SignerMilestone':
+                row=timing['coordinator_milestone_elapsed_ns'][('Signer1','Signer2').index(facts['owner'])];index=C.SIGNER_STEPS.index(facts['step'])
+                if row[index] is None:row[index]=elapsed # Coordinator observation offset, NOT actor issuance time.
             if kind=='NativeFailureBoundary':native.update(facts,availability='Observed')
             if kind=='UiSnapshot':
                 phase=timing['last_phase'];identity={key:facts[key] for key in ('phase','subphase','owner')}
                 if phase is None or any(phase[key]!=identity[key] for key in identity):
                     phase=dict(**identity,first_elapsed_ns=elapsed,last_elapsed_ns=elapsed,snapshot_count=0)
                     timing['last_phase']=phase
+                cell=timing['phase_observed_ns_counts'][(None,'Signer1','Signer2').index(facts['owner'])][C.DIAGNOSTIC_PHASES.index(facts['phase'])]
+                cell[0]+=elapsed-phase['last_elapsed_ns'];cell[1]+=1
                 phase['last_elapsed_ns']=elapsed;phase['snapshot_count']+=1
         if not ordered:timing=self._unavailable_timing()
         return dict(progress=progress,native=native,timing=timing,host_exit=host_exit,actor=actor)

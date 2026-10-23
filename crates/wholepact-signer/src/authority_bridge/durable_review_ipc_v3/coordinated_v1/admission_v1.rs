@@ -42,6 +42,28 @@ impl CoordinatedDurableDeliveryAdmissionStatusV1 {
         self.audit.as_ref().ok_or(BridgeError::Uncertain)
     }
 }
+/// Local diagnostic metadata only; never serialized or a permission source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoordinatedAdmissionFailureStageV1 {
+    RequestDeadline, RequestChannel, RequestIntent, RequestNonce,
+    HistoryIntent, HistoryOwner, HistoryDeadline, HistoryNonce, HistoryOpen,
+    HistoryCurrent, HistoryStatus, HistoryPrevious, HistoryResponseMatch,
+    ResponseCheckBefore, ResponsePeerBefore, ResponseDeadlineBefore, ResponseFrame,
+    ResponseCheckAfter, ResponsePeerAfter, ResponseDeadlineAfter, ResponseDecode,
+}
+/// Keeps the exact original error; no Display, serialization or copied authority.
+pub struct CoordinatedAdmissionFailureV1 {
+    stage: CoordinatedAdmissionFailureStageV1,
+    frame_cause: Option<wholepact_signer_origin::framing::FrameReadCause>,
+    error: BridgeError,
+}
+impl CoordinatedAdmissionFailureV1 {
+    pub fn stage(&self) -> CoordinatedAdmissionFailureStageV1 { self.stage }
+    pub fn frame_cause(&self) -> Option<wholepact_signer_origin::framing::FrameReadCause> { self.frame_cause }
+    pub fn error(&self) -> &BridgeError { &self.error }
+    pub fn into_error(self) -> BridgeError { self.error }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CoordinatedAdmissionAttemptV1 {
     PossiblyStarted,
@@ -61,9 +83,24 @@ impl VerifiedImportedCoordinatedDurableReviewSessionV1 {
     pub fn request_admission_retained_v1(
         self,
     ) -> Result<PendingCoordinatedDurableDeliveryAdmissionV1> {
+        let mut stage = CoordinatedAdmissionFailureStageV1::RequestDeadline;
+        self.request_admission_retained_inner_v1(&mut stage)
+    }
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    pub fn request_admission_retained_observed_v1(self) -> std::result::Result<PendingCoordinatedDurableDeliveryAdmissionV1, CoordinatedAdmissionFailureV1> {
+        let mut stage = CoordinatedAdmissionFailureStageV1::RequestDeadline;
+        self.request_admission_retained_inner_v1(&mut stage)
+            .map_err(|error| CoordinatedAdmissionFailureV1 { stage, frame_cause: None, error })
+    }
+    fn request_admission_retained_inner_v1(
+        self, stage: &mut CoordinatedAdmissionFailureStageV1,
+    ) -> Result<PendingCoordinatedDurableDeliveryAdmissionV1> {
         require_before(self.deadline)?;
+        *stage = CoordinatedAdmissionFailureStageV1::RequestChannel;
         self.client.check_current()?;
+        *stage = CoordinatedAdmissionFailureStageV1::RequestIntent;
         let intent_digest = self.intent.digest()?;
+        *stage = CoordinatedAdmissionFailureStageV1::RequestNonce;
         let nonce = fresh_nonce()?;
         let mut pending = PendingCoordinatedDurableDeliveryAdmissionV1 {
             client: self.client,
@@ -156,7 +193,23 @@ impl PendingCoordinatedDurableDeliveryAdmissionV1 {
     pub fn read_original_status_retained_v1(
         &mut self,
     ) -> Result<CoordinatedDurableDeliveryAdmissionStatusV1> {
+        let mut stage = CoordinatedAdmissionFailureStageV1::HistoryIntent;
+        let mut frame_cause = None;
+        self.read_original_status_retained_inner_v1(&mut stage, &mut frame_cause)
+    }
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    pub fn read_original_status_retained_observed_v1(&mut self) -> std::result::Result<CoordinatedDurableDeliveryAdmissionStatusV1, CoordinatedAdmissionFailureV1> {
+        let mut stage = CoordinatedAdmissionFailureStageV1::HistoryIntent;
+        let mut frame_cause = None;
+        self.read_original_status_retained_inner_v1(&mut stage, &mut frame_cause)
+            .map_err(|error| CoordinatedAdmissionFailureV1 { stage, frame_cause, error })
+    }
+    fn read_original_status_retained_inner_v1(
+        &mut self, stage: &mut CoordinatedAdmissionFailureStageV1,
+        frame_cause: &mut Option<wholepact_signer_origin::framing::FrameReadCause>,
+    ) -> Result<CoordinatedDurableDeliveryAdmissionStatusV1> {
         let intent_digest = self.intent.digest()?;
+        *stage = CoordinatedAdmissionFailureStageV1::HistoryOwner;
         let authorization_id = self
             .intent
             .delivery
@@ -174,8 +227,11 @@ impl PendingCoordinatedDurableDeliveryAdmissionV1 {
             .deadline
             .min(Instant::now() + Duration::from_secs(120));
         loop {
+            *stage = CoordinatedAdmissionFailureStageV1::HistoryDeadline;
             require_before(wait)?;
+            *stage = CoordinatedAdmissionFailureStageV1::HistoryNonce;
             let nonce = fresh_nonce()?;
+            *stage = CoordinatedAdmissionFailureStageV1::HistoryOpen;
             let stream = self.client.open_closed(
                 CoordinatedClosedCommandV1::History {
                     intent_digest: intent_digest.clone(),
@@ -184,9 +240,10 @@ impl PendingCoordinatedDurableDeliveryAdmissionV1 {
                 },
                 wait,
             )?;
-            match self.client.closed_response(&stream, wait, &|| Ok(()))? {
+            match self.client.closed_response_detailed_v1(&stream, wait, &|| Ok(()), stage, frame_cause)? {
                 CoordinatedClosedResponseV1::Preparing { nonce: actual } if actual == nonce => {
                     drop(stream);
+                    *stage = CoordinatedAdmissionFailureStageV1::HistoryCurrent;
                     self.client.check_current()?;
                     std::thread::sleep(Duration::from_millis(100));
                 }
@@ -194,7 +251,9 @@ impl PendingCoordinatedDurableDeliveryAdmissionV1 {
                     nonce: actual,
                     admission,
                 } if actual == nonce => {
+                    *stage = CoordinatedAdmissionFailureStageV1::HistoryStatus;
                     self.check_status(&admission)?;
+                    *stage = CoordinatedAdmissionFailureStageV1::HistoryPrevious;
                     if let Some(previous) = &self.status {
                         if previous.request != admission.request
                             || previous.original_local_intent_digest
@@ -206,7 +265,10 @@ impl PendingCoordinatedDurableDeliveryAdmissionV1 {
                     self.status = Some(admission.clone());
                     return Ok(admission);
                 }
-                _ => return Err(BridgeError::Permission),
+                _ => {
+                    *stage = CoordinatedAdmissionFailureStageV1::HistoryResponseMatch;
+                    return Err(BridgeError::Permission);
+                }
             }
         }
     }

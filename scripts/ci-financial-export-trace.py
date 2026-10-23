@@ -15,6 +15,10 @@ def normalize_observers(text):
  start=text.find('// Observe only an already-returned error.')
  if start>=0:
   end=text.index('#[derive(Serialize)]',start);text=text[:start]+text[end:]
+ for ordinary,observed in [('self.verified.request_admission_retained_v1()','self.verified.request_admission_retained_observed_v1()'),('self.pending.read_original_status_retained_v1()','self.pending.read_original_status_retained_observed_v1()')]:
+  wrapper='admission_observed!('+ordinary+','+observed+')'
+  assert text.count(wrapper)==1
+  text=text.replace(wrapper,ordinary)
  while 'export_observed!(' in text:
   p=text.index('export_observed!(');start=p+len('export_observed!(');i=start;depth=0;quote=False;escape=False;commas=[]
   while i<len(text):
@@ -32,8 +36,19 @@ def normalize_observers(text):
    i+=1
   assert len(commas)==2
   assert text[start:commas[0]].strip() in ['native','engine','bridge']
-  assert re.fullmatch(r'Export[A-Za-z]+',text[commas[0]+1:commas[1]].strip())
+  assert (re.fullmatch(r'Export[A-Za-z]+',text[commas[0]+1:commas[1]].strip())
+          or text[commas[0]+1:commas[1]].strip() in ['AdmissionRequest','AdmissionHistory'])
   text=text[:p]+text[commas[1]+1:i]+text[i+1:]
+ # Strip only the exact reviewed terminal-audit observation block. This fixed
+ # hash guards all finite status arms and preserves the original Receipt text.
+ marker='    let audit = status.verified_audit().map_err(|error| {'
+ if marker in text:
+  start=text.index(marker);end=text.index('    validate_coordinated_original_audit_v1(scope, audit)',start)
+  assert hashlib.sha256(text[start:end].encode()).hexdigest()=='42caf20d3713814ce88b57e487b832eaa5360d3782b246e44175395e5757d036'
+  text=text[:start]+'''    let audit = status.verified_audit().map_err(|_| Error::Receipt(
+        "The original V3 operation remains pending or unknown: complete authenticated Witness history has not established admission. Preserve the original operation; do not resend it".into(),
+    ))?;
+'''+text[end:]
  for expression in ['serde_json::to_string(&inspection)','serde_json::to_string(&export_scope)']:
   text=text.replace(expression+'.map_err(Error::from)',expression)
  return text
