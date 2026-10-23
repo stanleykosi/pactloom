@@ -1,32 +1,35 @@
 {
   "version": 6,
-  "policy": "p35-crate-local-cfg-reuse-v2",
+  "policy": "p40-crate-local-cfg-reuse-v2",
   "qualification_profile": "coordinated-financial-rendered-host-semantic-v1",
   "manifest_version": 2,
   "build_recipe_version": 2,
   "producer": {
     "attempt": 1,
     "repository": "stanleykosi/pactloom",
-    "run_id": 39908531507,
-    "source": "8f145cf7a4f90346fad22fc1dd2c600aa8f7db02",
-    "source_tree": "3f29b3df7560b0a7fc2dee20b20dcf8ea9a61e59"
+    "run_id": 39928103023,
+    "source": "99501f5853a4516fc94a6361f39cb4373048f01f",
+    "source_tree": "82ce41c35e40b259f7237efc534768fc889782db"
   },
   "harness": {
     "repository": "stanleykosi/pactloom",
-    "source": "8f145cf7a4f90346fad22fc1dd2c600aa8f7db02",
-    "source_tree": "3f29b3df7560b0a7fc2dee20b20dcf8ea9a61e59"
+    "source": "3fc27434f7ee5d2af5f71c9d9010b982bedf74dd",
+    "source_tree": "2f70ddbbf2e740ed3001a117a30f479429fd125a"
   },
   "artifact_pins": {
-    "archive_sha256": "b002f2711e0a12fb6d808968d7e99dbba05230ff545d83b2123c0475e5aef52c",
-    "artifact_id": 12483805195,
-    "bundle_sha256": "69b1740da15bdfe45ac84f9f0c4306713882f8b1cacb36b4d97881905df65f5a"
+    "archive_sha256": "84bd634ca6b1560958e21f2bfc41849dd12265c98d3d55dfaa6cee645b2f500c",
+    "artifact_id": 12491706804,
+    "bundle_sha256": "76c38bfe548b5e49933d4b2ded10a351de205b531d50ecf21b59a620faf33b7f"
   },
   "api_pins": {
-    "artifact": "2e147633febe57627bbcacc1c7d8d7fe74ee0df16f664089e61d1ccbefa84c79",
-    "job": "8245c1b9981fdeb244773dbed1fcb85aa2a815f8d9f6e5262b80506f7ecc7565",
-    "run": "54ba50da8b22778c9a6d4988491ebbfcfd70393d17157d208700bfaccb1d7496"
+    "artifact": "b0ef215a12449f6cc8fd54795c8868f7dbafec02fcd32aa9867101994a1b3154",
+    "job": "de3af51065dc8bac72f46cfcad430fd36a4104631dd99a69a4e44eac0c0e766a",
+    "run": "3c97285ed104bb52550eb2fff3f5389602a9a65515c40cdb05c78a0b3e01e904"
   },
-  "producer_inventory_sha256": "2edf0bced3865eb4e1ae9e376c5a4261b46ac5f9a782957aec359315e20a1301",
+  "producer_inventory_sha256": "f063e53d8a5ebd607ffcbbdb28d6e108eb481e90c0d8967c8c3dbc0578b67491",
   "parser_sha256": "c6d12ee5a132083ee97f5aee7fcda3b3dc270a794b90d3d65e18b271c3426682",
-  "reviewed_runtime_changes": {}
+  "reviewed_runtime_changes": {
+    "scripts/ci-financial-flow.py": "fae619497e7fc66f9195169565c04ea7150bc74684ae99d221c2f8555c34ea0a",
+    "scripts/tests/test_ci_financial_observer.py": "6371af4423436b82c7ee654bb92798b6aa6cf96ea5818a70de1acd0155b354a3"
+  }
 }

@@ -4,20 +4,18 @@ from test_setup import L,TRUSTED
 HERE=pathlib.Path(__file__).resolve().parent
 ROOT=HERE.parents[1]
 class IntegrationTests(unittest.TestCase):
- def test_concrete_identical_source_v2_plan(self):
-  p=json.loads((HERE/'plan.json').read_text());self.assertEqual(p['harness'],{k:L.V.PRODUCER[k] for k in ('repository','source','source_tree')})
+ def test_concrete_p40_h41_v2_plan(self):
+  p=json.loads((HERE/'plan.json').read_text());self.assertEqual(p['harness'],{'repository': 'stanleykosi/pactloom', 'source': '3fc27434f7ee5d2af5f71c9d9010b982bedf74dd', 'source_tree': '2f70ddbbf2e740ed3001a117a30f479429fd125a'})
   self.assertEqual(L.validate_plan(p),p)
   self.assertEqual(p['producer'],L.V.PRODUCER);self.assertEqual(p['artifact_pins'],L.V.ARTIFACT_PINS);self.assertEqual(p['api_pins'],L.V.API_PINS)
   self.assertEqual(p['manifest_version'],2);self.assertEqual(p['build_recipe_version'],2);self.assertEqual(p['version'],6)
-  self.assertEqual(p['artifact_pins']['artifact_id'],12483805195)
- def test_p35_parser_and_cleanup_exact_current_sources(self):
+  self.assertEqual(p['artifact_pins']['artifact_id'],12491706804)
+  self.assertEqual(p['reviewed_runtime_changes'],{'scripts/ci-financial-flow.py': 'fae619497e7fc66f9195169565c04ea7150bc74684ae99d221c2f8555c34ea0a', 'scripts/tests/test_ci_financial_observer.py': '6371af4423436b82c7ee654bb92798b6aa6cf96ea5818a70de1acd0155b354a3'})
+ def test_p40_parser_and_cleanup_exact_current_sources(self):
   self.assertEqual((HERE/'producer_artifacts.py').read_bytes(),(ROOT/'scripts/ci-financial-artifacts.py').read_bytes())
   for path,pin in L.CLEANUP_PINS.items():
    data=(HERE/path).read_bytes();self.assertEqual(hashlib.sha256(data).hexdigest(),pin)
-   if path=='cleanup_snapshot/scripts/ci-financial-contract.py':
-    # Dormant P35 cleanup bytes stay pinned; fresh P40 uses its reviewed current contract.
-    self.assertEqual(hashlib.sha256((ROOT/'scripts/ci-financial-contract.py').read_bytes()).hexdigest(),'501993b6ee0bed7db09aa6d3722381e58e051c39cc6cae020bf5f42d47cadfa8')
-   else:self.assertEqual(data,b'financial-semantic\n' if path.endswith('/qualification-gate-mode') else (ROOT/pathlib.Path(path).relative_to('cleanup_snapshot')).read_bytes())
+   self.assertEqual(data,b'financial-semantic\n' if path.endswith('/qualification-gate-mode') else (ROOT/pathlib.Path(path).relative_to('cleanup_snapshot')).read_bytes())
  def test_cleanup_dependency_closure_imports_without_execution(self):
   s=TRUSTED.module('cleanup_closure_probe',L.HERE/'cleanup_snapshot/scripts/ci-financial-supervisor.py')
   self.assertEqual(s.A.MANIFEST_VERSION,2);self.assertEqual(s.A.recipe(L.V.QUALIFICATION_PROFILE),L.V.A.recipe(L.V.QUALIFICATION_PROFILE))
@@ -27,22 +25,19 @@ class IntegrationTests(unittest.TestCase):
   self.assertIn('clean=S.cleanup(token,tag)',text);self.assertIn('clean=trusted_cleanup(trusted)',text)
   self.assertNotIn('S.build_inputs(',text);self.assertNotIn("'cargo'",text)
  def test_exact_private_workflow_wiring(self):
-  self.assertEqual((ROOT/'scripts/qualification-gate-mode').read_bytes(),b'financial-semantic\n')
+  self.assertEqual((ROOT/'scripts/qualification-gate-mode').read_bytes(),b'financial-semantic-reuse\n')
   w=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
-  fresh=w.split('      - name: Fresh isolated two-signer financial UI',1)[1].split('      - name:',1)[0]
-  self.assertIn("steps.mode.outputs.gate == 'financial-semantic'",fresh)
-  self.assertIn('run: bash scripts/ci-financial-linux.sh',fresh)
-  for title in ('Fetch exact independent producer P and reviewed harness H without credentials','Acquire exact producer bundle with isolated read token','Actual synthetic financial runtime using verified producer binaries (not a fresh build)','Preserved P35 preparation, owned admissions and process-death reopen diagnostic (NOT full flow)'):
+  runtime=w.split('      - name: Actual synthetic financial runtime using verified producer binaries (not a fresh build)',1)[1].split('      - name:',1)[0]
+  self.assertIn("if: steps.mode.outputs.gate == 'financial-semantic-reuse'",runtime)
+  self.assertIn('launch_adapter.py" run',runtime)
+  for title in ('Fresh isolated two-signer financial UI','Preserve exact credential-free compiled financial bundle','Preserved P35 preparation, owned admissions and process-death reopen diagnostic (NOT full flow)'):
    block=w.split('      - name: '+title,1)[1].split('      - name:',1)[0]
    condition=next(line for line in block.splitlines() if line.strip().startswith('if:'))
-   self.assertNotIn("gate == 'financial-semantic'",condition)
-  cleanup=w.split('      - name: Verify financial containers, temporary images and build cache removed',1)[1].split('      - name:',1)[0]
-  self.assertIn("always() &&",cleanup);self.assertIn("gate == 'financial-semantic'",cleanup)
-  self.assertIn('scripts/ci-financial-supervisor.py cleanup',cleanup)
+   self.assertNotIn("gate == 'financial-semantic-reuse'",condition)
 if __name__=='__main__':unittest.main()
 
 class CleanupProfileTests(unittest.TestCase):
- def test_current_p35_cleanup_main_has_pinned_profile_input(self):
+ def test_current_p40_cleanup_main_has_pinned_profile_input(self):
   from unittest.mock import patch
   import tempfile,os
   s=TRUSTED.module('cleanup_main_probe',L.HERE/'cleanup_snapshot/scripts/ci-financial-supervisor.py')
@@ -51,7 +46,7 @@ class CleanupProfileTests(unittest.TestCase):
 
 class IdenticalSourceTests(unittest.TestCase):
  def test_zero_delta_only_for_exact_producer_identity(self):
-  p=json.loads((HERE/'plan.json').read_text());self.assertEqual(p['reviewed_runtime_changes'],{});L.validate_plan(p)
+  p=json.loads((HERE/'plan.json').read_text());p['harness']={k:L.V.PRODUCER[k] for k in ('repository','source','source_tree')};p['reviewed_runtime_changes']={};L.validate_plan(p)
   import copy
   for key in ('source','source_tree','repository'):
    changed=copy.deepcopy(p);changed['harness'][key]='f'*40
@@ -65,8 +60,8 @@ class IdenticalSourceTests(unittest.TestCase):
 class WorkflowCustodyTests(unittest.TestCase):
  def test_exact_p_h_and_credential_cleanup_boundaries(self):
   w=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
-  self.assertEqual(w.count('fetch_exact P 8f145cf7a4f90346fad22fc1dd2c600aa8f7db02'),1)
-  self.assertEqual(w.count('fetch_exact H 8f145cf7a4f90346fad22fc1dd2c600aa8f7db02'),1)
+  self.assertEqual(w.count('fetch_exact P 99501f5853a4516fc94a6361f39cb4373048f01f'),1)
+  self.assertEqual(w.count('fetch_exact H 3fc27434f7ee5d2af5f71c9d9010b982bedf74dd'),1)
   self.assertEqual(w.count('FINANCIAL_ARTIFACT_READ_TOKEN:'),1)
   runtime=w.split('      - name: Actual synthetic financial runtime',1)[1]
   self.assertNotIn('github.token',runtime);self.assertIn('env -i PATH=',runtime)

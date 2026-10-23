@@ -18,14 +18,14 @@ PARSER_SHA='c6d12ee5a132083ee97f5aee7fcda3b3dc270a794b90d3d65e18b271c3426682'
 assert hashlib.sha256((HERE/'producer_artifacts.py').read_bytes()).hexdigest()==PARSER_SHA
 A=_reviewed_parser()
 QUALIFICATION_PROFILE='coordinated-financial-rendered-host-semantic-v1'
-POLICY='p35-crate-local-cfg-reuse-v2'
+POLICY='p40-crate-local-cfg-reuse-v2'
 
-PRODUCER=dict(repository='stanleykosi/pactloom',source='8f145cf7a4f90346fad22fc1dd2c600aa8f7db02',
- source_tree='3f29b3df7560b0a7fc2dee20b20dcf8ea9a61e59',run_id=39908531507,attempt=1)
-JOB_ID=120265923196
+PRODUCER=dict(repository='stanleykosi/pactloom',source='99501f5853a4516fc94a6361f39cb4373048f01f',
+ source_tree='82ce41c35e40b259f7237efc534768fc889782db',run_id=39928103023,attempt=1)
+JOB_ID=120329364170
 # Exact existing runtime files, NOT a suffix/directory exclusion. Contract,
 # output projection, fixture profile/scenario, image and orchestration are fixed.
-# Original eight paths unchanged. No diagnostics annex is reviewed for P35.
+# Original eight paths unchanged. No diagnostics annex is reviewed for P40.
 RUNTIME_ONLY=frozenset((
  'scripts/ci-financial-container.py',
  'scripts/ci-financial-fixture.py',
@@ -120,7 +120,7 @@ def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventor
         and run.get('repository',{}).get('full_name')==PRODUCER['repository'],'producer_run')
     # A runtime-failed job is expected and does not invalidate its pre-fixture build.
     require(run.get('conclusion') in ('failure','success'),'producer_terminal')
-    name='financial-build-39908531507-1-'+PRODUCER['source']
+    name='financial-build-39928103023-1-'+PRODUCER['source']
     origin=artifact.get('workflow_run',{})
     require(artifact.get('id')==pins['artifact_id'] and type(artifact.get('id')) is int
         and artifact.get('name')==name and artifact.get('expired') is False
@@ -149,15 +149,15 @@ def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventor
     if diagnostic_compatibility is not None:evidence['diagnostic_compatibility']=diagnostic_compatibility.copy()
     return evidence
 
-ARTIFACT_PINS={'archive_sha256': 'b002f2711e0a12fb6d808968d7e99dbba05230ff545d83b2123c0475e5aef52c', 'artifact_id': 12483805195, 'bundle_sha256': '69b1740da15bdfe45ac84f9f0c4306713882f8b1cacb36b4d97881905df65f5a'}
-API_PINS={'artifact': '2e147633febe57627bbcacc1c7d8d7fe74ee0df16f664089e61d1ccbefa84c79', 'job': '8245c1b9981fdeb244773dbed1fcb85aa2a815f8d9f6e5262b80506f7ecc7565', 'run': '54ba50da8b22778c9a6d4988491ebbfcfd70393d17157d208700bfaccb1d7496'}
-SOURCE_INVENTORY_SHA='2edf0bced3865eb4e1ae9e376c5a4261b46ac5f9a782957aec359315e20a1301'
+ARTIFACT_PINS={'archive_sha256': '84bd634ca6b1560958e21f2bfc41849dd12265c98d3d55dfaa6cee645b2f500c', 'artifact_id': 12491706804, 'bundle_sha256': '76c38bfe548b5e49933d4b2ded10a351de205b531d50ecf21b59a620faf33b7f'}
+API_PINS={'artifact': 'b0ef215a12449f6cc8fd54795c8868f7dbafec02fcd32aa9867101994a1b3154', 'job': 'de3af51065dc8bac72f46cfcad430fd36a4104631dd99a69a4e44eac0c0e766a', 'run': '3c97285ed104bb52550eb2fff3f5389602a9a65515c40cdb05c78a0b3e01e904'}
+SOURCE_INVENTORY_SHA='f063e53d8a5ebd607ffcbbdb28d6e108eb481e90c0d8967c8c3dbc0578b67491'
 
 
 def authenticate_metadata(run,artifact,job):
     for name,value in [('run',run),('artifact',artifact),('job',job)]:
         require(type(value) is dict and hashlib.sha256(A.canonical(value)).hexdigest()==API_PINS[name],'api_custody_'+name)
-    require(artifact['node_id']=='MDg6QXJ0aWZhY3QxMjQ4MzgwNTE5NQ==','artifact_node')
+    require(artifact['node_id']=='MDg6QXJ0aWZhY3QxMjQ5MTcwNjgwNA==','artifact_node')
     require(run['head_commit']['tree_id']==PRODUCER['source_tree'],'producer_tree')
     require(job['id']==JOB_ID and job['run_id']==PRODUCER['run_id'],'producer_job')
     for name in ('Preserve exact credential-free compiled financial bundle','Verify financial containers, temporary images and build cache removed'):

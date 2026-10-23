@@ -172,8 +172,8 @@ jobs:
             test "$(git -C "$destination" rev-parse HEAD)" = "$commit"
             test -z "$(git -C "$destination" status --porcelain --untracked-files=all)"
           }
-          fetch_exact P 8f145cf7a4f90346fad22fc1dd2c600aa8f7db02
-          fetch_exact H 8f145cf7a4f90346fad22fc1dd2c600aa8f7db02
+          fetch_exact P 99501f5853a4516fc94a6361f39cb4373048f01f
+          fetch_exact H 3fc27434f7ee5d2af5f71c9d9010b982bedf74dd
       - name: Run launcher negative and protocol tests without credentials
         if: steps.mode.outputs.gate == 'financial-semantic-reuse' || steps.mode.outputs.gate == 'financial-preparation-diagnostic'
         timeout-minutes: 5

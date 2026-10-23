@@ -11,7 +11,7 @@ from unittest.mock import patch
 from test_setup import L,A
 
 BASE=pathlib.Path(__file__).resolve().parents[3]/'H'
-if not BASE.is_dir():BASE=pathlib.Path(__file__).resolve().parents[3]/'pactloom-financial-private-composed35'
+if not BASE.is_dir():BASE=pathlib.Path(__file__).resolve().parents[3]/'pactloom-financial-private-composed40'
 assert __import__('hashlib').sha256((BASE/'scripts/ci-financial-supervisor.py').read_bytes()).hexdigest()=='2b251c9f0bcce7a227d7e7f37f2a7a51c049f6b0e30e36ee3c11adce19c6dce0'
 spec=importlib.util.spec_from_file_location('current_fresh_supervisor',BASE/'scripts/ci-financial-supervisor.py')
 S=importlib.util.module_from_spec(spec);spec.loader.exec_module(S)

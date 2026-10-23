@@ -12,7 +12,7 @@ class Tests(unittest.TestCase):
   with zipfile.ZipFile(self.archive,'w') as z:z.write(self.bundle,'build.tar')
   self.pins=dict(artifact_id=123,archive_sha256=hashlib.sha256(self.archive.read_bytes()).hexdigest(),bundle_sha256=hashlib.sha256(self.bundle.read_bytes()).hexdigest())
   self.run=dict(id=V.PRODUCER['run_id'],run_attempt=1,head_sha=V.PRODUCER['source'],head_commit={'tree_id':V.PRODUCER['source_tree']},head_branch='qualification/durable-proposal-v1',event='push',status='completed',conclusion='failure',path='.github/workflows/durable-native-linux.yml',repository={'full_name':'stanleykosi/pactloom'})
-  self.artifact=dict(id=123,node_id='MDg6QXJ0aWZhY3QxMjQ4MzgwNTE5NQ==',name='financial-build-'+str(V.PRODUCER['run_id'])+'-1-'+V.PRODUCER['source'],expired=False,workflow_run={'id':V.PRODUCER['run_id'],'head_sha':V.PRODUCER['source']},digest='sha256:'+self.pins['archive_sha256'])
+  self.artifact=dict(id=123,node_id='MDg6QXJ0aWZhY3QxMjQ5MTcwNjgwNA==',name='financial-build-'+str(V.PRODUCER['run_id'])+'-1-'+V.PRODUCER['source'],expired=False,workflow_run={'id':V.PRODUCER['run_id'],'head_sha':V.PRODUCER['source']},digest='sha256:'+self.pins['archive_sha256'])
  def test_v2_recipe_exact(self):
   m=V.A.verify_bundle(self.bundle,V.PRODUCER,self.inventory,V.QUALIFICATION_PROFILE);self.assertEqual(m['version'],2);self.assertEqual(m['recipe']['build_recipe_version'],2)
   for key,value in [('build_recipe_version',1),('observed_rustflags','--cfg wholepact_financial_ci'),('cfg_delivery',{}),('qualification_profile',V.A.PIXEL_PROFILE)]:
