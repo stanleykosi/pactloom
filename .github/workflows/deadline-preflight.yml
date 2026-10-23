@@ -1,14 +1,14 @@
-name: Close observation preflight only
+name: Readiness observation preflight only
 on:
   push:
-    branches: [checkpoint/close-preflight-p45]
+    branches: [checkpoint/readiness-preflight-p46]
 permissions: {}
 concurrency:
-  group: close-preflight-p45
+  group: readiness-preflight-p46
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/close-preflight-p45' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/readiness-preflight-p46' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -79,6 +79,8 @@ jobs:
           env['WHOLEPACT_FINANCIAL_BUILD_MODE'] = 'production'
           print(run(rustup+['python3', '-I', '-B', 'scripts/tests/test_v3_deadline_identity.py'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-close-trace.py', '--source', str(repo), '--out', str(root/'close-traces'), '--run'], env=env, timeout=180))
+          print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-preparation-client-trace.py', '--source', str(repo), '--out', str(root/'readiness-client-traces'), '--run'], env=env, timeout=180))
+          print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-preparation-server-trace.py', '--source', str(repo), '--out', str(root/'readiness-server-traces'), '--run'], env=env, timeout=180))
           package = 'wholepact-financial-coordinator-origin'
           feature = 'coordinated-financial-workflow-v1'
           environments = {}
@@ -141,7 +143,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/close-preflight-p45' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/readiness-preflight-p46' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

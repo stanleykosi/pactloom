@@ -194,9 +194,20 @@ impl CoordinatedOriginalClientV1 {
             _ => return Err(BridgeError::Permission),
         }
         drop(stream);
+        // The first status query is readiness only: native owner configuration,
+        // PrepareRead and Receive reviews may take place while it is queued.
+        // It is bounded by the original Pair channel, never a renewed lease.
+        let mut readiness: Option<(CoordinatedRecipientIntentV1, String)> = None;
         loop {
             let nonce = fresh_nonce()?;
+            if readiness
+                .as_ref()
+                .is_some_and(|(_, first_nonce)| first_nonce == &nonce)
+            {
+                return Err(BridgeError::Binding);
+            }
             let started = Instant::now();
+            let deadline = preparation_status_deadline(started, self.deadline, readiness.is_some());
             let stream = self.open_closed(
                 CoordinatedClosedCommandV1::PreparationStatus {
                     request_digest: request_digest.clone(),
@@ -226,11 +237,28 @@ impl CoordinatedOriginalClientV1 {
                     {
                         return Err(BridgeError::Binding);
                     }
-                    // Original S communicates only its already captured material
-                    // ceiling. Anchor before request I/O so transit never renews it.
-                    if remaining_material_ms == 0 || remaining_material_ms > 900_000 {
+                    if remaining_read_ms == 0
+                        || remaining_read_ms > 120_000
+                        || remaining_material_ms == 0
+                        || remaining_material_ms > 900_000
+                    {
                         return Err(BridgeError::Permission);
                     }
+                    if let Some((expected, _)) = &readiness {
+                        if expected != &intent {
+                            return Err(BridgeError::Binding);
+                        }
+                    } else {
+                        // Fully validated binding only; no read/material deadline,
+                        // prepared client or other permission is created here.
+                        readiness = Some((intent, nonce));
+                        drop(stream);
+                        continue;
+                    }
+                    // Only the second, fresh nonce-bound query yields remaining
+                    // genuine Receive/material bounds. Its pre-I/O anchor keeps
+                    // transit conservative without charging the earlier reviews
+                    // against a permission which did not yet exist then.
                     let material_deadline =
                         (started + Duration::from_millis(remaining_material_ms)).min(self.deadline);
                     require_before(material_deadline)?;
@@ -243,7 +271,9 @@ impl CoordinatedOriginalClientV1 {
                         material_deadline,
                     });
                 }
-                CoordinatedClosedResponseV1::Preparing { nonce: actual } if actual == nonce => {
+                CoordinatedClosedResponseV1::Preparing { nonce: actual }
+                    if actual == nonce && readiness.is_none() =>
+                {
                     drop(stream);
                     require_before(deadline)?;
                     self.check_current()?;
@@ -286,6 +316,31 @@ impl CoordinatedOriginalClientV1 {
         require_before(deadline)?;
         wholepact_core::strict_json::parse_typed_json_with_byte_limit(&bytes, MAX_METADATA_V3)
             .map_err(|_| BridgeError::Binding)
+    }
+}
+// Readiness carries no permission. The second request retains the original
+// short transport bound, and neither phase can extend the original channel.
+fn preparation_status_deadline(started: Instant, channel: Instant, ready: bool) -> Instant {
+    if ready {
+        channel.min(started + Duration::from_secs(120))
+    } else {
+        channel
+    }
+}
+#[cfg(test)]
+mod preparation_status_deadline_tests {
+    use super::*;
+    #[test]
+    fn readiness_wait_uses_original_channel_and_final_query_remains_short() {
+        let start = Instant::now();
+        let channel = start + Duration::from_secs(900);
+        assert_eq!(preparation_status_deadline(start, channel, false), channel);
+        let later = start + Duration::from_secs(240);
+        assert_eq!(preparation_status_deadline(later, channel, false), channel);
+        assert_eq!(preparation_status_deadline(later, channel, true), later + Duration::from_secs(120));
+        assert_eq!(preparation_status_deadline(channel, channel, true), channel);
+        let short = later + Duration::from_secs(7);
+        assert_eq!(preparation_status_deadline(later, short, true), short);
     }
 }
 impl PreparedCoordinatedDurableReviewRecipientV1 {

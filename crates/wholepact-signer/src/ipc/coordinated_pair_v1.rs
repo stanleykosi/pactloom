@@ -406,6 +406,25 @@ impl Drop for CoordinatedLocalIpcV1 {
         let _ = fs::remove_file(&self.path);
     }
 }
+/// Only passive preparation status can wait through earlier native reviews.
+/// Its response still requires an actual Receive Final and is written under
+/// the unchanged minimum of request, genuine Receive and material deadlines.
+fn request_transport_deadline(
+    request: &CoordinatedRequestV1,
+    received: Instant,
+    source: Instant,
+    channel: Instant,
+) -> Instant {
+    let parent = source.min(channel);
+    if matches!(request, CoordinatedRequestV1::Closed(
+        crate::authority_bridge::durable_review_ipc_v3::coordinated_v1::CoordinatedClosedCommandV1::PreparationStatus { .. }
+    )) {
+        parent
+    } else {
+        received.min(parent)
+    }
+}
+
 fn allowed_scope(scope: &PairScope) -> Result<()> {
     scope.validate()?;
     if !scope.history_read || !scope.preconstruction_export || scope.authorization_export {
@@ -609,9 +628,12 @@ fn handle(
                 };
                 sender
                     .try_send(CoordinatedLocalEventV1::Request {
-                        original_request_deadline: received_request_deadline
-                            .min(bounds.deadline)
-                            .min(peer.deadline()),
+                        original_request_deadline: request_transport_deadline(
+                            &request,
+                            received_request_deadline,
+                            bounds.deadline,
+                            peer.deadline(),
+                        ),
                         peer,
                         stream: actor_listener_result!(StreamClone, stream.try_clone())?,
                         request,
@@ -649,6 +671,34 @@ mod tests {
         ));
         // Parsing is inert. The actual handler separately requires hashes,
         // the private registry, observed same H, token proof and source lifetime.
+    }
+    #[test]
+    fn only_preparation_status_uses_original_parent_transport_bound() {
+        use crate::authority_bridge::durable_review_ipc_v3::coordinated_v1::CoordinatedClosedCommandV1 as C;
+        let start=Instant::now();
+        let short=start+Duration::from_secs(120);
+        let source=start+Duration::from_secs(700);
+        let channel=start+Duration::from_secs(600);
+        let status=CoordinatedRequestV1::Closed(C::PreparationStatus {request_digest:"ab".repeat(32),nonce:"cd".repeat(32)});
+        assert_eq!(request_transport_deadline(&status,short,source,channel),channel);
+        assert_eq!(request_transport_deadline(&status,short,short,channel),short);
+        let other=[
+            C::Admit{intent_digest:"ab".repeat(32),nonce:"cd".repeat(32)},
+            C::AdmissionStatus{intent_digest:"ab".repeat(32),nonce:"cd".repeat(32)},
+            C::History{intent_digest:"ab".repeat(32),authorization_id:"synthetic".into(),nonce:"cd".repeat(32)},
+            C::Activate{intent_digest:"ab".repeat(32),nonce:"cd".repeat(32)},
+            C::VerifyImport{intent_digest:"ab".repeat(32),nonce:"cd".repeat(32)},
+        ];
+        for command in other {
+            assert_eq!(request_transport_deadline(&CoordinatedRequestV1::Closed(command),short,source,channel),short);
+        }
+    }
+    #[test]
+    fn preparation_status_still_requires_original_digest_and_fresh_nonce_shapes() {
+        use crate::authority_bridge::durable_review_ipc_v3::coordinated_v1::CoordinatedClosedCommandV1 as C;
+        for (digest,nonce) in [("bad".into(),"cd".repeat(32)),("ab".repeat(32),"bad".into())] {
+            assert!(C::PreparationStatus{request_digest:digest,nonce}.validate().is_err());
+        }
     }
     #[test]
     fn shared_token_kernel_rejects_wrong_length_case_and_nonhex() {
