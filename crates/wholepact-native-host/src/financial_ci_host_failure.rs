@@ -160,3 +160,41 @@ pub(crate) fn admission(error: &wholepact_signer::authority_bridge::durable_revi
         bridge(stage,error.error());
     }
 }
+
+/// Only a first-readiness helper's actual propagated Err has local detail.
+/// Other preparation failures retain the existing outer Host boundary.
+pub(crate) fn preparation_readiness(error: &wholepact_signer::authority_bridge::durable_review_ipc_v3::coordinated_v1::CoordinatedPreparationFailureV1) {
+    use wholepact_signer::authority_bridge::durable_review_ipc_v3::coordinated_v1::CoordinatedAdmissionFailureStageV1 as S;
+    let stage = match error.readiness_stage() {
+        Some(S::ResponseCheckBefore)=>Stage::PreparationReadinessCheckBefore,
+        Some(S::ResponsePeerBefore)=>Stage::PreparationReadinessPeerBefore,
+        Some(S::ResponseDeadlineBefore)=>Stage::PreparationReadinessDeadlineBefore,
+        Some(S::ResponseFrame)=>Stage::PreparationReadinessFrame,
+        Some(S::ResponseCheckAfter)=>Stage::PreparationReadinessCheckAfter,
+        Some(S::ResponsePeerAfter)=>Stage::PreparationReadinessPeerAfter,
+        Some(S::ResponseDeadlineAfter)=>Stage::PreparationReadinessDeadlineAfter,
+        Some(S::ResponseDecode)=>Stage::PreparationReadinessDecode,
+        _=>return,
+    };
+    if let Some(cause) = error.frame_cause() {
+        use wholepact_signer_origin::framing::FrameReadCause as F;
+        let class = match cause {
+            F::Unclassified=>Class::FrameUnclassified,
+            F::Deadline=>Class::FrameDeadline,
+            F::Eof=>Class::FrameEof,
+            F::CredentialsMissing=>Class::FrameCredentialsMissing,
+            F::CredentialsMismatch=>Class::FrameCredentialsMismatch,
+            F::AncillaryRejected=>Class::FrameAncillaryRejected,
+            F::Truncated=>Class::FrameTruncated,
+            F::PeerNotLive=>Class::FramePeerNotLive,
+            F::CurrentCheck=>Class::FrameCurrentCheck,
+            F::Io=>Class::FrameIo,
+            F::FrameLimit=>Class::FrameLimit,
+            F::InvalidFrame=>Class::FrameInvalidFrame,
+            F::InvalidBudget=>Class::FrameInvalidBudget,
+        };
+        latch_failure(stage,class);
+    } else {
+        bridge(stage,error.error());
+    }
+}

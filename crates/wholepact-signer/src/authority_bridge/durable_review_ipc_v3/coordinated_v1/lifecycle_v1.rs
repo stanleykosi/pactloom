@@ -159,6 +159,17 @@ pub struct VerifiedImportedCoordinatedDurableReviewSessionV1 {
     pub(crate) receipt: CoordinatedVerifiedReceiptV1,
     pub(crate) deadline: Instant,
 }
+/// Local first-readiness failure detail only; never a permission or wire value.
+pub struct CoordinatedPreparationFailureV1 {
+    readiness: Option<(CoordinatedAdmissionFailureStageV1, Option<wholepact_signer_origin::framing::FrameReadCause>)>,
+    error: BridgeError,
+}
+impl CoordinatedPreparationFailureV1 {
+    pub fn readiness_stage(&self) -> Option<CoordinatedAdmissionFailureStageV1> { self.readiness.map(|v| v.0) }
+    pub fn frame_cause(&self) -> Option<wholepact_signer_origin::framing::FrameReadCause> { self.readiness.and_then(|v| v.1) }
+    pub fn error(&self) -> &BridgeError { &self.error }
+    pub fn into_error(self) -> BridgeError { self.error }
+}
 impl CoordinatedOriginalClientV1 {
     /// Uses the actual H verified payload preparation. Exactly one initial
     /// request is sent, never retried after an uncertain stage acknowledgement.
@@ -170,6 +181,32 @@ impl CoordinatedOriginalClientV1 {
         payload_bytes: u64,
         delivery: DurableDeliveryPlanV2,
         material_scopes: Vec<DurableDeliveryMaterialScopeRefV2>,
+    ) -> Result<PreparedCoordinatedDurableReviewRecipientV1> {
+        self.prepare_closed_recipient_inner_v1(request, fixed, payload_digest, payload_bytes, delivery, material_scopes, &mut None)
+    }
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    pub fn prepare_closed_recipient_observed_v1(
+        self,
+        request: DurableReviewDeliveryRequestV1,
+        fixed: FixedProposalIdentityV1,
+        payload_digest: String,
+        payload_bytes: u64,
+        delivery: DurableDeliveryPlanV2,
+        material_scopes: Vec<DurableDeliveryMaterialScopeRefV2>,
+    ) -> std::result::Result<PreparedCoordinatedDurableReviewRecipientV1, CoordinatedPreparationFailureV1> {
+        let mut readiness = None;
+        self.prepare_closed_recipient_inner_v1(request, fixed, payload_digest, payload_bytes, delivery, material_scopes, &mut readiness)
+            .map_err(|error| CoordinatedPreparationFailureV1 { readiness, error })
+    }
+    fn prepare_closed_recipient_inner_v1(
+        self,
+        request: DurableReviewDeliveryRequestV1,
+        fixed: FixedProposalIdentityV1,
+        payload_digest: String,
+        payload_bytes: u64,
+        delivery: DurableDeliveryPlanV2,
+        material_scopes: Vec<DurableDeliveryMaterialScopeRefV2>,
+        readiness_failure: &mut Option<(CoordinatedAdmissionFailureStageV1, Option<wholepact_signer_origin::framing::FrameReadCause>)>,
     ) -> Result<PreparedCoordinatedDurableReviewRecipientV1> {
         let preparation = self.build_preparation(
             request,
@@ -215,7 +252,21 @@ impl CoordinatedOriginalClientV1 {
                 },
                 deadline,
             )?;
-            match self.closed_response(&stream, deadline, &|| Ok(()))? {
+            // The first response is inert readiness only. Its original channel
+            // may exceed a single transfer's 120-second budget; wait without
+            // consuming bytes, then enter the same authenticated frame parser.
+            // Initial Prepare and the second, permission-bearing query keep
+            // their unchanged ordinary short-response path.
+            let response = if readiness.is_none() {
+                let mut stage = CoordinatedAdmissionFailureStageV1::ResponseCheckBefore;
+                let mut frame_cause = None;
+                let result = self.preparation_readiness_response(&stream, deadline, &|| Ok(()), &mut stage, &mut frame_cause);
+                if result.is_err() { *readiness_failure = Some((stage, frame_cause)); }
+                result
+            } else {
+                self.closed_response(&stream, deadline, &|| Ok(()))
+            }?;
+            match response {
                 CoordinatedClosedResponseV1::Prepared {
                     nonce: actual,
                     intent,
@@ -282,6 +333,47 @@ impl CoordinatedOriginalClientV1 {
                 _ => return Err(BridgeError::Permission),
             }
         }
+    }
+    // Private to the first PreparationStatus readiness fence. This does not
+    // create a client permission or renew a clock: the original channel caps
+    // setup, and the existing setup reader caps transfer at first-readable+120.
+    fn preparation_readiness_response(
+        &self,
+        stream: &UnixStream,
+        deadline: Instant,
+        check: &dyn Fn() -> Result<()>,
+        stage: &mut CoordinatedAdmissionFailureStageV1,
+        frame_cause: &mut Option<wholepact_signer_origin::framing::FrameReadCause>,
+    ) -> Result<CoordinatedClosedResponseV1> {
+        *frame_cause = None;
+        *stage = CoordinatedAdmissionFailureStageV1::ResponseCheckBefore;
+        check()?;
+        *stage = CoordinatedAdmissionFailureStageV1::ResponsePeerBefore;
+        self.check_stream(stream)?;
+        *stage = CoordinatedAdmissionFailureStageV1::ResponseDeadlineBefore;
+        require_before(deadline)?;
+        *stage = CoordinatedAdmissionFailureStageV1::ResponseFrame;
+        let bytes = wholepact_signer_origin::framing::read_setup_frame_capped_checked_observed_until(
+            stream,
+            &self.peer,
+            MAX_METADATA_V3,
+            deadline.min(self.deadline),
+            || {
+                check().map_err(|_| wholepact_signer_origin::Error::Permission)?;
+                self.check_stream(stream)
+                    .map_err(|_| wholepact_signer_origin::Error::Permission)
+            },
+        )
+        .map_err(|failure| { *frame_cause = Some(failure.cause); BridgeError::Ipc })?;
+        *stage = CoordinatedAdmissionFailureStageV1::ResponseCheckAfter;
+        check()?;
+        *stage = CoordinatedAdmissionFailureStageV1::ResponsePeerAfter;
+        self.check_stream(stream)?;
+        *stage = CoordinatedAdmissionFailureStageV1::ResponseDeadlineAfter;
+        require_before(deadline)?;
+        *stage = CoordinatedAdmissionFailureStageV1::ResponseDecode;
+        wholepact_core::strict_json::parse_typed_json_with_byte_limit(&bytes, MAX_METADATA_V3)
+            .map_err(|_| BridgeError::Binding)
     }
     pub(super) fn open_closed(
         &self,

@@ -49,6 +49,13 @@ def normalize_observers(text):
         "The original V3 operation remains pending or unknown: complete authenticated Witness history has not established admission. Preserve the original operation; do not resend it".into(),
     ))?;
 '''+text[end:]
+ # Exact first-readiness diagnostic wrapper; reconstruct only the same
+ # original ordinary operation and unchanged outer Permission conversion.
+ marker='            #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]\n            let prepared = client.prepare_closed_recipient'
+ if marker in text:
+  start=text.index(marker);end=text.index('\n        },',start)
+  assert hashlib.sha256(text[start:end].encode()).hexdigest()=='72131441f9f0bcacbd9953aa89f6d1e25f7cd4384f347689a72aa793337ead7c'
+  text=text[:start]+'            client.prepare_closed_recipient_v1(request, fixed.clone(), digest.into(), bytes, delivery.clone(), materials.to_vec()).map_err(|_| Error::Permission)'+text[end:]
  for expression in ['serde_json::to_string(&inspection)','serde_json::to_string(&export_scope)']:
   text=text.replace(expression+'.map_err(Error::from)',expression)
  return text

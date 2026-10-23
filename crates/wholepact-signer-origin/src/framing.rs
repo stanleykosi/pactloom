@@ -220,14 +220,14 @@ fn read_setup_frame_capped_observed_kernel(
             if ready == 0 {
                 continue;
             }
-            if descriptor.revents & (libc::POLLERR | libc::POLLNVAL | libc::POLLHUP) != 0 {
-                cause = if descriptor.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
-                    FrameReadCause::Io
-                } else {
-                    FrameReadCause::Eof
-                };
+            if descriptor.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+                cause = FrameReadCause::Io;
                 return Err(Error::Authentication);
             }
+            // A one-response stream may close after queueing its complete
+            // frame. POLLIN|POLLHUP still has bytes to authenticate: enter the
+            // unchanged parser before treating HUP alone as EOF. Its peer,
+            // credentials, byte/deadline and final-restriction checks remain.
             if descriptor.revents & libc::POLLIN != 0 {
                 let transfer_deadline = observe(
                     setup_transfer_deadline(setup_deadline, Instant::now()),
@@ -246,6 +246,10 @@ fn read_setup_frame_capped_observed_kernel(
                     cause = failure.cause;
                     failure.error
                 });
+            }
+            if descriptor.revents & libc::POLLHUP != 0 {
+                cause = FrameReadCause::Eof;
+                return Err(Error::Authentication);
             }
             cause = FrameReadCause::InvalidFrame;
             return Err(Error::Authentication);

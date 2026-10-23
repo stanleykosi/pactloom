@@ -240,7 +240,15 @@ pub(in crate::host::financial) fn begin_original_coordinated_export_v1<'host>(
                 proposal_binding: fixed.proposal_binding.clone(),
             };
             drop(redisclosed);
-            client.prepare_closed_recipient_v1(request, fixed.clone(), digest.into(), bytes, delivery.clone(), materials.to_vec()).map_err(|_| Error::Permission)
+            #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
+            let prepared = client.prepare_closed_recipient_v1(request, fixed.clone(), digest.into(), bytes, delivery.clone(), materials.to_vec());
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            let prepared = client.prepare_closed_recipient_observed_v1(request, fixed.clone(), digest.into(), bytes, delivery.clone(), materials.to_vec())
+                .map_err(|failure| {
+                    crate::financial_ci_host_failure::preparation_readiness(&failure);
+                    failure.into_error()
+                });
+            prepared.map_err(|_| Error::Permission)
         },
     )?;
     Ok(RetainedCoordinatedVerifiedExportV1 {

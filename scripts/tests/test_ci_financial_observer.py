@@ -2669,7 +2669,8 @@ class PreparationFailureDomainTests(unittest.TestCase):
     def test_exact_preparation_domains_and_unchanged_closed_shape(self):
         self.assertEqual(len(self.STAGES),19);self.assertEqual(len(self.CLASSES),11)
         expected={s for s in O.C.HOST_FAILURE_STAGES if s.startswith(('Delivery','Preparation','HistoricalApproval')) or s in ('OriginalDisclosureSelector','MaterialRestrictionCapture','PairConfirmation')}
-        self.assertEqual(expected,self.STAGES)
+        readiness=frozenset('PreparationReadinessCheckBefore PreparationReadinessPeerBefore PreparationReadinessDeadlineBefore PreparationReadinessFrame PreparationReadinessCheckAfter PreparationReadinessPeerAfter PreparationReadinessDeadlineAfter PreparationReadinessDecode'.split())
+        self.assertEqual(expected,self.STAGES|readiness)
         self.assertEqual({c for c in O.C.HOST_FAILURE_CLASSES if c.startswith('Engine') or c=='PredicateDenied'},self.CLASSES)
         for stage in self.STAGES:
             for cls in self.CLASSES:
@@ -3201,3 +3202,11 @@ class AdmissionHostStageTests(unittest.TestCase):
    O.C.validate_host_failure_facts(v)
   for stage in ('AdmissionOther',True,'AdmissionRequest raw','AdmissionRequest','AdmissionHistory'):
    with self.assertRaises(O.C.Rejected):O.C.validate_host_failure_facts(dict(version=1,stage=stage,**{'class':'Receipt'},relay=None))
+
+class PreparationReadinessHostStageTests(unittest.TestCase):
+ def test_exact_eight_readiness_stages_are_closed(self):
+  expected={'PreparationReadinessCheckBefore','PreparationReadinessPeerBefore','PreparationReadinessDeadlineBefore','PreparationReadinessFrame','PreparationReadinessCheckAfter','PreparationReadinessPeerAfter','PreparationReadinessDeadlineAfter','PreparationReadinessDecode'}
+  self.assertEqual({s for s in O.C.HOST_FAILURE_STAGES if s.startswith('PreparationReadiness')},expected)
+  for stage in expected:O.C.validate_host_failure_facts(dict(version=1,stage=stage,**{'class':'FrameInvalidBudget'},relay=None))
+  for stage in ('PreparationReadinessOther','PreparationReadiness',True,'PreparationReadinessFrame raw'):
+   with self.assertRaises(O.C.Rejected):O.C.validate_host_failure_facts(dict(version=1,stage=stage,**{'class':'Permission'},relay=None))

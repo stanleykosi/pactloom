@@ -25,6 +25,17 @@ pub(super) struct PairBinding {
     pub(super) channel_deadline: Instant,
     last_wall: AtomicU64,
 }
+// Pair's separately reviewed original channel has a 900-second maximum.
+// Its action still uses wall_ceiling's 120-second maximum below. This wall
+// restriction is intersected with the original epoch offset/source/supervision;
+// construction or later receive time cannot renew the captured channel.
+fn pair_channel_wall_ceiling(now: Instant, wall: u64, start: u64, end: u64) -> Result<Instant> {
+    if wall < start || wall >= end {
+        return Err(rejected("original workflow wall bound elapsed"));
+    }
+    now.checked_add(Duration::from_millis((end - wall).min(900_000)))
+        .ok_or_else(|| rejected("workflow wall cap overflow"))
+}
 impl PairBinding {
     fn new(entry: Arc<V3EntryReviewed>, p: SignerV3PairPresentationV1) -> Result<Arc<Self>> {
         p.validate()?;
@@ -32,7 +43,7 @@ impl PairBinding {
         let channel_deadline = entry
             .clocks
             .restrict_received(PROFILE, p.channel_ceiling_ms, entry.original_source, now)?
-            .min(wall_ceiling(
+            .min(pair_channel_wall_ceiling(
                 now,
                 state::wall_ms()?,
                 p.facts.reviewed_at_ms,
@@ -701,5 +712,25 @@ mod tests {
         assert!(result_matches(&d, &p));
         d.source_identity_digest = "ef".repeat(32);
         assert!(!result_matches(&d, &p));
+    }
+}
+
+#[cfg(test)]
+mod pair_channel_wall_tests {
+    use super::*;
+    #[test]
+    fn separate_channel_wall_horizon_does_not_change_action_horizon() {
+        let now=Instant::now();
+        assert_eq!(pair_channel_wall_ceiling(now,1_000,1_000,901_000).unwrap(),now+Duration::from_secs(900));
+        assert_eq!(wall_ceiling(now,1_000,1_000,901_000).unwrap(),now+Duration::from_secs(120));
+        assert_eq!(pair_channel_wall_ceiling(now,1_000,1_000,61_000).unwrap(),now+Duration::from_secs(60));
+    }
+    #[test]
+    fn channel_wall_reconstruction_does_not_restart_and_denies_rollback_expiry() {
+        let now=Instant::now();let original=pair_channel_wall_ceiling(now,1_000,1_000,901_000).unwrap();
+        assert_eq!(pair_channel_wall_ceiling(now+Duration::from_secs(300),301_000,1_000,901_000).unwrap(),original);
+        assert!(pair_channel_wall_ceiling(now,999,1_000,901_000).is_err());
+        assert!(pair_channel_wall_ceiling(now,901_000,1_000,901_000).is_err());
+        assert!(pair_channel_wall_ceiling(now,901_001,1_000,901_000).is_err());
     }
 }

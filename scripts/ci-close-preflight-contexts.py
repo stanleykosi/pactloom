@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed pre-credential P48 typecheck; no fixture, native runtime or artifact export."""
+"""Fixed pre-credential P49 typecheck; no fixture, native runtime or artifact export."""
 import importlib.util,json,os,pathlib,shutil
 HERE=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('preflight_supervisor',HERE/'ci-financial-supervisor.py');S=importlib.util.module_from_spec(spec);spec.loader.exec_module(S)
@@ -37,7 +37,7 @@ def validate(raw,target):
     assert seen==set(packages)
 SIGNER_SCRIPTS=('wholepact-financial-coordinator-origin','wholepact-signer')
 SIGNER_FEATURES=('authority-signing','coordinated-financial-workflow-v1','coordinated-signer-continue','durable-proposal','native-ui','pending-birth-owner-signing','wallet-review')
-SIGNER_PROBES=(('VerifiedImportedCoordinatedDurableReviewSessionV1','request_admission_retained_observed_v1'),('PendingCoordinatedDurableDeliveryAdmissionV1','read_original_status_retained_observed_v1'))
+SIGNER_PROBES=(('VerifiedImportedCoordinatedDurableReviewSessionV1','request_admission_retained_observed_v1'),('PendingCoordinatedDurableDeliveryAdmissionV1','read_original_status_retained_observed_v1'),('CoordinatedOriginalClientV1','prepare_closed_recipient_observed_v1'))
 def signer_metadata(raw,target,cfgs):
     rows=[json.loads(line) for line in raw.splitlines() if line.startswith(b'{')]
     packages={};metadata=[]
