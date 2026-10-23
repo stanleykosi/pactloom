@@ -21,15 +21,30 @@ class ObserverFiles:
         self.directory=pathlib.Path(directory);self.deadline_ns=deadline_ns
         self._files={};self._roles={};self._snapshot_generation=0
         self._semantic_active=None
+        self._diagnostics=None
         try:meta=self.directory.stat(follow_symlinks=False)
         except OSError:raise C.Rejected('observer_missing') from None
         C.require(stat.S_ISDIR(meta.st_mode) and meta.st_uid==os.getuid() and
                   stat.S_IMODE(meta.st_mode)==0o700,'observer_missing')
         self._directory_identity=(meta.st_dev,meta.st_ino)
-    def read(self,*,final=False):
+    def read(self,*,final=False,deadline_ns=None):
         try:
-            C.require(time.monotonic_ns()<self.deadline_ns,'deadline')
-            return self._read(final)
+            bound=self.deadline_ns if deadline_ns is None else deadline_ns
+            C.require(type(bound) is int and bound<=self.deadline_ns,'deadline')
+            started=time.monotonic_ns();C.require(started<bound,'deadline')
+            records=self._read(final)
+            diagnostics=self._project_diagnostics(records)
+            if diagnostics['timing']['availability']=='Observed':
+                diagnostics['timing']['observer_remaining_ns']=self.deadline_ns-started
+            try:C.validate_observation_timing_diagnostic(diagnostics['timing'])
+            except C.Rejected:diagnostics['timing']=self._unavailable_timing()
+            # Final check follows all collection/projection validation. Monotonic
+            # time can only reduce the already-validated positive remainder.
+            now=time.monotonic_ns();C.require(started<=now<bound,'deadline')
+            if diagnostics['timing']['availability']=='Observed':
+                diagnostics['timing']['observer_remaining_ns']=self.deadline_ns-now
+            self._diagnostics=diagnostics
+            return records
         except C.Rejected:
             self._clear_host_view();raise
         except OSError:
@@ -70,6 +85,47 @@ class ObserverFiles:
         C.native_failure_sequence(records,self.expected_profile)
         if self.expected_profile==C.SEMANTIC_PROFILE:self._join_host_views(records)
         return records
+    @staticmethod
+    def _unavailable_timing():
+        return dict(version=1,availability='Unavailable',observer_remaining_ns=None,
+                    coordinator_last_elapsed_ns=None,last_phase=None)
+    def failure_diagnostics(self):
+        """Bounded last-success copies only: no IO, clock reads, or proof use."""
+        if self._diagnostics is None:
+            return dict(progress=None,native=dict(version=1,availability='Unavailable',
+                **{name:'Unobserved' for name in C.NATIVE_FAILURE_COMPONENTS}),timing=self._unavailable_timing())
+        return copy.deepcopy(self._diagnostics)
+    def _project_diagnostics(self,records):
+        # Called only after the entire collection and semantic join validate.
+        # Do not revalidate the unbounded history merely to derive summaries.
+        progress=dict(version=1,signer_counts=[[0]*len(C.SIGNER_STEPS) for _ in range(2)],
+            host_counts=[0]*len(C.HOST_STEPS),normal_counts=[0]*len(C.NORMAL_DIAGNOSTIC_STEPS),
+            phase_counts=[0]*len(C.DIAGNOSTIC_PHASES))
+        native=dict(version=1,availability='Unavailable',**{name:'Unobserved' for name in C.NATIVE_FAILURE_COMPONENTS})
+        timing=dict(version=1,availability='Observed',observer_remaining_ns=None,
+                    coordinator_last_elapsed_ns=None,last_phase=None)
+        prior_elapsed=None;ordered=True
+        for record in records:
+            kind=record['kind'];facts=record['facts'];row=None
+            if kind=='SignerMilestone':
+                row=progress['signer_counts'][('Signer1','Signer2').index(facts['owner'])];index=C.SIGNER_STEPS.index(facts['step'])
+            elif kind=='HostMilestone':row=progress['host_counts'];index=C.HOST_STEPS.index(facts['step'])
+            elif kind=='UiSnapshot':row=progress['phase_counts'];index=C.DIAGNOSTIC_PHASES.index(facts['phase'])
+            elif kind in C.NORMAL_DIAGNOSTIC_STEPS:row=progress['normal_counts'];index=C.NORMAL_DIAGNOSTIC_STEPS.index(kind)
+            if row is not None:row[index]=min(2,row[index]+1)
+            if record['role']!='Coordinator':continue
+            elapsed=record['elapsed_ns'];timing['coordinator_last_elapsed_ns']=elapsed
+            if prior_elapsed is not None and elapsed<prior_elapsed:ordered=False
+            prior_elapsed=elapsed
+            if kind=='NativeFailureBoundary':native.update(facts,availability='Observed')
+            if kind=='UiSnapshot':
+                phase=timing['last_phase'];identity={key:facts[key] for key in ('phase','subphase','owner')}
+                if phase is None or any(phase[key]!=identity[key] for key in identity):
+                    phase=dict(**identity,first_elapsed_ns=elapsed,last_elapsed_ns=elapsed,snapshot_count=0)
+                    timing['last_phase']=phase
+                phase['last_elapsed_ns']=elapsed;phase['snapshot_count']+=1
+        if not ordered:timing=self._unavailable_timing()
+        return dict(progress=progress,native=native,timing=timing)
     def _clear_host_view(self):
         if self._semantic_active is not None:
             self._semantic_active['text'][:]=b'\0'*len(self._semantic_active['text'])
@@ -88,8 +144,9 @@ class ObserverFiles:
     def next_snapshot(self,deadline_ns):
         C.require(type(deadline_ns) is int and deadline_ns<=self.deadline_ns,'deadline')
         while time.monotonic_ns()<deadline_ns:
-            records=self.read()
-            C.require(not any(r['kind']=='Failure' for r in records),'observer_failure')
+            records=self.read(deadline_ns=deadline_ns)
+            # Cache is committed before surfacing authenticated terminal failure.
+            C.require(not any(r['kind'] in ('Failure','NativeFailureBoundary') for r in records),'observer_failure')
             candidates=[r['facts'] for r in records if r['kind']=='UiSnapshot' and
                         r['facts']['view_generation']>self._snapshot_generation]
             if candidates:

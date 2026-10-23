@@ -1828,6 +1828,7 @@ class NativeFailureBoundaryTests(unittest.TestCase):
         from unittest import mock
         container=F.load('ci-financial-container')
         flow=mock.Mock(expected_profile=F.C.SEMANTIC_PROFILE,records=self.chain())
+        flow.observer.failure_diagnostics.return_value={'native':F.C.cached_native_failure_diagnostic(self.chain(),F.C.SEMANTIC_PROFILE)}
         flow.snapshot.side_effect=AssertionError('no fresh observation');flow.observer.read.side_effect=AssertionError('no private read')
         output=io.StringIO()
         with contextlib.redirect_stdout(output):container.emit_cached_native_failure(flow)
@@ -1882,8 +1883,9 @@ class NativeFailureBoundaryTests(unittest.TestCase):
             observer=O.ObserverFiles(root,deadline,expected_profile=F.C.SEMANTIC_PROFILE)
             fixture=mock.Mock(deadline_ns=deadline);controller=mock.Mock()
             flow=F.FullFlow(controller,fixture,observer,None)
-            with self.assertRaises(F.C.Rejected) as error:flow.run()
-            self.assertEqual(str(error.exception),'observer_failure');self.assertEqual(flow.records,rows)
+            with self.assertRaises(O.C.Rejected) as error:flow.run()
+            self.assertEqual(str(error.exception),'observer_failure');self.assertEqual(flow.records,[])
+            self.assertEqual(observer.failure_diagnostics()['native']['availability'],'Observed')
             container=F.load('ci-financial-container');output=io.StringIO()
             with mock.patch.object(observer,'read',side_effect=AssertionError('fresh IO during failure')):
                 with contextlib.redirect_stdout(output):container.emit_cached_native_failure(flow)
@@ -2120,3 +2122,77 @@ class PreparedHostContextTests(unittest.TestCase):
             with self.assertRaises(F.C.Rejected) as e:flow.run()
         self.assertEqual(str(e.exception),'deadline');self.assertEqual(flow.startup_wait_ceiling(),bound)
         c.click.assert_not_called();c.type_ascii.assert_not_called();c._command.assert_not_called()
+
+class LastValidatedObservationTests(unittest.TestCase):
+    setUp=SemanticHostObserverTests.setUp
+    tearDown=SemanticHostObserverTests.tearDown
+    record=SemanticHostObserverTests.record
+    records=SemanticHostObserverTests.records
+    write=SemanticHostObserverTests.write
+    def test_contiguous_phase_timing_and_mutation_isolation(self):
+        rows=self.records()
+        for i,r in enumerate(rows):r['elapsed_ns']=i+1
+        for phase,owner in [('V3Preparing','Signer1'),('V3Preparing','Signer1'),('Selecting',None)]:
+            s=self.copy(self.snapshot);s.update(phase=phase,owner=owner,view_generation=len(rows))
+            rows.append(self.record('UiSnapshot',s,len(rows)+1));rows[-1]['elapsed_ns']=len(rows)
+        self.write(rows);returned=self.o.read();d=self.o.failure_diagnostics()
+        self.assertEqual(d['timing']['last_phase'],dict(phase='Selecting',subphase='None',owner=None,first_elapsed_ns=6,last_elapsed_ns=6,snapshot_count=1))
+        self.assertEqual(d['timing']['coordinator_last_elapsed_ns'],6)
+        self.assertGreater(d['timing']['observer_remaining_ns'],0)
+        returned[-1]['facts']['phase']='Finished';d['timing']['last_phase']['phase']='Finished'
+        self.assertEqual(self.o.failure_diagnostics()['timing']['last_phase']['phase'],'Selecting')
+    def test_later_boundary_without_new_snapshot_commits_then_fails_immediately(self):
+        from unittest import mock
+        import io,contextlib
+        rows=self.records();self.write(rows);self.o.next_snapshot(self.o.deadline_ns)
+        stale=list(rows)
+        rows.append(self.record('NativeFailureBoundary',NativeFailureBoundaryTests().facts(),4));self.write(rows)
+        now=time.monotonic_ns();bound=now+1000
+        with mock.patch.object(O.time,'monotonic_ns',side_effect=[now,now,now]):
+            with mock.patch.object(O.time,'sleep') as sleep:
+                with self.assertRaises(O.C.Rejected) as e:self.o.next_snapshot(bound)
+        self.assertEqual(str(e.exception),'observer_failure');sleep.assert_not_called()
+        flow=mock.Mock(observer=self.o,records=stale,expected_profile=O.C.SEMANTIC_PROFILE)
+        container=F.load('ci-financial-container');output=io.StringIO()
+        with mock.patch.object(self.o,'read',side_effect=AssertionError('late IO')):
+            with mock.patch.object(O.time,'monotonic_ns',side_effect=AssertionError('late clock')):
+                with contextlib.redirect_stdout(output):
+                    container.emit_cached_native_failure(flow);container.emit_cached_progress_failure(flow);container.emit_cached_observation_timing_failure(flow)
+        self.assertIn('"availability":"Observed"',output.getvalue());self.assertIn('"ui":"FocusLost"',output.getvalue())
+        self.assertEqual(len(flow.records),3)
+    def test_invalid_append_preserves_prior_complete_summary(self):
+        rows=self.records();self.write(rows);self.o.read();before=self.o.failure_diagnostics()
+        p=self.directory/'100.jsonl';p.write_bytes(p.read_bytes()+b'{"unknown":true}\n')
+        with self.assertRaises(O.C.Rejected):self.o.read()
+        self.assertEqual(self.o.failure_diagnostics(),before)
+    def test_torn_append_is_not_diagnostic_evidence(self):
+        rows=self.records();self.write(rows);self.o.read();before=self.o.failure_diagnostics()
+        p=self.directory/'100.jsonl';p.write_bytes(p.read_bytes()+b'{"kind":"NativeFailureBoundary"')
+        self.o.read();after=self.o.failure_diagnostics()
+        self.assertEqual(after['progress'],before['progress']);self.assertEqual(after['native'],before['native'])
+        with self.assertRaises(O.C.Rejected):self.o.read(final=True)
+        self.assertEqual(self.o.failure_diagnostics(),after)
+    def test_late_validation_cannot_commit_original_or_subordinate_bound(self):
+        from unittest import mock
+        rows=self.records();self.write(rows);self.o.read();before=self.o.failure_diagnostics()
+        for bound in (self.o.deadline_ns,self.o.deadline_ns-1_000_000):
+            with mock.patch.object(O.time,'monotonic_ns',side_effect=[bound-1,bound]):
+                with self.assertRaises(O.C.Rejected) as e:self.o.read(deadline_ns=bound)
+            self.assertEqual(str(e.exception),'deadline');self.assertEqual(self.o.failure_diagnostics(),before)
+    def test_unobserved_and_no_coordinator_and_decreasing_elapsed(self):
+        d=self.o.failure_diagnostics();self.assertEqual(d['timing']['availability'],'Unavailable')
+        self.o.read();d=self.o.failure_diagnostics();self.assertEqual(d['timing']['availability'],'Observed');self.assertIsNone(d['timing']['coordinator_last_elapsed_ns'])
+        rows=self.records();rows[0]['elapsed_ns']=20;rows[1]['elapsed_ns']=10;self.write(rows)
+        self.o.read();d=self.o.failure_diagnostics();self.assertEqual(d['timing']['availability'],'Unavailable')
+        self.assertEqual(d['progress']['phase_counts'][O.C.DIAGNOSTIC_PHASES.index('Selecting')],1)
+    def test_strict_timing_schema(self):
+        self.write(self.records());self.o.read();v=self.o.failure_diagnostics()['timing'];O.C.validate_observation_timing_diagnostic(v)
+        mutations=[dict(v,version=True),dict(v,extra=0),dict(v,observer_remaining_ns=0),dict(v,coordinator_last_elapsed_ns=True),dict(v,availability='Unavailable')]
+        for key,value in [('phase','unknown'),('owner','Host'),('snapshot_count',True),('first_elapsed_ns',1),('last_elapsed_ns',-1)]:
+            bad=self.copy(v);bad['last_phase'][key]=value;mutations.append(bad)
+        for bad in mutations:
+            with self.subTest(bad=bad):
+                with self.assertRaises(O.C.Rejected):O.C.validate_observation_timing_diagnostic(bad)
+    def test_cached_progress_matches_existing_strict_projection(self):
+        rows=self.records();self.write(rows);self.o.read()
+        self.assertEqual(self.o.failure_diagnostics()['progress'],O.C.cached_progress_diagnostic(rows,O.C.SEMANTIC_PROFILE))
