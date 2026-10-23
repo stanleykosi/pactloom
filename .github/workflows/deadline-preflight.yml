@@ -1,0 +1,115 @@
+name: Deadline identity preflight only
+on:
+  push:
+    branches: [checkpoint/deadline-preflight-p44]
+permissions: {}
+concurrency:
+  group: deadline-preflight-p44
+  cancel-in-progress: false
+jobs:
+  preflight:
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/deadline-preflight-p44' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Fetch exact public event source without credentials
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          umask 022
+          public_git() {
+            env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" \
+              GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+              git -c credential.helper= -c http.extraheader= "$@"
+          }
+          public_git init source
+          public_git -C source fetch --no-tags --depth=1 https://github.com/stanleykosi/pactloom.git "$SOURCE_COMMIT"
+          public_git -C source checkout --detach FETCH_HEAD
+          test "$(public_git -C source rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test -z "$(public_git -C source status --porcelain --untracked-files=all)"
+      - name: Pinned compiler, API fences and focused deadline regressions
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/deadline-preflight/home" "$RUNNER_TEMP/deadline-preflight/cargo"
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/deadline-preflight/home" \
+            RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
+            CARGO_HOME="$RUNNER_TEMP/deadline-preflight/cargo" \
+            PREFLIGHT_ROOT="$RUNNER_TEMP/deadline-preflight" \
+            GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+            CARGO_BUILD_JOBS=3 CARGO_INCREMENTAL=0 \
+            python3 -I -B - <<'PY'
+          import json, os, pathlib, subprocess
+          root = pathlib.Path(os.environ['PREFLIGHT_ROOT'])
+          repo = pathlib.Path.cwd()
+          def run(args, *, env=None, timeout=450):
+              p = subprocess.run(args, env=env, text=True, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, timeout=timeout)
+              if p.returncode:
+                  print(p.stdout[-12000:]); print(p.stderr[-12000:])
+                  raise SystemExit('preflight command failed: ' + args[0])
+              return p.stdout
+          # No rust-toolchain.toml exists at the reviewed base; match its existing CI recipe.
+          recipe = (repo/'scripts/ci-financial-artifacts.py').read_text()
+          assert "toolchain='1.99.0', rustc='rustc 1.99.0 (b940084d7 2026-09-28)'" in recipe
+          rustup = ['rustup', 'run', '1.99.0']
+          installed = run(['rustup', 'toolchain', 'list'], timeout=30)
+          if not any(line.split()[0] == '1.99.0-x86_64-unknown-linux-gnu' for line in installed.splitlines() if line.split()):
+              run(['rustup', 'toolchain', 'install', '1.99.0', '--profile', 'minimal', '--no-self-update'], timeout=600)
+          assert run(rustup+['rustc', '--version'], timeout=30).strip() == 'rustc 1.99.0 (b940084d7 2026-09-28)'
+          assert 'host: x86_64-unknown-linux-gnu' in run(rustup+['rustc', '-Vv'], timeout=30)
+          env = dict(os.environ)
+          env['WHOLEPACT_FINANCIAL_BUILD_MODE'] = 'production'
+          print(run(rustup+['python3', '-I', '-B', 'scripts/tests/test_v3_deadline_identity.py'], env=env, timeout=180))
+          package = 'wholepact-financial-coordinator-origin'
+          feature = 'coordinated-financial-workflow-v1'
+          environments = {}
+          for profile in ['minimal', 'production', 'observed-pixel', 'observed-semantic']:
+              env = dict(os.environ)
+              env['WHOLEPACT_FINANCIAL_BUILD_MODE'] = 'production' if profile == 'minimal' else profile
+              target = root/('target-'+profile)
+              env['CARGO_TARGET_DIR'] = str(target)
+              environments[profile] = env
+              args = rustup+['cargo', 'check', '--locked', '-p', package, '--lib', '--no-default-features', '--message-format=json']
+              if profile != 'minimal': args += ['--features', feature]
+              rows = [json.loads(line) for line in run(args, env=env).splitlines() if line.startswith('{')]
+              meta = [pathlib.Path(f) for row in rows if row.get('reason') == 'compiler-artifact' and row.get('target', {}).get('name') == 'wholepact_financial_coordinator_origin' for f in row.get('filenames', []) if f.endswith('.rmeta')]
+              assert len(meta) == 1 and meta[0].is_file(), profile
+              def probe(symbol, expected):
+                  src = root/('probe-'+profile+'-'+symbol+'.rs')
+                  src.write_text('pub use wholepact_financial_coordinator_origin::'+symbol+';\n')
+                  command = rustup+['rustc', '--crate-name', 'api_probe', '--crate-type=lib', '--edition=2021', '--emit=metadata', '--error-format=json', str(src), '--extern', 'wholepact_financial_coordinator_origin='+str(meta[0]), '-L', 'dependency='+str(target/'debug/deps'), '-o', str(root/'api-probe.rmeta')]
+                  p = subprocess.run(command, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                  errors = [json.loads(line) for line in p.stderr.splitlines() if line.startswith('{')]
+                  errors = [e for e in errors if e.get('level') == 'error' and e.get('code')]
+                  if expected:
+                      assert p.returncode == 0, (profile, symbol, p.stderr)
+                  else:
+                      assert p.returncode != 0 and len(errors) == 1, (profile, symbol, p.stderr)
+                      assert errors[0]['code']['code'] == 'E0432' and symbol in errors[0]['message'], (profile, symbol, p.stderr)
+              probe('bootstrap_common_image_v1', True)
+              probe('SignerV3EnrollmentFinalV1', profile != 'minimal')
+              probe('financial_ci_snapshot', profile in ['observed-pixel', 'observed-semantic'])
+              probe('financial_ci_clear_host_view', profile == 'observed-semantic')
+              print(profile+': compiler and API fences passed')
+          env = environments['production']
+          args = rustup+['cargo', 'test', '--locked', '-p', package, '--lib', '--no-default-features', '--features', feature, '--no-run', '--message-format=json']
+          rows = [json.loads(line) for line in run(args, env=env).splitlines() if line.startswith('{')]
+          executables = [row['executable'] for row in rows if row.get('reason') == 'compiler-artifact' and row.get('target', {}).get('name') == 'wholepact_financial_coordinator_origin' and row.get('profile', {}).get('test') and row.get('executable')]
+          assert len(executables) == 1
+          exe = executables[0]
+          prefix = 'financial_workflow_clock::tests::'
+          names = [prefix+n for n in ['fixed_full_workflow_clocks_share_one_original_epoch', 'full_offsets_shorten_and_never_restart_at_receive', 'full_cleanup_is_capped_without_action_extension', 'original_cleanup_retention_never_renews_and_floor_only_crosses_edges']]
+          assert len(names) == 4
+          for name in names:
+              listing = run([exe, '--list', '--exact', name], env=env, timeout=30)
+              assert [line for line in listing.splitlines() if line.endswith(': test')] == [name+': test'], name
+              result = run([exe, '--exact', name, '--test-threads=1'], env=env, timeout=30)
+              assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in result, name
+              print(name+': passed')
+          print('Four clock tests and four source-extracted inert-carrier regressions passed. Compiler/API preflight only; not authority-flow, native/full qualification, deployment or settlement.')
+          PY

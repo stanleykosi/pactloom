@@ -25,6 +25,8 @@ struct RedisclosureReadBinding {
     pair: Arc<PairBinding>,
     p: SignerV3RedisclosureReadPresentationV1,
     deadline: Instant,
+    // Exact S-owned identity; never an operational or transmitted deadline.
+    original_review: Instant,
     last_wall: AtomicU64,
 }
 impl RedisclosureReadBinding {
@@ -46,6 +48,7 @@ impl RedisclosureReadBinding {
             pair,
             p,
             deadline,
+            original_review: deadline,
             last_wall: AtomicU64::new(state::wall_ms()?),
         });
         b.bounds()?;
@@ -124,7 +127,7 @@ impl SignerV3RedisclosureReadFinalV1 {
         self.binding.current(139)
     }
     pub fn original_read_deadline(&self) -> Instant {
-        self.binding.deadline
+        self.binding.original_review
     }
     pub fn finish_read(mut self) -> Result<()> {
         self.check_current()?;
@@ -220,7 +223,10 @@ impl SignerFinancialWorkflowOriginV1 {
         ) {
             return Err(rejected("redisclosure original record/Pair predecessor"));
         }
-        let binding = RedisclosureReadBinding::new(Arc::clone(pair), p.clone())?;
+        let mut binding = RedisclosureReadBinding::new(Arc::clone(pair), p.clone())?;
+        Arc::get_mut(&mut binding)
+            .ok_or_else(|| rejected("new redisclosure read binding shared"))?
+            .original_review = original_review;
         self.core.phase.step(self.target.index(), 137, 138)?;
         s.redisclosure.redisclosure_read.binding = Some(binding);
         s.redisclosure.redisclosure_read.wire = Some(p.clone());
@@ -339,6 +345,8 @@ struct RediscloseBinding {
     pair: Arc<PairBinding>,
     p: SignerV3RedisclosePresentationV1,
     deadline: Instant,
+    // Exact S-owned identity; never an operational or transmitted deadline.
+    original_review: Instant,
     last_wall: AtomicU64,
 }
 impl RediscloseBinding {
@@ -360,6 +368,7 @@ impl RediscloseBinding {
             pair,
             p,
             deadline,
+            original_review: deadline,
             last_wall: AtomicU64::new(state::wall_ms()?),
         });
         b.bounds()?;
@@ -430,7 +439,7 @@ impl SignerV3RediscloseFinalV1 {
         &self.binding.p.facts
     }
     pub fn original_export_deadline(&self) -> Instant {
-        self.binding.deadline
+        self.binding.original_review
     }
     pub fn original_review_deadline(&self) -> Instant {
         self.binding.deadline
@@ -574,7 +583,10 @@ impl SignerFinancialWorkflowOriginV1 {
         {
             return Err(rejected("redisclosure original record/Pair predecessor"));
         }
-        let binding = RediscloseBinding::new(Arc::clone(pair), p.clone())?;
+        let mut binding = RediscloseBinding::new(Arc::clone(pair), p.clone())?;
+        Arc::get_mut(&mut binding)
+            .ok_or_else(|| rejected("new redisclose binding shared"))?
+            .original_review = original_review;
         self.core.phase.step(self.target.index(), 140, 141)?;
         s.redisclosure.redisclose.binding = Some(binding);
         s.redisclosure.redisclose.wire = Some(p.clone());

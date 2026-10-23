@@ -23,6 +23,8 @@ struct EnrollmentBinding {
     pair: Arc<PairBinding>,
     p: SignerV3EnrollmentPresentationV1,
     deadline: Instant,
+    // Exact S-owned identity; never an operational or transmitted deadline.
+    original_review: Instant,
     last_wall: AtomicU64,
 }
 impl EnrollmentBinding {
@@ -44,6 +46,7 @@ impl EnrollmentBinding {
             pair,
             p,
             deadline,
+            original_review: deadline,
             last_wall: AtomicU64::new(state::wall_ms()?),
         });
         b.bounds()?;
@@ -114,7 +117,7 @@ impl SignerV3EnrollmentFinalV1 {
         &self.binding.p.facts
     }
     pub fn original_review_deadline(&self) -> Instant {
-        self.binding.deadline
+        self.binding.original_review
     }
     pub fn original_source_deadline(&self) -> Instant {
         self.binding.pair.entry.original_source
@@ -248,7 +251,10 @@ impl SignerFinancialWorkflowOriginV1 {
         ) {
             return Err(rejected("fresh receipt original record/Pair predecessor"));
         }
-        let binding = EnrollmentBinding::new(Arc::clone(pair), p.clone())?;
+        let mut binding = EnrollmentBinding::new(Arc::clone(pair), p.clone())?;
+        Arc::get_mut(&mut binding)
+            .ok_or_else(|| rejected("new enrollment binding shared"))?
+            .original_review = original_review;
         self.core.phase.step(self.target.index(), 131, 132)?;
         s.receipts.enrollment.binding = Some(binding);
         s.receipts.enrollment.wire = Some(p.clone());
@@ -360,6 +366,8 @@ struct ManifestBinding {
     pair: Arc<PairBinding>,
     p: SignerV3ManifestPresentationV1,
     deadline: Instant,
+    // Exact S-owned identity; never an operational or transmitted deadline.
+    original_review: Instant,
     last_wall: AtomicU64,
 }
 impl ManifestBinding {
@@ -381,6 +389,7 @@ impl ManifestBinding {
             pair,
             p,
             deadline,
+            original_review: deadline,
             last_wall: AtomicU64::new(state::wall_ms()?),
         });
         b.bounds()?;
@@ -451,7 +460,7 @@ impl SignerV3ManifestFinalV1 {
         &self.binding.p.facts
     }
     pub fn original_review_deadline(&self) -> Instant {
-        self.binding.deadline
+        self.binding.original_review
     }
     pub fn original_source_deadline(&self) -> Instant {
         self.binding.pair.entry.original_source
@@ -589,7 +598,10 @@ impl SignerFinancialWorkflowOriginV1 {
         {
             return Err(rejected("fresh receipt original record/Pair predecessor"));
         }
-        let binding = ManifestBinding::new(Arc::clone(pair), p.clone())?;
+        let mut binding = ManifestBinding::new(Arc::clone(pair), p.clone())?;
+        Arc::get_mut(&mut binding)
+            .ok_or_else(|| rejected("new manifest binding shared"))?
+            .original_review = original_review;
         self.core.phase.step(self.target.index(), 134, 135)?;
         s.receipts.manifest.binding = Some(binding);
         s.receipts.manifest.wire = Some(p.clone());
