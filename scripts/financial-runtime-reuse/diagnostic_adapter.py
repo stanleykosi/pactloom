@@ -163,6 +163,49 @@ def wrapper_preflight(path):
     need(result.testsRun==163 and result.wasSuccessful())
 
 
+IMAGE_OPERATIONS=frozenset(('context','context_inputs','context_manifest','context_download','context_write','source_recheck','base_pull','image_build','image_descriptor'))
+
+
+def image_failure_record(S,operation,error):
+    # Only closed metadata from the pre-native image stage; never exception text,
+    # raw tool tails, commands, paths, URLs or package contents.
+    code=getattr(error,'code',None)
+    if type(code) is not str or code not in S.PACKAGE_CHECKS|S.CHECKS|S.IMAGE_CHECKS:code='unavailable'
+    status=getattr(error,'exit_status',None)
+    if type(status) is not int or not -255<=status<=255:status=None
+    cleanup=getattr(error,'cleanup_failed',None)
+    if type(cleanup) is not bool:cleanup=None
+    raw=getattr(error,'output',None);found=[]
+    if operation=='image_build' and type(raw) is bytes and len(raw)<=8*1024*1024:
+        for line in raw.splitlines():
+            if len(line)>4096:continue
+            start=line.find(b'{')
+            if start<0:continue
+            try:value=S.loads(line[start:])
+            except Exception:continue
+            if (type(value) is dict and set(value)=={'schema_version','phase','code','cleanup_failed'}
+                and type(value['schema_version']) is int and value['schema_version']==1
+                and type(value['phase']) is str and value['phase'] in S.IMAGE_PHASES
+                and type(value['code']) is str and value['code'] in S.IMAGE_CHECKS
+                and type(value['cleanup_failed']) is bool and value not in found):found.append(value)
+    installer=found[0] if len(found)==1 else None
+    return dict(version=1,policy=POLICY,operation=operation if operation in IMAGE_OPERATIONS else 'unavailable',
+        code=code,exit_status=status,operation_cleanup_failed=cleanup,
+        installer_record_available=installer is not None,installer=installer,native_started=False)
+
+class ImageProgress:
+    def __init__(self,S):self.S=S;self.operation='context'
+    def advance(self,operation):
+        need(operation in IMAGE_OPERATIONS);self.operation=operation
+    def perform(self,operation,action):
+        self.advance(operation)
+        try:return action()
+        except BaseException as error:
+            try:print('CI_PREPARATION_IMAGE_FAILURE '+json.dumps(image_failure_record(self.S,self.operation,error),sort_keys=True,separators=(',',':')),flush=True)
+            except BaseException:pass
+            raise
+
+
 def main():
     os.umask(0o077);stage='bootstrap';clean=False;passed=False;records=None;root=None;trusted=None;L=None;cleanup_only=False
     try:
@@ -189,12 +232,12 @@ def main():
         S.exact_source(plan['harness']['source']);stage='artifact'
         inputs,evidence=L.acquire_verified_inputs(root,pathlib.Path(staging).resolve(),plan,p_inv,h_inv)
         need(evidence['permitted_runtime_changes']==[] and evidence['permitted_diagnostic_changes']==[])
-        stage='image';context=root/'diagnostic-context'
-        builder.build_context(context,pathlib.Path(producer).resolve(),plan['producer']['source'],inputs/'pristine-setup')
-        S.exact_source(plan['harness']['source']);S.docker(['pull','--platform','linux/amd64',S.BASE],'image',seconds=300,limit=4*1024*1024)
+        stage='image';context=root/'diagnostic-context';image_progress=ImageProgress(S)
+        image_progress.perform('context',lambda:builder.build_context(context,pathlib.Path(producer).resolve(),plan['producer']['source'],inputs/'pristine-setup',progress=image_progress.advance))
+        image_progress.perform('source_recheck',lambda:S.exact_source(plan['harness']['source']));image_progress.perform('base_pull',lambda:S.docker(['pull','--platform','linux/amd64',S.BASE],'image',seconds=300,limit=4*1024*1024))
         tag='wholepact-financial:'+token
-        S.docker(['build','--network','none','--no-cache','--force-rm','--progress','plain','--target','runtime','--label',S.LABEL+'='+token,'--label',S.SOURCE_LABEL+'='+plan['producer']['source'],'--tag',tag,str(context)],'image',seconds=900,limit=8*1024*1024)
-        image_id=S.image_descriptor(tag,token,plan['producer']['source'])['id']
+        image_progress.perform('image_build',lambda:S.docker(['build','--network','none','--no-cache','--force-rm','--progress','plain','--target','runtime','--label',S.LABEL+'='+token,'--label',S.SOURCE_LABEL+'='+plan['producer']['source'],'--tag',tag,str(context)],'image',seconds=900,limit=8*1024*1024))
+        image_id=image_progress.perform('image_descriptor',lambda:S.image_descriptor(tag,token,plan['producer']['source']))['id']
         stage='container';passed=run_container(S,image_id,token,plan['producer']['source'],records);stage='complete' if passed else 'wrapper'
     except BaseException:
         passed=False

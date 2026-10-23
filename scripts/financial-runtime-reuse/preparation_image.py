@@ -72,12 +72,19 @@ USER 10001:10001
 ENTRYPOINT {json.dumps(ENTRY,separators=(',',':'))}
 '''
 
-def build_context(target,source_root,source_commit,setup_path):
+def build_context(target,source_root,source_commit,setup_path,progress=None):
+    # Diagnostic-only checkpoints: no paths, package identities, or raw errors.
+    def checkpoint(stage):
+        if progress is not None:
+            try:progress(stage)
+            except Exception:pass
+    checkpoint('context_inputs')
     need(source_commit==SOURCE)
     source=pathlib.Path(source_root)/'scripts'
     inputs={'ci-synthetic-output.py':read(source/'ci-synthetic-output.py','ci-synthetic-output.py'),
             'pristine-setup':read(setup_path,'pristine-setup')}
     B,O=modules(source_root)
+    checkpoint('context_manifest')
     base=B.validate_manifest((source/'ci-ui-packages.json').read_bytes())
     ocr,_=O.validate_manifest((source/'ci-financial-ocr-packages.json').read_bytes(),(source/'ci-ui-packages.json').read_bytes())
     names=set(base['closures']['runtime'])|set(ocr['ocr_closure'])
@@ -89,10 +96,12 @@ def build_context(target,source_root,source_commit,setup_path):
     target=pathlib.Path(target);B._fresh_directory(target)
     for name in ('packages','inputs','image-build'):(target/name).mkdir(mode=0o700)
     deadline=time.monotonic()+B.MAX_STAGE_SECONDS
+    checkpoint('context_download')
     for row in packages:
         record=plan[row['name']];path=target/'packages'/record['filename']
         with path.open('xb') as stream:B._download(record,stream,deadline)
         path.chmod(0o444)
+    checkpoint('context_write')
     for name,raw in inputs.items():B._write_file(target/'inputs'/name,raw)
     B._write_file(target/'image-build/metadata.json',B._canonical(meta)+b'\n')
     B._write_file(target/'image-build/install.py',installer(B).encode('ascii'))

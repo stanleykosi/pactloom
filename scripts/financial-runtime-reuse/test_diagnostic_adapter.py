@@ -104,4 +104,63 @@ class BootstrapTests(unittest.TestCase):
   out=io.StringIO()
   with patch.object(D.sys,'argv',['adapter','cleanup','L']),patch.object(D,'bootstrap',return_value=(Mock(),Mock())),patch.object(D,'trusted_cleanup',return_value=True) as cleanup,contextlib.redirect_stdout(out):self.assertEqual(D.main(),0)
   cleanup.assert_called_once();self.assertEqual(len(out.getvalue().splitlines()),1);self.assertTrue(out.getvalue().startswith('CI_PREPARATION_DIAGNOSTIC_CLEANUP '));self.assertNotIn('diagnostic_passed',json.loads(out.getvalue().split(' ',1)[1]))
+class ImageFailureTests(unittest.TestCase):
+ def setUp(self):
+  self.S=types.SimpleNamespace(PACKAGE_CHECKS=frozenset(('download_digest','download_failed')),CHECKS=frozenset(('command_failed','image_identity')),IMAGE_CHECKS=frozenset(('tool_exit','input_digest','internal')),IMAGE_PHASES=frozenset(('install','inputs')),loads=lambda raw:json.loads(raw,object_pairs_hook=self.unique))
+ def unique(self,pairs):
+  value={}
+  for key,item in pairs:
+   if key in value:raise ValueError('duplicate')
+   value[key]=item
+  return value
+ def error(self,**kwargs):
+  e=ValueError('PRIVATE secret /wallet https://credential.invalid');e.__dict__.update(kwargs);return e
+ def test_actual_pinned_package_errors_keep_reviewed_codes(self):
+  S=D.load_verified(HERE.parent/'ci-financial-supervisor.py',name='diagnostic_actual_supervisor')
+  B=D.load_verified(HERE.parent/'ci-ui-image.py',name='diagnostic_actual_packages')
+  for code in ('staging_directory','manifest_pin','manifest_shape','closure','download_origin','download_digest'):
+   r=D.image_failure_record(S,'context_manifest',B.Rejected(code));self.assertEqual(r['code'],code)
+  self.assertEqual(D.image_failure_record(S,'context',B.Rejected('PRIVATE'))['code'],'unavailable')
+ def test_context_download_failure_preserves_closed_code_no_exception(self):
+  out=io.StringIO();p=D.ImageProgress(self.S)
+  def fail():p.advance('context_download');raise self.error(code='download_digest',cleanup_failed=False)
+  with contextlib.redirect_stdout(out),self.assertRaises(ValueError):p.perform('context',fail)
+  text=out.getvalue();r=json.loads(text.split(' ',1)[1]);self.assertEqual(r['operation'],'context_download');self.assertEqual(r['code'],'download_digest');self.assertFalse(r['native_started']);self.assertNotIn('PRIVATE',text);self.assertNotIn('wallet',text)
+ def test_build_only_exact_installer_metadata_preserved(self):
+  installer=dict(schema_version=1,phase='install',code='tool_exit',cleanup_failed=False)
+  error=self.error(code='command_failed',exit_status=1,output=b'PRIVATE raw secret\n#9 0.2 '+json.dumps(installer).encode()+b'\n')
+  r=D.image_failure_record(self.S,'image_build',error);self.assertEqual(r['installer'],installer);self.assertTrue(r['installer_record_available']);self.assertEqual(r['exit_status'],1);self.assertNotIn('PRIVATE',json.dumps(r))
+  self.assertIsNone(D.image_failure_record(self.S,'base_pull',error)['installer'])
+ def test_missing_invalid_duplicate_and_oversized_records_unavailable(self):
+  good=b'{"schema_version":1,"phase":"install","code":"tool_exit","cleanup_failed":false}'
+  for raw in (b'PRIVATE',good+b'\n'+good.replace(b'tool_exit',b'internal'),good.replace(b'"phase":"install"',b'"phase":"PRIVATE"'),good[:-1]+b',"raw":"secret"}',good.replace(b'"schema_version":1',b'"schema_version":true'),good.replace(b'"schema_version":1',b'"schema_version":1,"schema_version":1'),b'x'*(8*1024*1024+1)):
+   r=D.image_failure_record(self.S,'image_build',self.error(code='PRIVATE',exit_status=True,output=raw));self.assertFalse(r['installer_record_available']);self.assertIsNone(r['installer']);self.assertEqual(r['code'],'unavailable');self.assertIsNone(r['exit_status'])
+ def test_identical_buildkit_recap_deduplicates(self):
+  value=dict(schema_version=1,phase='install',code='tool_exit',cleanup_failed=False)
+  raw=json.dumps(value).encode();r=D.image_failure_record(self.S,'image_build',self.error(output=raw+b'\n#recap '+raw))
+  self.assertTrue(r['installer_record_available']);self.assertEqual(r['installer'],value)
+ def test_broken_stdout_preserves_original_failure(self):
+  original=self.error(code='download_failed');p=D.ImageProgress(self.S)
+  def fail():raise original
+  with patch('builtins.print',side_effect=BrokenPipeError):
+   with self.assertRaises(ValueError) as caught:p.perform('context',fail)
+  self.assertIs(caught.exception,original)
+ def test_projection_failure_preserves_original_failure(self):
+  original=self.error(code='download_failed');p=D.ImageProgress(self.S)
+  def fail():raise original
+  with patch.object(D,'image_failure_record',side_effect=RuntimeError('projection')):
+   with self.assertRaises(ValueError) as caught:p.perform('context',fail)
+  self.assertIs(caught.exception,original)
+ def test_operations_are_closed_and_success_silent(self):
+  p=D.ImageProgress(self.S);out=io.StringIO()
+  with contextlib.redirect_stdout(out):self.assertEqual(p.perform('base_pull',lambda:42),42)
+  self.assertEqual(out.getvalue(),'')
+  with self.assertRaises(Exception):p.advance('PRIVATE')
+ def test_each_process_operation_preserves_only_its_fixed_identity(self):
+  for operation in ('base_pull','image_build','image_descriptor','source_recheck'):
+   p=D.ImageProgress(self.S);out=io.StringIO()
+   def fail():raise self.error(code='command_failed',exit_status=7,output=b'PRIVATE')
+   with contextlib.redirect_stdout(out),self.assertRaises(ValueError):p.perform(operation,fail)
+   r=json.loads(out.getvalue().split(' ',1)[1]);self.assertEqual(r['operation'],operation);self.assertEqual(r['exit_status'],7);self.assertNotIn('PRIVATE',out.getvalue())
+
 if __name__=='__main__':unittest.main()
