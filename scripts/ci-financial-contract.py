@@ -256,6 +256,10 @@ def validate_record(record, expected_profile=PROFILE):
     elif kind == 'HostFailureBoundary':
         require(expected_profile==SEMANTIC_PROFILE and role=='Host','role')
         validate_host_failure_facts(facts)
+    elif kind in ('ActorFailureBoundary','ActorReapObservation'):
+        require(expected_profile==SEMANTIC_PROFILE,'role')
+        if kind=='ActorFailureBoundary':validate_actor_failure_facts(facts,role)
+        else:validate_actor_reap_facts(facts,role)
     elif kind == 'Failure':
         exact(facts, ('code',)); require(facts['code'] in ERRORS,'record_shape')
     else:
@@ -316,6 +320,68 @@ def validate_host_exit_diagnostic(value):
         require(part['availability'] in ('Observed','Unavailable'),'record_shape')
         if part['availability']=='Unavailable':require(all(part[k] is None for k in fields),'record_shape')
         else:validator(dict(version=1,**{k:part[k] for k in fields}))
+    return value
+
+
+# Actor-local failure slots and actual owned reaps; no cross-actor chronology.
+ACTOR_DRIVER_STAGES=frozenset(('Initialization', 'OriginalActors', 'Receive', 'Handle', 'Opening', 'PairBegin', 'PairPoll', 'EnrollmentBegin', 'ReceiptPoll', 'RedisclosurePoll', 'StatusPoll', 'DeliveryPoll', 'FinancialPoll', 'FinancialTransport', 'SourceRetention', 'WorkUnclassified', 'Cleanup', 'DisposalSend', 'EnrollmentPairingCheck', 'EnrollmentSessionCheck', 'EnrollmentPeerCheck', 'ManifestPairingCheck', 'ManifestSessionCheck', 'ManifestPeerCheck', 'PreconstructionCheck', 'WitnessWork', 'LeafProtocol', 'NormalDispose'))
+ACTOR_LISTENER_STAGES=frozenset(('BoundsSource', 'BoundsHost', 'BoundsStopped', 'BoundsDeadline', 'PeerPairLifetime', 'PeerProcess', 'PeerRevoked', 'PeerDeadline', 'Accept', 'ReadTimeout', 'WriteTimeout', 'EnableCredentials', 'ObservePeer', 'OriginalHost', 'RequestRead', 'RequestDecode', 'Mode', 'GrantId', 'TokenDigest', 'GrantLock', 'GrantMissing', 'GrantCurrent', 'GrantPeer', 'TokenMismatch', 'RequestValidate', 'StatusRepeated', 'StatusNotProved', 'StatusEnqueue', 'StatusWrite', 'PairRepeated', 'PairScope', 'PairLabel', 'PairEnqueue', 'RequestEnqueue', 'RequestKind', 'StreamClone', 'WorkUnclassified'))
+ACTOR_ORIGIN_STAGES=frozenset(('PeerProcessExit', 'PeerProcessPollError', 'PeerEdgeClosed', 'PeerEdgePollError', 'RootProcessExit', 'RootProcessPollError', 'ActorCustody', 'ActorClosed', 'SessionDeadline', 'ActionRevoked', 'ActionQuiescent', 'ActionClosing', 'SharedRestriction', 'SharedRestrictionCustody', 'SharedRestrictionDeadline', 'SharedWallDeadline', 'SharedWallRead', 'SharedWallRollback', 'SourceWallSample', 'SourceLifetime', 'SourceAction', 'PairWallSample', 'PairChannel', 'PairAction', 'PairPhase', 'WitnessReceive', 'WitnessWork', 'LeafStop', 'LeafExit', 'ChildBootstrap', 'WitnessCheck', 'NormalHandshake', 'SourceDeadline', 'ReviewDeadline', 'AcceptedDeadline', 'ReadDeadline', 'ServiceDeadline', 'BoundDeadline'))
+ACTOR_CLASSES=frozenset(('IoNotFound', 'IoPermissionDenied', 'IoInterrupted', 'IoWouldBlock', 'IoInvalidInput', 'IoInvalidData', 'IoUnexpectedEof', 'IoTimedOut', 'IoOther', 'SignerUnavailable', 'SignerPeerLifetimeUnavailable', 'SignerAuthentication', 'SignerInvalidData', 'SignerCrypto', 'SignerLocked', 'SignerBackupRequired', 'SignerRecoveryRequired', 'SignerAlreadyOpen', 'SignerReviewMismatch', 'SignerVerification', 'SignerUncertain', 'SignerConsentJournal', 'SignerStore', 'BridgeBinding', 'BridgeConflict', 'BridgeMissing', 'BridgeUncertain', 'BridgeLimit', 'BridgePermission', 'BridgeRecoveryRequired', 'BridgeCompleteOriginRecoveryUnavailable', 'BridgeVerification', 'BridgeSignerOriginUnavailable', 'BridgeJournal', 'BridgeAuthority', 'BridgeWallet', 'BridgeIpc', 'FrameUnclassified', 'FrameDeadline', 'FrameEof', 'FrameCredentialsMissing', 'FrameCredentialsMismatch', 'FrameAncillaryRejected', 'FrameTruncated', 'FramePeerNotLive', 'FrameCurrentCheck', 'FrameIo', 'FrameLimit', 'FrameInvalidFrame', 'FrameInvalidBudget', 'PredicateDenied', 'ClockExpired', 'WallRollback', 'Restricted', 'Quiescent', 'Closing', 'ProcessExited', 'ProcessPollError', 'EdgeClosed', 'EdgePollError', 'CustodyMismatch', 'AlreadyClosed', 'JournalStorage', 'JournalDatabase', 'JournalPermission', 'JournalExpired', 'JournalRecoveryRequired', 'JournalUnsupportedSchema', 'JournalOfflineHistoryUnsupported', 'JournalNamedRecipientHistoryUnsupported', 'JournalConstructionHistoryUnsupported', 'JournalInvalidBinding', 'JournalConflict', 'JournalNotFound', 'JournalLiveAuthorization', 'JournalInputReserved', 'JournalBudgetExceeded', 'JournalLimit'))
+ACTOR_ROLES=frozenset(('Coordinator', 'Host', 'Signer1', 'Signer2', 'Owner1BootstrapHistory', 'Owner1V3DeliveryAdmission', 'Owner1DeliveryAuditHistory', 'Owner1FinancialReadHistory', 'Owner1FinancialContinuationAdmission', 'Owner1FinancialSigning', 'Owner2BootstrapHistory', 'Owner2V3DeliveryAdmission', 'Owner2DeliveryAuditHistory', 'Owner2FinancialReadHistory', 'Owner2FinancialContinuationAdmission', 'Owner2FinancialSigning', 'CompletedPair'))
+ACTOR_REAP_OWNERS={'Coordinator': ('Host', 'Owner1BootstrapHistory', 'Owner1V3DeliveryAdmission', 'Owner1DeliveryAuditHistory', 'Owner1FinancialReadHistory', 'Owner1FinancialContinuationAdmission', 'Owner1FinancialSigning', 'Owner2BootstrapHistory', 'Owner2V3DeliveryAdmission', 'Owner2DeliveryAuditHistory', 'Owner2FinancialReadHistory', 'Owner2FinancialContinuationAdmission', 'Owner2FinancialSigning', 'CompletedPair'), 'Host': ('Signer1', 'Signer2')}
+def validate_actor_failure_facts(facts,role=None):
+    exact(facts,('version','driver','listener','origin'))
+    require(type(facts['version']) is int and facts['version']==1,'record_shape')
+    require(facts['driver'] is not None,'record_shape')
+    if role is not None:require(role in ('Signer1','Signer2') or facts['listener'] is None,'role')
+    for slot,stages in (('driver',ACTOR_DRIVER_STAGES),('listener',ACTOR_LISTENER_STAGES),('origin',ACTOR_ORIGIN_STAGES)):
+        part=facts[slot]
+        if part is None:continue
+        exact(part,('stage','class','peer') if slot=='origin' else ('stage','class'))
+        require(type(part['stage']) is str and part['stage'] in stages,'record_shape')
+        require(type(part['class']) is str and part['class'] in ACTOR_CLASSES,'record_shape')
+        if slot=='origin':require(part['peer'] is None or (type(part['peer']) is str and part['peer'] in ACTOR_ROLES),'record_shape')
+    return facts
+
+def validate_actor_reap_facts(facts,parent):
+    exact(facts,('version','child','context','exit_code','signal'))
+    require(type(facts['child']) is str and facts['child'] in ACTOR_REAP_OWNERS.get(parent,()),'role')
+    validate_host_reap_facts({k:facts[k] for k in ('version','context','exit_code','signal')})
+    return facts
+
+def validate_actor_cardinality(records):
+    failures=set();reaps={}
+    for r in records:
+        if r['kind']=='ActorFailureBoundary':
+            require(r['role'] not in failures,'replay');failures.add(r['role'])
+        elif r['kind']=='ActorReapObservation':
+            f=r['facts'];child=f['child'];require(child not in reaps,'replay');reaps[child]=(r['role'],f)
+    for child,(parent,f) in reaps.items():
+        for r in records:
+            if r['kind']=='OwnedReap' and r['role']==parent and r['facts']['child']==child:
+                require(f['signal'] is None and f['exit_code']==r['facts']['exit_code'],'replay')
+            if child=='Host' and r['kind']=='HostReapObservation':
+                require(all(f[k]==r['facts'][k] for k in ('context','exit_code','signal')),'replay')
+
+def unavailable_actor_diagnostic():
+    # Explicit null means unavailable, never absence of a failure. Fixed slots.
+    return dict(version=1,actors={role:dict(failure=None,reap=None) for role in sorted(ACTOR_ROLES)})
+
+def validate_actor_diagnostic(value):
+    exact(value,('version','actors'));require(type(value['version']) is int and value['version']==1,'record_shape')
+    exact(value['actors'],ACTOR_ROLES)
+    for role,parts in value['actors'].items():
+        exact(parts,('failure','reap'))
+        f=parts['failure']
+        if f is not None:
+            exact(f,('driver','listener','origin'));validate_actor_failure_facts(dict(version=1,**f),role)
+        reap=parts['reap']
+        if reap is not None:
+            exact(reap,('parent','context','exit_code','signal'))
+            require(type(reap['parent']) is str,'role')
+            validate_actor_reap_facts(dict(version=1,child=role,**{k:reap[k] for k in ('context','exit_code','signal')}),reap['parent'])
+    require(len(json.dumps(value,separators=(',',':')).encode())<=8000,'record_limit')
     return value
 
 # CI-only, Coordinator-local failure boundaries. These are neither milestones

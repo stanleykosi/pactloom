@@ -1,5 +1,9 @@
 //! Actual fixed completed-pair W custody. Setup and retained service are
 //! distinct from per-request maintained financial authority. New I/O obeys R.
+
+macro_rules! actor_boundary {($stage:ident,$class:ident,$peer:expr)=>{{
+ #[cfg(wholepact_financial_rendered_host_semantic_ci)] {use crate::financial_ci_actor_diagnostics as d;d::origin(d::OriginStage::$stage,d::Class::$class,$peer);}
+}};}
 use crate::{
     bootstrap::{self, LeafCustody},
     channel::require_time,
@@ -40,14 +44,19 @@ impl PairCore {
             || unsafe { libc::getpid() } != self.pid
             || unsafe { libc::geteuid() } != self.uid
         {
+            actor_boundary!(ActorCustody,PredicateDenied,None);
             return Err(rejected("completed pair original actor lost"));
         }
         self.peer.check()
     }
     fn action(&self) -> Result<()> {
         self.actors()?;
-        require_time(self.clocks.supervision())?;
+        require_time(self.clocks.supervision()).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::SessionDeadline,_error,None);
+        })?;
         if self.restricted.load(Ordering::Acquire) {
+            actor_boundary!(ActionRevoked,Restricted,None);
             return Err(rejected("completed pair restricted"));
         }
         self.restriction.check_current()
@@ -73,7 +82,10 @@ struct SetupBinding {
 }
 impl SetupBinding {
     fn source_current(&self)->Result<()> {
-        self.core.action()?; require_time(self.source_ceiling)?;
+        self.core.action()?; require_time(self.source_ceiling).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::SourceDeadline,_error,None);
+        })?;
         let wall = state::observe_shared_wall(
             &self.last_wall, self.source_ceiling.min(self.core.clocks.supervision()), state::wall_ms,
         )?.ok_or_else(|| rejected("completed pair original source clock"))?;
@@ -91,7 +103,10 @@ struct ReviewBinding {
 impl ReviewBinding {
     // Completed Setup approval is NOT an ancestor of the service lifetime.
     fn service_current(&self)->Result<()> {
-        self.setup.source_current()?;require_time(self.service_ceiling)?;
+        self.setup.source_current()?;require_time(self.service_ceiling).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::ServiceDeadline,_error,None);
+        })?;
         let wall = state::observe_shared_wall(
             &self.last_wall, self.service_ceiling.min(self.setup.source_ceiling).min(self.setup.core.clocks.supervision()), state::wall_ms,
         )?.ok_or_else(|| rejected("completed pair original service clock"))?;
@@ -100,7 +115,10 @@ impl ReviewBinding {
         } Ok(())
     }
     fn review_current(&self)->Result<()> {
-        self.service_current()?;require_time(self.review_ceiling)?;
+        self.service_current()?;require_time(self.review_ceiling).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::BoundDeadline,_error,None);
+        })?;
         if state::wall_ms()? >= self.data.expires_at_ms{return Err(rejected("completed pair Setup review elapsed"));} Ok(())
     }
 }
@@ -253,6 +271,9 @@ impl WitnessCompletedPairOriginV1 {
     }
     pub fn try_receive(&mut self) -> Result<Option<CompletedPairRequestV1>> {
         let result = self.receive_inner();
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error)=&result {crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::WitnessReceive,error,None);}
+
         if result.is_err() {
             self.core.close();
         }
@@ -402,7 +423,10 @@ impl WitnessCompletedPairOriginV1 {
         // Actual source captures this once before Display. It is retained exact;
         // wire flooring and original source/session minima may only shorten it.
         let service_ceiling=frozen_service_ceiling(original_service_deadline,setup.source_ceiling,wall_cap);
-        require_time(service_ceiling)?;
+        require_time(service_ceiling).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::ServiceDeadline,_error,None);
+        })?;
         let service_ceiling_ms=self.core.clocks.restrictive_offset(service_ceiling,setup.source_ceiling)?;
         let review_ceiling=setup.setup_ceiling.min(service_ceiling).min(wall_ceiling(now,wall,data.prepared_at_ms,data.expires_at_ms)?);
         let b=Arc::new(ReviewBinding{setup:Arc::clone(setup),data:data.clone(),challenge:state::nonce()?,original_service:original_service_deadline,
@@ -500,6 +524,9 @@ impl WitnessCompletedPairOriginV1 {
         Ok(())
     }
     pub fn complete(mut self, work: Result<()>) -> ! {
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error)=&work {crate::financial_ci_actor_diagnostics::work_fallback(crate::financial_ci_actor_diagnostics::DriverStage::WitnessWork,error);}
+
         let result = (|| {
             work?;
             if !self.disposed || !self.closed {

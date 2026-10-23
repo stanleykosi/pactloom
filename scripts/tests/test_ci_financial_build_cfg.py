@@ -43,8 +43,26 @@ class BuildCfgTests(unittest.TestCase):
     def test_all_three_artifact_closures_both_profiles(self):
         for name,profile in itertools.product(A.NAMES,(A.PIXEL_PROFILE,A.SEMANTIC_PROFILE)):
             rows=self.records(name,profile);self.validate(rows,name,profile)
-            self.assertEqual(len(rows),2 if name=='pristine-setup' else 6)
-        self.assertEqual(A.SCRIPT_SCOPES['pristine-setup'],['wholepact-native-host'])
+            self.assertEqual(len(rows),4 if name=='pristine-setup' else 8)
+        self.assertEqual(A.SCRIPT_SCOPES['pristine-setup'],['wholepact-native-host','wholepact-signer'])
+
+    def test_v3_four_consumers_and_old_v2_rejected(self):
+        self.assertEqual(A.CFG_CRATES,('wholepact-financial-coordinator','wholepact-financial-coordinator-origin','wholepact-native-host','wholepact-signer'))
+        from test_ci_financial_artifacts import IDENTITY,CLOSURE
+        old=load('historical_v2_artifacts',ROOT/'financial-runtime-reuse/producer_artifacts.py')
+        self.assertEqual(old.recipe(A.SEMANTIC_PROFILE)['build_recipe_version'],2)
+        self.assertEqual(A.recipe(A.SEMANTIC_PROFILE)['build_recipe_version'],3)
+        value=dict(version=2,identity=IDENTITY,closure=CLOSURE,recipe=old.recipe(A.SEMANTIC_PROFILE),files={name:dict(size=4,sha256='a'*64) for name in A.NAMES})
+        with self.assertRaises(A.Rejected):A.validate_manifest(value,IDENTITY,CLOSURE,A.SEMANTIC_PROFILE)
+        value['recipe']=A.recipe(A.SEMANTIC_PROFILE)
+        with self.assertRaises(old.Rejected):old.validate_manifest(value,IDENTITY,CLOSURE,A.SEMANTIC_PROFILE)
+        for name in A.NAMES:
+            rows=self.records(name)
+            signer=[r for r in rows if 'wholepact-signer' in r.get('package_id','')]
+            self.assertEqual(len(signer),2)
+            with self.assertRaises(S.Failure):self.validate([r for r in rows if r not in signer],name)
+            rows[-1]['cfgs']=['wholepact_financial_ci']
+            with self.assertRaises(S.Failure):self.validate(rows,name)
 
     def test_transition_environments_reset_without_global_flags(self):
         choices=list(itertools.product(A.NAMES,(A.PIXEL_PROFILE,A.SEMANTIC_PROFILE)))
@@ -107,7 +125,7 @@ class BuildCfgTests(unittest.TestCase):
                 consumers.add(path.relative_to(S.REPO/'crates').parts[0])
         self.assertEqual(consumers,set(A.CFG_CRATES))
 
-    def test_v2_recipe_and_legacy_bundle_are_not_interchangeable(self):
+    def test_v3_recipe_and_legacy_bundle_are_not_interchangeable(self):
         from test_ci_financial_artifacts import IDENTITY,CLOSURE
         inputs=pathlib.Path(self.tmp.name)/'inputs';inputs.mkdir()
         for name in A.NAMES:(inputs/name).write_bytes(b'\x7fELFfabricated never executable')
@@ -122,7 +140,7 @@ class BuildCfgTests(unittest.TestCase):
         changed=copy.deepcopy(value);changed['recipe']=LEGACY.RECIPE
         with self.assertRaises(A.Rejected):A.validate_manifest(changed,IDENTITY,CLOSURE)
 
-    def test_v2_cfg_recipe_and_script_closure_are_exact(self):
+    def test_v3_cfg_recipe_and_script_closure_are_exact(self):
         from test_ci_financial_artifacts import IDENTITY,CLOSURE
         value=dict(version=2,identity=IDENTITY,closure=CLOSURE,recipe=A.recipe(A.PIXEL_PROFILE),
             files={name:dict(size=4,sha256='a'*64) for name in A.NAMES})

@@ -292,3 +292,8 @@ pub use financial_observer::financial_ci_flush_failure_boundaries;
 pub mod financial_ci_host_diagnostics;
 #[cfg(wholepact_financial_rendered_host_semantic_ci)]
 pub use financial_observer::financial_ci_flush_host_diagnostics;
+
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+pub mod financial_ci_actor_diagnostics;
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+pub use financial_observer::financial_ci_flush_actor_diagnostics;

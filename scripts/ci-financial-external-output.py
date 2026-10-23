@@ -31,9 +31,10 @@ def validate_completed(records, actual_root_pid, actual_root_exit, external_evid
     by_role={role:[] for role in C.ROLES}
     for record in records:
         C.validate_record(record,expected_profile)
-        C.require(record['kind'] not in ('Failure','NativeFailureBoundary','HostFailureBoundary'),'observer_failure')
+        C.require(record['kind'] not in ('Failure','NativeFailureBoundary','HostFailureBoundary','ActorFailureBoundary'),'observer_failure')
         by_role[record['role']].append(record)
     C.validate_host_exit_cardinality(records)
+    C.validate_actor_cardinality(records)
     births={}
     for role, entries in by_role.items():
         C.require(entries,'observer_missing')

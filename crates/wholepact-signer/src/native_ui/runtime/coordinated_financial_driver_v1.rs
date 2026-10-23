@@ -964,34 +964,37 @@ impl Driver {
     fn run(mut self) -> ! {
         let work = (|| -> Result<()> {
             loop {
-                self.origin.check_original_actors_alive()?;
+                actor_driver_result!(OriginalActors, self.origin.check_original_actors_alive())?;
                 // Pump authenticated restriction before interpreting a worker's
                 // result or offering another purpose. No Origin moves to worker.
-                if let Some(request) = self.origin.try_receive()? {
-                    if !self.handle(request)? {
+                if let Some(request) = actor_driver_result!(Receive, self.origin.try_receive())? {
+                    if !actor_driver_result!(Handle, self.handle(request))? {
                         return Ok(());
                     }
                 }
-                self.poll_opening()?;
-                self.begin_pairing()?;
-                self.poll_pairing()?;
-                self.begin_enrollment()?;
-                self.poll_receipts()?;
-                self.poll_redisclosure()?;
-                self.poll_status()?;
-                self.poll_delivery()?;
-                self.poll_financial()?;
+                actor_driver_result!(Opening, self.poll_opening())?;
+                actor_driver_result!(PairBegin, self.begin_pairing())?;
+                actor_driver_result!(PairPoll, self.poll_pairing())?;
+                actor_driver_result!(EnrollmentBegin, self.begin_enrollment())?;
+                actor_driver_result!(ReceiptPoll, self.poll_receipts())?;
+                actor_driver_result!(RedisclosurePoll, self.poll_redisclosure())?;
+                actor_driver_result!(StatusPoll, self.poll_status())?;
+                actor_driver_result!(DeliveryPoll, self.poll_delivery())?;
+                actor_driver_result!(FinancialPoll, self.poll_financial())?;
                 // ReturnReported retains the actual completed private owner.
                 // Only the original typed NormalClose may end this wait; a
                 // completed result is not a cancellation or disposal proof.
-                if let Some(transport)=&self.financial_transport {transport.check_current()?;}
+                if let Some(transport)=&self.financial_transport {actor_driver_result!(FinancialTransport, transport.check_current())?;}
                 if let State::Opened(source) = &self.state {
-                    source.check_retained_restriction()?;
+                    actor_driver_result!(SourceRetention, source.check_retained_restriction())?;
                 }
                 std::thread::sleep(Duration::from_millis(2));
             }
         })();
         if work.is_err() {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            if let Err(error) = &work { crate::financial_ci_actor::driver(
+                wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::DriverStage::WorkUnclassified, error); }
             if !self.entry_opened_reported {
                 let _ = self.origin.v3_source_entry_failed();
             }
@@ -1004,7 +1007,7 @@ impl Driver {
         // worker/source, then explicitly report failure over cleanup transport.
         let cancelled_unreported_entry =
             work.is_ok() && matches!(self.state, State::Offered { .. } | State::Opening(_));
-        let cleanup = std::mem::replace(&mut self.state, State::Taken).join_and_drop();
+        let cleanup = actor_driver_result!(Cleanup, std::mem::replace(&mut self.state, State::Taken).join_and_drop());
         // Disposal includes the actual original return-only listener/tempdir,
         // not merely the private source worker. Complete never returns.
         drop(self.financial_transport.take());
@@ -1035,7 +1038,7 @@ impl Driver {
 /// Only genuine fixed-fork Signer origin can enter. It carries no account
 /// password, path, authority flag or reconstructed role handle in its arguments.
 pub fn run_coordinated_financial_signer_v1(origin: SignerOriginV1) -> ! {
-    match origin.into_financial_workflow() {
+    match actor_driver_result!(Initialization, origin.into_financial_workflow()) {
         Ok(origin) => Driver {
             origin,
             normal_close: None,
@@ -1045,6 +1048,10 @@ pub fn run_coordinated_financial_signer_v1(origin: SignerOriginV1) -> ! {
             pending_status_control:None, financial_setup:None, financial_entry_requested:false, financial_transport:None,
         }
         .run(),
-        Err(_) => std::process::exit(1),
+        Err(_) => {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            wholepact_financial_coordinator_origin::financial_ci_flush_actor_diagnostics();
+            std::process::exit(1)
+        },
     }
 }

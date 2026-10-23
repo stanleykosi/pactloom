@@ -286,6 +286,15 @@ def emit_cached_host_exit_failure(flow):
     except Exception:return # independent cached actors, no late IO or inference
 
 
+def emit_cached_actor_failure(flow):
+    if flow is None or flow.expected_profile!=C.SEMANTIC_PROFILE:return
+    try:
+        value=flow.observer.failure_diagnostics()['actor']
+        encoded=json.dumps(C.validate_actor_diagnostic(value),separators=(',',':'))
+        print('CI_FINANCIAL_ACTOR_DIAGNOSTIC '+encoded,flush=True)
+    except Exception:return # Cached validated slots only; preserve failure/cleanup.
+
+
 def emit_cached_input_failure(flow,error):
     # Original exception and cached checkpoint only; no fresh read/input/clock.
     try:
@@ -333,6 +342,7 @@ def main():
         emit_cached_native_failure(flow)
         emit_cached_observation_timing_failure(flow)
         emit_cached_host_exit_failure(flow)
+        emit_cached_actor_failure(flow)
         # No raw exception/path/Host output escapes. Outer owner destroys whole
         # isolated namespace on failure; never report rescue cleanup as normal.
         print('CI_FINANCIAL_RESULT '+json.dumps(OUT.failure(code,expected_profile),separators=(',',':')),flush=True)

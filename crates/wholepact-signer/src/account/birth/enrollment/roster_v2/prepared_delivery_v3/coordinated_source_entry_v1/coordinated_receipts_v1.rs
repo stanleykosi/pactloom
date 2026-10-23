@@ -93,9 +93,9 @@ impl CoordinatedEnrollmentReviewV1 {
         self.deadline
     }
     pub(crate) fn check_current(&self) -> Result<()> {
-        self.pairing.check_current()?;
-        self.session.check_current()?;
-        self.peer.check_current()
+        actor_driver_detail_result!(EnrollmentPairingCheck, self.pairing.check_current())?;
+        actor_driver_detail_result!(EnrollmentSessionCheck, self.session.check_current())?;
+        actor_driver_detail_result!(EnrollmentPeerCheck, self.peer.check_current())
     }
     pub(crate) fn commit(
         mut self,
@@ -185,9 +185,9 @@ impl CoordinatedManifestReviewV1 {
         self.deadline
     }
     pub(crate) fn check_current(&self) -> Result<()> {
-        self.pairing.check_current()?;
-        self.session.check_current()?;
-        self.peer.check_current()
+        actor_driver_detail_result!(ManifestPairingCheck, self.pairing.check_current())?;
+        actor_driver_detail_result!(ManifestSessionCheck, self.session.check_current())?;
+        actor_driver_detail_result!(ManifestPeerCheck, self.peer.check_current())
     }
     pub(crate) fn commit(
         mut self,

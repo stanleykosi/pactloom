@@ -5,6 +5,52 @@
 //! No network client, browser credential, coordinator credential or generic
 //! "verified" JSON can confer signing authority.
 
+#[cfg(all(wholepact_financial_rendered_host_semantic_ci, not(all(
+    wholepact_financial_ci, wholepact_financial_external_ci,
+    feature = "coordinated-financial-workflow-v1", target_os = "linux"
+))))]
+compile_error!("semantic financial observation requires the original Linux coordinated workflow profile");
+// Each wrapper evaluates the original expression exactly once and returns its
+// unchanged Result. No observation API or output exists in other profiles.
+macro_rules! actor_driver_result {
+    ($stage:ident, $result:expr) => {{
+        let result = $result;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error) = &result { crate::financial_ci_actor::driver(
+            wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::DriverStage::$stage, error); }
+        result
+    }};
+}
+macro_rules! actor_driver_detail_result {
+    ($stage:ident, $result:expr) => {{
+        let result = $result;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error) = &result { crate::financial_ci_actor::driver_detail(
+            wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::DriverStage::$stage, error); }
+        result
+    }};
+}
+macro_rules! actor_listener_result {
+    ($stage:ident, $result:expr) => {{
+        let result = $result;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error) = &result { crate::financial_ci_actor::listener(
+            wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::ListenerStage::$stage, error); }
+        result
+    }};
+}
+macro_rules! actor_listener_denial {
+    ($stage:ident, $class:ident) => {{
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::listener(
+            wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::ListenerStage::$stage,
+            wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::Class::$class);
+    }};
+}
+
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+mod financial_ci_actor;
+
 pub mod account;
 pub mod authority_bridge;
 pub mod consent_journal;

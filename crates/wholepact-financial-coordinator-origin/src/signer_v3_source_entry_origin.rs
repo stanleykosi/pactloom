@@ -3,6 +3,9 @@ mod financial_setup;
 // Separate initial V3 SourceEntry protocol. No legacy grant conversion.
 #[path="signer_v3_delivery_origin.rs"]
 mod delivery;
+macro_rules! actor_boundary {($stage:ident,$class:ident,$peer:expr)=>{{
+ #[cfg(wholepact_financial_rendered_host_semantic_ci)] {use crate::financial_ci_actor_diagnostics as d;d::origin(d::OriginStage::$stage,d::Class::$class,$peer);}
+}};}
 pub use delivery::{SignerV3PrepareReadTicketV1,SignerV3PrepareReadOutboundV1,SignerV3PrepareReadFinalV1,SignerV3PreparedLifetimeV1,SignerV3ReceiveTicketV1,SignerV3ReceiveOutboundV1,SignerV3ReceiveFinalV1};
 #[path="signer_v3_admit_read_origin.rs"]
 mod admit_read;
@@ -149,6 +152,7 @@ impl V3EntryReviewed {
             || wall < self.wire.presentation.facts.reviewed_at_ms
             || wall >= self.wire.presentation.facts.source_expires_at_ms
         {
+            actor_boundary!(SourceLifetime,PredicateDenied,None);
             return Err(rejected("retirement original source clock elapsed"));
         }
         Ok(())
@@ -168,6 +172,7 @@ impl V3EntryReviewed {
                 || wall < self.wire.presentation.facts.reviewed_at_ms
                 || wall >= self.wire.presentation.facts.source_expires_at_ms
             {
+                actor_boundary!(SourceLifetime,PredicateDenied,None);
                 return Err(rejected("original financial custody expired"));
             }
             Ok(wall)
@@ -184,6 +189,7 @@ impl V3EntryReviewed {
                 || Instant::now() >= self.ceiling
                 || wall >= self.wire.presentation.facts.expires_at_ms
             {
+                actor_boundary!(SourceAction,ClockExpired,None);
                 return Err(rejected("SourceEntry original action bound elapsed"));
             }
             Ok(())

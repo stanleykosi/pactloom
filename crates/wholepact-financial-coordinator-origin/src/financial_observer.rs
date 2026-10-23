@@ -14,7 +14,8 @@ static EPOCH:AtomicU64=AtomicU64::new(0);
 struct Writer{pid:i32,role:Role,sequence:u64,bytes:u64,inode:u64,device:u64,directory_inode:u64,directory_device:u64,last:u64,
  #[cfg(wholepact_financial_rendered_host_semantic_ci)] semantic:SemanticState,
  #[cfg(wholepact_financial_rendered_host_semantic_ci)] boundary:crate::financial_ci_failure_boundary::Reporter,
- #[cfg(wholepact_financial_rendered_host_semantic_ci)] host_diagnostic:crate::financial_ci_host_diagnostics::Reporter}
+ #[cfg(wholepact_financial_rendered_host_semantic_ci)] host_diagnostic:crate::financial_ci_host_diagnostics::Reporter,
+ #[cfg(wholepact_financial_rendered_host_semantic_ci)] actor_diagnostic:crate::financial_ci_actor_diagnostics::Reporter}
 static WRITER:Mutex<Option<Writer>>=Mutex::new(None);
 fn now()->Result<u64>{let mut t:libc::timespec=unsafe{std::mem::zeroed()};if unsafe{libc::clock_gettime(libc::CLOCK_MONOTONIC,&mut t)}!=0{return Err(std::io::Error::last_os_error());}u64::try_from(t.tv_sec).ok().and_then(|s|s.checked_mul(1_000_000_000)).and_then(|n|n.checked_add(t.tv_nsec as u64)).ok_or_else(||rejected("financial observer clock"))}
 fn name(role:Role)->String{format!("{role:?}")}
@@ -27,9 +28,11 @@ pub(crate) fn enter(role:Role)->Result<()>{
  *slot=Some(Writer{pid,role,sequence:0,bytes:0,inode:m.ino(),device:m.dev(),directory_inode:dir.metadata()?.ino(),directory_device:dir.metadata()?.dev(),last:0,
  #[cfg(wholepact_financial_rendered_host_semantic_ci)] semantic:SemanticState::default(),
  #[cfg(wholepact_financial_rendered_host_semantic_ci)] boundary:crate::financial_ci_failure_boundary::Reporter::default(),
- #[cfg(wholepact_financial_rendered_host_semantic_ci)] host_diagnostic:crate::financial_ci_host_diagnostics::Reporter::default()});drop(f);drop(slot);
+ #[cfg(wholepact_financial_rendered_host_semantic_ci)] host_diagnostic:crate::financial_ci_host_diagnostics::Reporter::default(),
+ #[cfg(wholepact_financial_rendered_host_semantic_ci)] actor_diagnostic:crate::financial_ci_actor_diagnostics::Reporter::default()});drop(f);drop(slot);
  #[cfg(wholepact_financial_rendered_host_semantic_ci)] crate::financial_ci_failure_boundary::enter(role==Role::Coordinator);
  #[cfg(wholepact_financial_rendered_host_semantic_ci)] crate::financial_ci_host_diagnostics::enter(role);
+ #[cfg(wholepact_financial_rendered_host_semantic_ci)] crate::financial_ci_actor_diagnostics::enter(role);
  let parent=match role{Role::Coordinator=>None,Role::Signer1|Role::Signer2=>Some("Host"),_=>Some("Coordinator")};
  emit("Birth",json!({"pid":pid,"parent_pid":unsafe{libc::getppid()},"parent_role":parent}))
 }
@@ -380,4 +383,17 @@ fn flush_host_diagnostics_locked(w:&mut Writer) {
 #[cfg(wholepact_financial_rendered_host_semantic_ci)]
 pub fn financial_ci_flush_host_diagnostics() {
  if let Ok(mut slot)=WRITER.lock(){if let Some(w)=slot.as_mut(){flush_host_diagnostics_locked(w);}}
+}
+
+/// Final actor-local summary only after the original work and owned joins return.
+/// No evidence operation changes or replaces an original result.
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+pub fn financial_ci_flush_actor_diagnostics(){
+ if let Ok(mut slot)=WRITER.lock(){if let Some(w)=slot.as_mut(){
+  if w.pid!=unsafe{libc::getpid()}{return;}
+  let mut reporter=w.actor_diagnostic;
+  reporter.flush_failure(crate::financial_ci_actor_diagnostics::sample_failure(),|f|emit_locked(w,"ActorFailureBoundary",&f).map_err(|_|()));
+  reporter.flush_reaps(crate::financial_ci_actor_diagnostics::sample_reaps(),|f|emit_locked(w,"ActorReapObservation",&f).map_err(|_|()));
+  w.actor_diagnostic=reporter;
+ }}
 }

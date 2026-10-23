@@ -1,5 +1,9 @@
 //! Actual fixed C->W financial-continuation custody. No imported role, packet,
 //! key, descriptor, review DTO or public constructor can create these grants.
+
+macro_rules! actor_boundary {($stage:ident,$class:ident,$peer:expr)=>{{
+ #[cfg(wholepact_financial_rendered_host_semantic_ci)] {use crate::financial_ci_actor_diagnostics as d;d::origin(d::OriginStage::$stage,d::Class::$class,$peer);}
+}};}
 use crate::{bootstrap::{self,LeafCustody},channel::require_time,rejected,Result,
     financial_workflow_clock::{FullWorkflowClocksV1,PROFILE},financial_workflow_source::wall_ceiling,
     financial_witness_channel::{self as wire,Packet,Setup,FinancialWitnessInputsV1,FinancialWitnessContinuationV1,
@@ -14,10 +18,15 @@ struct WitnessCore {
 impl WitnessCore {
     fn actors(&self)->Result<()>{
         if !self.alive.load(Ordering::Acquire)||unsafe{libc::getpid()}!=self.pid||unsafe{libc::geteuid()}!=self.uid{
+            actor_boundary!(ActorCustody,PredicateDenied,None);
             return Err(rejected("financial Witness original actor lost"));}self.peer.check()
     }
-    fn action(&self)->Result<()>{self.actors()?;require_time(self.clocks.supervision())?;
-        if self.revoked.load(Ordering::Acquire){return Err(rejected("financial Witness restricted"));}
+    fn action(&self)->Result<()>{self.actors()?;require_time(self.clocks.supervision()).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::SessionDeadline,_error,None);
+        })?;
+        if self.revoked.load(Ordering::Acquire){actor_boundary!(ActionRevoked,Restricted,None);
+            return Err(rejected("financial Witness restricted"));}
         self.restriction.check_current()
     }
     fn revoke(&self){self.revoked.store(true,Ordering::Release);}
@@ -29,7 +38,13 @@ impl WitnessCore {
 }
 struct SetupBinding {core:Arc<WitnessCore>,wire:Setup,ceiling:Instant,source:Instant,last_wall:AtomicU64}
 impl SetupBinding {
-    fn current(&self)->Result<()>{self.core.action()?;require_time(self.ceiling)?;require_time(self.source)?;
+    fn current(&self)->Result<()>{self.core.action()?;require_time(self.ceiling).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::BoundDeadline,_error,None);
+        })?;require_time(self.source).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::SourceDeadline,_error,None);
+        })?;
         let wall=state::wall_ms()?;let old=self.last_wall.fetch_max(wall,Ordering::AcqRel);
         if wall<old||wall>=self.wire.continuation.source_expires_at_ms{return Err(rejected("financial Witness setup source clock"));}Ok(())}
 }
@@ -37,8 +52,20 @@ struct ReviewBinding {setup:Arc<SetupBinding>,presentation:FinancialWitnessPrese
     original_review:Instant,ceiling:Instant,last_wall:AtomicU64}
 impl ReviewBinding {
     fn check(&self,admitted:bool)->Result<()>{
-        self.setup.core.actors()?;require_time(self.setup.core.clocks.supervision())?;
-        require_time(self.setup.source)?;require_time(self.original_review)?;require_time(self.ceiling)?;
+        self.setup.core.actors()?;require_time(self.setup.core.clocks.supervision()).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::SessionDeadline,_error,None);
+        })?;
+        require_time(self.setup.source).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::SourceDeadline,_error,None);
+        })?;require_time(self.original_review).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::ReviewDeadline,_error,None);
+        })?;require_time(self.ceiling).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::BoundDeadline,_error,None);
+        })?;
         let wall = state::observe_shared_wall(
             &self.last_wall,
             self.setup.source.min(self.setup.core.clocks.supervision()).min(self.original_review).min(self.ceiling),
@@ -53,7 +80,13 @@ struct ReadyBinding {review:Arc<ReviewBinding>,data:FinancialWitnessReadyV1,chal
     original_accepted:Instant,ceiling:Instant}
 impl ReadyBinding {
     fn check(&self,admitted:bool)->Result<()>{self.review.check(admitted)?;
-        require_time(self.original_accepted)?;require_time(self.ceiling)?;
+        require_time(self.original_accepted).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::AcceptedDeadline,_error,None);
+        })?;require_time(self.ceiling).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::BoundDeadline,_error,None);
+        })?;
         let wall=state::wall_ms()?;
         if wall<self.data.accepted_at_ms||wall>=self.data.accepted_tls_expires_at_ms{return Err(rejected("financial Witness original accepted clock"));}Ok(())}
 }
@@ -132,7 +165,10 @@ impl WitnessFinancialContinuationOriginV1 {
         self.retain_cleanup_deadline(self.core.clocks.hard_cleanup())?;Ok(())
     }
     pub fn try_receive(&mut self)->Result<Option<FinancialWitnessRequestV1>>{
-        let result=self.receive_inner();if result.is_err(){self.core.close();}result
+        let result=self.receive_inner();
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error)=&result {crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::WitnessReceive,error,None);}
+if result.is_err(){self.core.close();}result
     }
     fn receive_inner(&mut self)->Result<Option<FinancialWitnessRequestV1>>{
         self.transport()?;
@@ -243,6 +279,9 @@ impl WitnessFinancialContinuationOriginV1 {
         self.send(&Packet::PurposeClosed{coordinator:c.clone(),session:s.clone()})?;self.closed=true;Ok(())
     }
     pub fn complete(mut self,work:Result<()>)->!{
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error)=&work {crate::financial_ci_actor_diagnostics::work_fallback(crate::financial_ci_actor_diagnostics::DriverStage::WitnessWork,error);}
+
         let result=(||{work?;if !self.closed||!self.disposed{return Err(rejected("financial Witness incomplete terminal handshake"));}
             let leaf=self.leaf.take().ok_or_else(||rejected("financial Witness custody consumed"))?;
             bootstrap::finish_leaf_capped(leaf,Ok(()),self.cleanup)})();

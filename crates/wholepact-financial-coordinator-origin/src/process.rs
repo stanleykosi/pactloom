@@ -71,6 +71,11 @@ impl PeerLifetime {
         if rc != 0 || poll.revents != 0 {
             #[cfg(wholepact_bootstrap_ci)]
             crate::ci::reject_boundary("peer_lifetime", "dead_or_poll_error", Some(self), None, Some(false), false, None);
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)] {
+                use crate::financial_ci_actor_diagnostics as d;
+                let bad=rc<0||poll.revents&(libc::POLLERR|libc::POLLNVAL)!=0||poll.revents&(libc::POLLIN|libc::POLLHUP)==0;
+                d::origin(if bad{d::OriginStage::PeerProcessPollError}else{d::OriginStage::PeerProcessExit},if bad{d::Class::ProcessPollError}else{d::Class::ProcessExited},Some(d::PeerRole::from_role(self.role)));
+            }
             return Err(rejected("original process not live"));
         }
         Ok(())
@@ -424,6 +429,8 @@ impl DirectChild {
         self.reaped=true;
         #[cfg(wholepact_financial_rendered_host_semantic_ci)]
         crate::financial_ci_host_diagnostics::reap(self.peer.role,crate::financial_ci_host_diagnostics::ReapContext::RetirementTryReap,status);
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        crate::financial_ci_actor_diagnostics::reap(self.peer.role,crate::financial_ci_actor_diagnostics::ReapContext::RetirementTryReap,status);
         #[cfg(wholepact_financial_ci)]
         crate::financial_observer::reaped(self.peer.role,self.peer.pid,status)?;
         #[cfg(wholepact_bootstrap_ci)]
@@ -455,6 +462,8 @@ impl DirectChild {
                 self.reaped = true;
                 #[cfg(wholepact_financial_rendered_host_semantic_ci)]
                 crate::financial_ci_host_diagnostics::reap(self.peer.role,crate::financial_ci_host_diagnostics::ReapContext::FinishPath,status);
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        crate::financial_ci_actor_diagnostics::reap(self.peer.role,crate::financial_ci_actor_diagnostics::ReapContext::FinishPath,status);
                 #[cfg(wholepact_financial_ci)]
                 crate::financial_observer::reaped(self.peer.role,self.peer.pid,status)?;
                 #[cfg(wholepact_bootstrap_ci)]
@@ -508,6 +517,8 @@ impl DirectChild {
                 self.reaped = true;
                 #[cfg(wholepact_financial_rendered_host_semantic_ci)]
                 crate::financial_ci_host_diagnostics::reap(self.peer.role,crate::financial_ci_host_diagnostics::ReapContext::DropKillAttempted,status);
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        crate::financial_ci_actor_diagnostics::reap(self.peer.role,crate::financial_ci_actor_diagnostics::ReapContext::DropKillAttempted,status);
                 #[cfg(wholepact_bootstrap_ci)]
                 crate::ci::reaped(self.peer.role, self.peer.pid, status);
                 #[cfg(wholepact_delivery_ci)]

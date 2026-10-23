@@ -11,8 +11,19 @@ pub(super) use wholepact_financial_coordinator_origin::CoordinatorCancelOriginV1
 type Completion = bool;
 #[cfg(not(feature = "coordinated-financial-runtime"))]
 type Completion = ();
+// Existing construction result only; owned failure cleanup already returned.
+// No new input, retry, original-actor discovery, or authority is introduced.
+fn observed_initialization<T>(result: Result<T>) -> Result<T> {
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    if let Err(error)=&result {
+        use wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::{work_fallback,DriverStage};
+        work_fallback(DriverStage::Initialization,error);
+        wholepact_financial_coordinator_origin::financial_ci_flush_actor_diagnostics();
+    }
+    result
+}
 pub(super) fn run_before_runtime() -> Result<Completion> {
-    match bootstrap_common_image_v1()? {
+    match observed_initialization(bootstrap_common_image_v1())? {
         BootstrappedRoleV1::Coordinator(origin) => {
             #[cfg(feature = "cancel-only-witness-review")]
             {
@@ -27,12 +38,17 @@ pub(super) fn run_before_runtime() -> Result<Completion> {
             }
             #[cfg(feature = "coordinated-financial-runtime")]
             {
-                let (native, endpoint) = origin.into_financial_workflow()?;
+                let (native, endpoint) = observed_initialization(origin.into_financial_workflow())?;
                 let result = crate::financial_source_ui::run(native, endpoint);
                 #[cfg(wholepact_financial_rendered_host_semantic_ci)]
                 {
                     wholepact_financial_coordinator_origin::financial_ci_flush_failure_boundaries();
                     wholepact_financial_coordinator_origin::financial_ci_flush_host_diagnostics();
+                    if let Err(error) = &result {
+                        use wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::{work_fallback,DriverStage};
+                        work_fallback(DriverStage::WorkUnclassified,error);
+                    }
+                    wholepact_financial_coordinator_origin::financial_ci_flush_actor_diagnostics();
                 }
                 result
             }
@@ -52,6 +68,11 @@ pub(super) fn run_before_runtime() -> Result<Completion> {
                     latch_failure(Stage::RunnerReturn,classify_io(error.kind()));
                 }
                 wholepact_financial_coordinator_origin::financial_ci_flush_host_diagnostics();
+                if let Err(error) = &result {
+                    use wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::{work_fallback,DriverStage};
+                    work_fallback(DriverStage::WorkUnclassified,error);
+                }
+                wholepact_financial_coordinator_origin::financial_ci_flush_actor_diagnostics();
             }
             result.map(|()|true)
         },
@@ -64,7 +85,7 @@ pub(super) fn run_before_runtime() -> Result<Completion> {
         #[cfg(feature = "coordinated-financial-runtime")]
         BootstrappedRoleV1::InertWitness(origin) => {
             use wholepact_financial_coordinator_origin::FinancialWitnessPurposeV1 as Purpose;
-            match origin.into_financial_purpose()? {
+            match observed_initialization(origin.into_financial_purpose())? {
                 Purpose::RetainedInert(owner) => owner.run_until_stop(),
                 Purpose::InitialHistory(owner) => wholepact_authority::transport::run_coordinated_initial_history_v1(owner),
                 Purpose::Continuation(owner) => wholepact_authority::native_witness_owner::coordinated_financial_continuation_v1::run_witness_financial_continuation_once_v1(owner),

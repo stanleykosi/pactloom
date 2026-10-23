@@ -118,7 +118,9 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(S.A.RECIPE['observed_rustflags'],'')
         self.assertEqual(S.A.RECIPE['cfg_delivery']['effective_cfgs']['coordinator-observed'],
                          ['wholepact_financial_ci','wholepact_financial_external_ci'])
-        self.assertEqual(S.A.RECIPE['build_recipe_version'],2)
+        self.assertEqual(S.A.RECIPE['build_recipe_version'],3)
+        self.assertEqual(S.A.CFG_CRATES,('wholepact-financial-coordinator','wholepact-financial-coordinator-origin','wholepact-native-host','wholepact-signer'))
+        self.assertEqual(S.A.SCRIPT_SCOPES['pristine-setup'],['wholepact-native-host','wholepact-signer'])
         for name in S.A.NAMES:
             args=S.build_recipe(name)
             self.assertEqual(args[args.index('--features')+1],S.A.RECIPE[

@@ -2350,7 +2350,8 @@ class HostExitDiagnosticTests(unittest.TestCase):
             if len(rows)==4:rows.append(self.record('HostReapObservation',self.reap(exit_code=1),5));self.write(rows)
         with mock.patch.object(O.time,'monotonic_ns',side_effect=lambda:clock[0]),mock.patch.object(O.time,'sleep',side_effect=sleep) as paused,mock.patch.object(O.os,'open',side_effect=open_record):
             with self.assertRaises(O.C.Rejected) as e:self.o.next_snapshot(self.o.deadline_ns)
-        self.assertEqual(str(e.exception),'observer_failure');self.assertEqual(paused.call_count,1)
+        self.assertEqual(str(e.exception),'observer_failure');self.assertGreater(paused.call_count,1)
+        self.assertGreaterEqual(clock[0],self.o._failure_drain_deadline)
         self.assertEqual(self.o._failure_drain_deadline,now+O.FAILURE_DRAIN_NS)
         value=self.o.failure_diagnostics()['host_exit'];self.assertEqual(value['reap']['exit_code'],1);self.assertEqual(value['foreground']['stage'],'CommandsDecode')
         self.assertEqual(opened[-2:],['100.jsonl','101.jsonl'])
@@ -2853,3 +2854,152 @@ class SelectionHandoffTests(unittest.TestCase):
         for action,phase in expected.items():
             arm=re.split(r'Intent::'+action+r'\b',tail,maxsplit=1)[1].split('\n            Intent::',1)[0]
             self.assertEqual(re.findall(r'self.transition\(Phase::(\w+), frame\)',arm),[phase],action)
+
+class ActorDiagnosticTests(unittest.TestCase):
+    copy=staticmethod(lambda value:json.loads(json.dumps(value)))
+    setUp=HostExitDiagnosticTests.setUp
+    tearDown=HostExitDiagnosticTests.tearDown
+    record=HostExitDiagnosticTests.record
+    records=HostExitDiagnosticTests.records
+    write=HostExitDiagnosticTests.write
+    def facts(self):
+        return dict(version=1,driver={'stage':'ReceiptPoll','class':'SignerLocked'},listener={'stage':'BoundsSource','class':'SignerLocked'},origin={'stage':'SharedWallRollback','class':'WallRollback','peer':None})
+    def actor_rows(self,role='Signer1'):
+        facts=self.facts()
+        if role not in ('Signer1','Signer2'):facts['listener']=None
+        return [self.record('Birth',dict(pid=102,parent_pid=101,parent_role='Host'),1,role=role),self.record('ActorFailureBoundary',facts,2,role=role)]
+    def actor_file(self,rows):
+        p=self.directory/'102.jsonl';p.write_bytes(b''.join(json.dumps(r).encode()+b'\n' for r in rows));p.chmod(0o600)
+    def test_closed_domains_roles_and_required_driver(self):
+        for slot,domain in [('driver',O.C.ACTOR_DRIVER_STAGES),('listener',O.C.ACTOR_LISTENER_STAGES),('origin',O.C.ACTOR_ORIGIN_STAGES)]:
+            for stage in domain:
+                f=self.facts();f[slot]['stage']=stage;O.C.validate_actor_failure_facts(f,'Signer1')
+        for cls in O.C.ACTOR_CLASSES:
+            f=self.facts();f['driver']['class']=cls;O.C.validate_actor_failure_facts(f,'Signer1')
+        for role in O.C.ACTOR_ROLES:
+            f=self.facts();f['listener']=None;O.C.validate_record(self.record('ActorFailureBoundary',f,2,role=role),O.C.SEMANTIC_PROFILE)
+        for profile in (O.C.PROFILE,O.C.EXTERNAL_PROFILE):
+            with self.assertRaises(O.C.Rejected):O.C.validate_record(self.record('ActorFailureBoundary',self.facts(),2,role='Signer1',profile=profile),profile)
+        for change in ({'version':True},{'driver':None},{'extra':'private'},{'origin':{'stage':'SourceLifetime','class':'Locked','peer':None}},{'origin':{'stage':'SourceLifetime','class':'SignerLocked','peer':'unknown'}}):
+            f=self.facts();f.update(change)
+            with self.assertRaises(O.C.Rejected):O.C.validate_actor_failure_facts(f,'Signer1')
+        with self.assertRaises(O.C.Rejected):O.C.validate_actor_failure_facts(self.facts(),'Host')
+    def test_validated_cache_precedes_failure_and_is_immutable(self):
+        from unittest import mock
+        self.write(self.records());self.o.next_snapshot(self.o.deadline_ns);self.actor_file(self.actor_rows())
+        with self.assertRaises(O.C.Rejected) as error:self.o.next_snapshot(self.o.deadline_ns)
+        self.assertEqual(error.exception.code,'observer_failure')
+        value=self.o.failure_diagnostics()['actor'];O.C.validate_actor_diagnostic(value)
+        self.assertEqual(value['actors']['Signer1']['failure']['driver']['stage'],'ReceiptPoll')
+        self.assertIsNone(value['actors']['Signer2']['failure']);self.assertIsNone(value['actors']['Signer1']['reap'])
+        value['actors']['Signer1']['failure']['origin']['peer']='Host'
+        self.assertIsNone(self.o.failure_diagnostics()['actor']['actors']['Signer1']['failure']['origin']['peer'])
+        before=self.o.failure_diagnostics();rows=self.actor_rows();rows.append(self.record('ActorFailureBoundary',self.facts(),3,role='Signer1'));self.actor_file(rows)
+        with self.assertRaises(O.C.Rejected):self.o.read()
+        self.assertEqual(before,self.o.failure_diagnostics())
+    def test_reap_ownership_status_and_consistency(self):
+        for parent,children in O.C.ACTOR_REAP_OWNERS.items():
+            for child in children:
+                f=dict(version=1,child=child,context='FinishPath',exit_code=0,signal=None)
+                O.C.validate_record(self.record('ActorReapObservation',f,2,role=parent),O.C.SEMANTIC_PROFILE)
+                for changes in ({'exit_code':True},{'signal':1},{'context':'Unknown'},{'child':'Coordinator'}):
+                    bad=dict(f,**changes)
+                    with self.assertRaises(O.C.Rejected):O.C.validate_actor_reap_facts(bad,parent)
+        f=dict(version=1,child='Signer1',context='FinishPath',exit_code=0,signal=None)
+        r=self.record('ActorReapObservation',f,2,role='Host')
+        O.C.validate_actor_cardinality([r])
+        with self.assertRaises(O.C.Rejected):O.C.validate_actor_cardinality([r,r])
+        owned=self.record('OwnedReap',dict(child='Signer1',exit_code=1),3,role='Host')
+        with self.assertRaises(O.C.Rejected):O.C.validate_actor_cardinality([r,owned])
+        a=self.record('ActorReapObservation',dict(f,child='Host'),3)
+        h=self.record('HostReapObservation',dict(version=1,context='DropKillAttempted',exit_code=0,signal=None),4)
+        with self.assertRaises(O.C.Rejected):O.C.validate_actor_cardinality([a,h])
+    def test_failure_disqualifies_success_but_neutral_reap_does_not(self):
+        from test_ci_financial_semantic_routing import semantic_case,O as oracle
+        for role in O.C.ACTOR_ROLES:
+            rows,external=semantic_case();own=[r for r in rows if r['role']==role];facts=self.facts();facts['listener']=None
+            record=self.record('ActorFailureBoundary',facts,len(own)+1,role=role);record['elapsed_ns']=own[-1]['elapsed_ns'];rows.append(record)
+            with self.assertRaises(oracle.C.Rejected) as error:oracle.validate_completed(rows,100,0,external,O.C.SEMANTIC_PROFILE)
+            self.assertEqual(error.exception.code,'observer_failure')
+        rows,external=semantic_case();own=[r for r in rows if r['role']=='Host'];f=dict(version=1,child='Signer1',context='FinishPath',exit_code=0,signal=None)
+        record=self.record('ActorReapObservation',f,len(own)+1,role='Host');record['elapsed_ns']=own[-1]['elapsed_ns'];rows.append(record)
+        oracle.validate_completed(rows,100,0,external,O.C.SEMANTIC_PROFILE)
+    def test_preclose_rejects_actor_failure_without_input(self):
+        from unittest import mock
+        c=mock.Mock();native=F.S.NativeScenario(c,mock.Mock(deadline_ns=time.monotonic_ns()+F.C.ORIGINAL_NS),mock.Mock(),expected_profile=F.C.SEMANTIC_PROFILE,host_view=mock.Mock())
+        with self.assertRaises(F.S.C.Rejected):native.close_after_normal_proof(self.actor_rows(),None,O.C.SEMANTIC_PROFILE)
+        c.terminal_click.assert_not_called()
+    def test_worst_projection_fits_original_line_bound_and_is_strict(self):
+        value=O.C.unavailable_actor_diagnostic()
+        for role,part in value['actors'].items():
+            part['failure']={slot:dict(stage=max(domain,key=len),**{'class':max(O.C.ACTOR_CLASSES,key=len)}) for slot,domain in [('driver',O.C.ACTOR_DRIVER_STAGES),('listener',O.C.ACTOR_LISTENER_STAGES),('origin',O.C.ACTOR_ORIGIN_STAGES)]}
+            if role not in ('Signer1','Signer2'):part['failure']['listener']=None
+            part['failure']['origin']['peer']=max(O.C.ACTOR_ROLES,key=len)
+            for parent,children in O.C.ACTOR_REAP_OWNERS.items():
+                if role in children:part['reap']=dict(parent=parent,context='RetirementTryReap',exit_code=255,signal=None)
+        O.C.validate_actor_diagnostic(value)
+        self.assertLessEqual(len(('CI_FINANCIAL_ACTOR_DIAGNOSTIC '+json.dumps(value,separators=(',',':'))).encode()),8192)
+        for bad in (dict(value,version=True),dict(value,raw='private')):
+            with self.assertRaises(O.C.Rejected):O.C.validate_actor_diagnostic(bad)
+        bad=self.copy(value);del bad['actors']['Signer1']
+        with self.assertRaises(O.C.Rejected):O.C.validate_actor_diagnostic(bad)
+    def test_failure_only_emission_duplicate_and_io_preservation(self):
+        from unittest import mock
+        import contextlib,io
+        S=F.load('ci-financial-supervisor');v=O.C.unavailable_actor_diagnostic();line=b'CI_FINANCIAL_ACTOR_DIAGNOSTIC '+json.dumps(v).encode()
+        for p in (O.C.PROFILE,O.C.EXTERNAL_PROFILE):
+            with self.assertRaises(S.Failure):S.RuntimeRecords('external',p)(line)
+        rt=S.RuntimeRecords('external',O.C.SEMANTIC_PROFILE)
+        with contextlib.redirect_stdout(io.StringIO()) as out:rt(line)
+        self.assertEqual(out.getvalue(),'')
+        with self.assertRaises(S.Failure):rt(line)
+        candidate=dict(schema=1,profile=O.C.SEMANTIC_PROFILE,native_oracle_verified=True,fixture_cleaned=True,display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)
+        with self.assertRaises(S.Failure):rt(b'CI_FINANCIAL_CANDIDATE '+json.dumps(candidate).encode())
+        def emit(kind,*args):
+            if kind=='ACTOR_DIAGNOSTIC':raise BrokenPipeError()
+        with mock.patch.object(S,'emit',side_effect=emit):rt(b'CI_FINANCIAL_RESULT '+json.dumps(S.P.failure('observer_failure',O.C.SEMANTIC_PROFILE)).encode())
+        self.assertEqual(rt.finish(1)['code'],'observer_failure')
+        container=F.load('ci-financial-container');flow=mock.Mock(expected_profile=O.C.SEMANTIC_PROFILE)
+        flow.observer.failure_diagnostics.return_value={'actor':v}
+        with mock.patch('builtins.print',side_effect=BrokenPipeError()):container.emit_cached_actor_failure(flow)
+    def test_exact_native_enum_parity_and_roles(self):
+        import re
+        source=(ROOT.parent/'crates/wholepact-financial-coordinator-origin/src/financial_ci_actor_diagnostics.rs').read_text()
+        for name,expected in [('DriverStage',O.C.ACTOR_DRIVER_STAGES),('ListenerStage',O.C.ACTOR_LISTENER_STAGES),('OriginStage',O.C.ACTOR_ORIGIN_STAGES),('Class',O.C.ACTOR_CLASSES),('PeerRole',O.C.ACTOR_ROLES)]:
+            match=re.search(r'codes!\('+name+r'\s*\{([^}]+)\}\);',source)
+            self.assertIsNotNone(match);self.assertEqual(frozenset(x.strip() for x in match.group(1).split(',')),expected)
+        self.assertEqual(O.C.ACTOR_ROLES,frozenset(O.C.ROLES))
+        self.assertEqual({child:parent for parent,children in O.C.ACTOR_REAP_OWNERS.items() for child in children},{child:parent for child,parent in O.C.PARENTS.items() if parent is not None})
+    def test_failure_drain_keeps_late_witness_after_host_reap_under_original_bound(self):
+        from unittest import mock
+        for duration in (O.FAILURE_DRAIN_NS*2,30_000_000):
+            with tempfile.TemporaryDirectory() as directory:
+                o=O.ObserverFiles(directory,time.monotonic_ns()+O.C.ORIGINAL_NS,O.C.SEMANTIC_PROFILE)
+                rows=self.records()+[self.record('NativeFailureBoundary',NativeFailureBoundaryTests().facts(),4),self.record('HostReapObservation',dict(version=1,context='FinishPath',exit_code=1,signal=None),5)]
+                path=pathlib.Path(directory)/'100.jsonl';path.write_bytes(b''.join(json.dumps(r).encode()+b'\n' for r in rows));path.chmod(0o600)
+                now=time.monotonic_ns();clock=[now];waits=[0];bound=now+duration
+                def sleep(delay):
+                    clock[0]+=max(1,int(delay*1_000_000_000));waits[0]+=1
+                    if waits[0]==2:
+                        f=self.facts();f['listener']=None
+                        witness=[self.record('Birth',dict(pid=103,parent_pid=100,parent_role='Coordinator'),1,role='Owner1V3DeliveryAdmission'),self.record('ActorFailureBoundary',f,2,role='Owner1V3DeliveryAdmission')]
+                        p=pathlib.Path(directory)/'103.jsonl';p.write_bytes(b''.join(json.dumps(r).encode()+b'\n' for r in witness));p.chmod(0o600)
+                with mock.patch.object(O.time,'monotonic_ns',side_effect=lambda:clock[0]),mock.patch.object(O.time,'sleep',side_effect=sleep):
+                    with self.assertRaises(O.C.Rejected) as error:o.next_snapshot(bound)
+                self.assertEqual(error.exception.code,'observer_failure');self.assertEqual(o._failure_drain_deadline,min(bound,now+O.FAILURE_DRAIN_NS))
+                self.assertGreaterEqual(clock[0],o._failure_drain_deadline)
+                v=o.failure_diagnostics()['actor'];self.assertIsNotNone(v['actors']['Owner1V3DeliveryAdmission']['failure']);self.assertIsNone(v['actors']['Signer2']['failure'])
+                with mock.patch.object(o,'read',side_effect=AssertionError('late retry')):
+                    with self.assertRaises(O.C.Rejected):o.next_snapshot(bound+O.C.ORIGINAL_NS)
+    def test_all_exact_journal_classes_remain_closed_in_each_failure_slot(self):
+        expected=frozenset(('JournalStorage','JournalDatabase','JournalPermission','JournalExpired','JournalRecoveryRequired','JournalUnsupportedSchema','JournalOfflineHistoryUnsupported','JournalNamedRecipientHistoryUnsupported','JournalConstructionHistoryUnsupported','JournalInvalidBinding','JournalConflict','JournalNotFound','JournalLiveAuthorization','JournalInputReserved','JournalBudgetExceeded','JournalLimit'))
+        self.assertEqual(frozenset(c for c in O.C.ACTOR_CLASSES if c.startswith('Journal')),expected)
+        for cls in expected:
+            for slot in ('driver','listener','origin'):
+                facts=self.facts();facts[slot]['class']=cls
+                O.C.validate_record(self.record('ActorFailureBoundary',facts,2,role='Signer1'),O.C.SEMANTIC_PROFILE)
+                value=O.C.unavailable_actor_diagnostic();value['actors']['Signer1']['failure']={k:facts[k] for k in ('driver','listener','origin')}
+                O.C.validate_actor_diagnostic(value)
+        for cls in ('JournalOther','JournalRawError',True):
+            facts=self.facts();facts['driver']['class']=cls
+            with self.assertRaises(O.C.Rejected):O.C.validate_actor_failure_facts(facts,'Signer1')

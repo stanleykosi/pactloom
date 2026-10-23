@@ -800,13 +800,21 @@ fn claim_entry(entered: &AtomicBool) -> Result<()> {
 pub(super) fn finish_leaf(leaf: LeafCustody, work: Result<()>) -> Result<()> { finish_leaf_capped(leaf, work, None) }
 
 pub(super) fn finish_leaf_capped(leaf: LeafCustody, work: Result<()>, retained_cleanup: Option<Instant>) -> Result<()> {
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    if let Err(error)=&work {crate::financial_ci_actor_diagnostics::work_fallback(crate::financial_ci_actor_diagnostics::DriverStage::WitnessWork,error);}
     work?;
-    leaf.origin.receive(Message::Stop, capped_deadline(leaf.clocks.stop(), retained_cleanup))?;
+    leaf.origin.receive(Message::Stop, capped_deadline(leaf.clocks.stop(), retained_cleanup)).inspect_err(|_error| {
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::LeafStop,_error,None);
+    })?;
     let deadline = capped_deadline(leaf.clocks.drain(), retained_cleanup);
     leaf.origin.send(Message::Stopped, deadline)?;
     #[cfg(wholepact_financial_ci)]
     if retained_inert_witness_role(leaf.origin.role()){crate::financial_observer::inert_stopped()?;}
-    leaf.origin.receive(Message::Exit, deadline)
+    leaf.origin.receive(Message::Exit, deadline).inspect_err(|_error| {
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::LeafExit,_error,None);
+    })
 }
 
 fn capped_deadline(original: Instant, cap: Option<Instant>) -> Instant { cap.map_or(original, |cap| original.min(cap)) }
@@ -824,6 +832,11 @@ pub(super) fn child_exit(result: Result<()>) -> ! {
     // No unwinding/fallthrough into a copied parent spawn loop or main. Role
     // function locals already dropped (including H-owned signer reapers).
     let code = if result.is_ok() { 0 } else { 1 };
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)] {
+        if let Err(error)=&result {crate::financial_ci_actor_diagnostics::work_fallback(crate::financial_ci_actor_diagnostics::DriverStage::LeafProtocol,error);}
+        crate::financial_observer::financial_ci_flush_actor_diagnostics();
+    }
+
     #[cfg(wholepact_bootstrap_ci)]
     crate::ci::finished(code);
     #[cfg(wholepact_delivery_ci)]

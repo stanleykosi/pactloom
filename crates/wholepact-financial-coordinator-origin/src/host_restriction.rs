@@ -5,6 +5,10 @@
 //! OS isolation from hostile code in those trusted roles.
 //! Bootstrap alone creates/prunes it. No pointer, FD, path, reset or importer
 //! escapes, and no successful observation may be cached as an effect permit.
+
+macro_rules! actor_boundary {($stage:ident,$class:ident,$peer:expr)=>{{
+ #[cfg(wholepact_financial_rendered_host_semantic_ci)] {use crate::financial_ci_actor_diagnostics as d;d::origin(d::OriginStage::$stage,d::Class::$class,$peer);}
+}};}
 use crate::{
     bootstrap::PhaseDeadlinesV1,
     channel::require_time,
@@ -397,6 +401,7 @@ pub(super) struct HostRestrictionChecks {
 impl HostRestrictionChecks {
     pub(super) fn check_current(&self) -> Result<()> {
         if !self.check_current_or_restricted()? {
+            actor_boundary!(SharedRestriction,PredicateDenied,None);
             return Err(rejected("original C restricted Host"));
         }
         Ok(())
@@ -410,10 +415,14 @@ impl HostRestrictionChecks {
         if unsafe { libc::getpid() } != self.owner_pid
             || unsafe { libc::geteuid() } != self.owner_uid
         {
+            actor_boundary!(SharedRestrictionCustody,CustodyMismatch,None);
             return Err(rejected("shared Host restriction outside original actor"));
         }
         self.peer.check()?;
-        require_time(self.deadline)?;
+        require_time(self.deadline).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::SharedRestrictionDeadline,_error,None);
+        })?;
         current_or_restricted(self.cell.sample())
     }
 }
@@ -454,10 +463,15 @@ impl SignerSharedRestrictionV1 {
             || unsafe { libc::geteuid() } != self.owner_uid
             || !matches!(self.role, Role::Signer1 | Role::Signer2)
         {
+            actor_boundary!(SharedRestrictionCustody,CustodyMismatch,None);
             return Err(rejected("shared restriction used outside original Signer"));
         }
-        require_time(self.deadline)?;
+        require_time(self.deadline).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::SharedRestrictionDeadline,_error,None);
+        })?;
         if !restriction_current(self.cell.sample()) {
+            actor_boundary!(SharedRestriction,PredicateDenied,None);
             return Err(rejected("original Coordinator restricted Signer operation"));
         }
         Ok(())
@@ -548,10 +562,15 @@ impl WitnessSharedRestrictionV1 {
         if unsafe { libc::getpid() } != self.owner_pid
             || unsafe { libc::geteuid() } != self.owner_uid
         {
+            actor_boundary!(SharedRestrictionCustody,CustodyMismatch,None);
             return Err(rejected("financial Witness restriction actor mismatch"));
         }
-        require_time(self.deadline)?;
+        require_time(self.deadline).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::SharedRestrictionDeadline,_error,None);
+        })?;
         if !restriction_current(self.cell.sample()) {
+            actor_boundary!(SharedRestriction,PredicateDenied,None);
             return Err(rejected("original C restricted financial Witness"));
         }
         Ok(())

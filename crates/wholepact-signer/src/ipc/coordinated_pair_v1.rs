@@ -67,9 +67,12 @@ struct Bounds {
 }
 impl Bounds {
     fn check(&self) -> Result<()> {
-        self.lifetime.check_current().map_err(|_| Error::Locked)?;
-        self.host.check_alive()?;
-        if self.stopped.load(Ordering::Acquire) || Instant::now() >= self.deadline {
+        actor_listener_result!(BoundsSource, self.lifetime.check_current()).map_err(|_| Error::Locked)?;
+        actor_listener_result!(BoundsHost, self.host.check_alive())?;
+        let stopped = self.stopped.load(Ordering::Acquire);
+        if stopped || Instant::now() >= self.deadline {
+            if stopped { actor_listener_denial!(BoundsStopped, AlreadyClosed); }
+            else { actor_listener_denial!(BoundsDeadline, ClockExpired); }
             return Err(Error::Locked);
         }
         Ok(())
@@ -97,9 +100,12 @@ pub(crate) struct CoordinatedPairPeerV1 {
 impl CoordinatedPairPeerV1 {
     pub(crate) fn check_current(&self) -> Result<()> {
         self.bounds.check()?;
-        self.pairing.check_current().map_err(|_| Error::Locked)?;
-        self.observed.check_alive()?;
-        if !self.current.load(Ordering::Acquire) || Instant::now() >= self.expires {
+        actor_listener_result!(PeerPairLifetime, self.pairing.check_current()).map_err(|_| Error::Locked)?;
+        actor_listener_result!(PeerProcess, self.observed.check_alive())?;
+        let current = self.current.load(Ordering::Acquire);
+        if !current || Instant::now() >= self.expires {
+            if !current { actor_listener_denial!(PeerRevoked, Restricted); }
+            else { actor_listener_denial!(PeerDeadline, ClockExpired); }
             return Err(Error::Authentication);
         }
         Ok(())
@@ -431,6 +437,9 @@ fn serve(
                 }
                 let result = handle(&mut stream, bounds, grants, sender, &mut pairing_seen);
                 if result.is_err() {
+                    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+                    if let Err(error) = &result { crate::financial_ci_actor::listener(
+                        wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::ListenerStage::WorkUnclassified, error); }
                     let _ = stream
                         .write_all(b"{\"accepted\":false,\"reason_code\":\"REQUEST_DENIED\"}\n");
                     // An authenticated original request failure is terminal;
@@ -441,7 +450,13 @@ fn serve(
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(10))
             }
-            Err(_) => break,
+            Err(error) => {
+                #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+                crate::financial_ci_actor::listener(
+                    wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::ListenerStage::Accept, &error);
+                let _ = error;
+                break;
+            },
         }
     }
 }
@@ -453,11 +468,25 @@ fn handle(
     pairing_seen: &mut bool,
 ) -> Result<()> {
     bounds.check()?;
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-    enable_credentials(stream.as_raw_fd())?;
-    let observed = PeerProcess::observe(stream)?;
-    bounds.host.same_live_process(&observed)?;
+    actor_listener_result!(ReadTimeout, stream.set_read_timeout(Some(Duration::from_secs(2))))?;
+    actor_listener_result!(WriteTimeout, stream.set_write_timeout(Some(Duration::from_secs(2))))?;
+    actor_listener_result!(EnableCredentials, enable_credentials(stream.as_raw_fd()))?;
+    let observed = actor_listener_result!(ObservePeer, PeerProcess::observe(stream))?;
+    actor_listener_result!(OriginalHost, bounds.host.same_live_process(&observed))?;
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    let bytes = wholepact_signer_origin::framing::read_frame_capped_checked_observed_until(
+        stream,
+        &observed,
+        144 * 1024,
+        bounds.deadline.min(Instant::now() + Duration::from_secs(2)),
+        || {
+            bounds
+                .check()
+                .map_err(|_| wholepact_signer_origin::Error::Permission)
+        },
+    )
+    .map_err(|failure| { crate::financial_ci_actor::frame(&failure); Error::Authentication })?;
+    #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
     let bytes = wholepact_signer_origin::framing::read_frame_capped_checked_until(
         stream,
         &observed,
@@ -474,7 +503,7 @@ fn handle(
     let received_request_deadline = Instant::now() + Duration::from_secs(120);
     let mut envelope: CoordinatedEnvelopeV1 =
         wholepact_core::strict_json::parse_typed_json_with_byte_limit(&bytes, 144 * 1024)
-            .map_err(|_| Error::InvalidData)?;
+            .map_err(|_| { actor_listener_denial!(RequestDecode, SignerInvalidData); Error::InvalidData })?;
     bounds.check()?;
     if bounds.mode.load(Ordering::Acquire) != V3_RUNNING
         && !matches!(
@@ -495,20 +524,21 @@ fn handle(
             scope,
         } => {
             if *pairing_seen {
+                    actor_listener_denial!(PairRepeated, SignerAuthentication);
                 return Err(Error::Authentication);
             }
-            allowed_scope(scope)?;
-            validate_label(application_label)?;
+            actor_listener_result!(PairScope, allowed_scope(scope))?;
+            actor_listener_result!(PairLabel, validate_label(application_label))?;
             *pairing_seen = true;
             sender
                 .try_send(CoordinatedLocalEventV1::Pairing(PendingPairing {
                     peer: observed,
                     label: application_label.clone(),
                     scope: scope.clone(),
-                    stream: stream.try_clone()?,
+                    stream: actor_listener_result!(StreamClone, stream.try_clone())?,
                     created: Instant::now(),
                 }))
-                .map_err(|_| Error::Unavailable)?;
+                .map_err(|_| { actor_listener_denial!(PairEnqueue, SignerUnavailable); Error::Unavailable })?;
         }
         CoordinatedEnvelopeV1::CoordinatedV3Request {
             schema_version: 1,
@@ -516,26 +546,29 @@ fn handle(
             token_hex,
             request,
         } => {
-            valid_hash(grant_id)?;
-            let digest = pairing_token_digest(token_hex)?;
+            actor_listener_result!(GrantId, valid_hash(grant_id))?;
+            let digest = actor_listener_result!(TokenDigest, pairing_token_digest(token_hex))?;
             let is_status = matches!(request, CoordinatedAppRequestV1::Status);
             let peer = {
-                let mut held = grants.lock().map_err(|_| Error::Locked)?;
-                let grant = held.get_mut(grant_id).ok_or(Error::Authentication)?;
-                grant.peer.check_current()?;
-                grant.peer.actual_peer().same_live_process(&observed)?;
+                let mut held = grants.lock().map_err(|_| { actor_listener_denial!(GrantLock, SignerLocked); Error::Locked })?;
+                let grant = held.get_mut(grant_id).ok_or_else(|| { actor_listener_denial!(GrantMissing, SignerAuthentication); Error::Authentication })?;
+                actor_listener_result!(GrantCurrent, grant.peer.check_current())?;
+                actor_listener_result!(GrantPeer, grant.peer.actual_peer().same_live_process(&observed))?;
                 if !bool::from(digest.ct_eq(&grant.token_digest)) {
+                    actor_listener_denial!(TokenMismatch, SignerAuthentication);
                     return Err(Error::Authentication);
                 }
                 request
                     .validate(grant.peer.scope())
-                    .map_err(|_| Error::Authentication)?;
+                    .map_err(|_| { actor_listener_denial!(RequestValidate, SignerAuthentication); Error::Authentication })?;
                 if is_status {
                     if grant.possession_proved {
+                    actor_listener_denial!(StatusRepeated, SignerAuthentication);
                         return Err(Error::Authentication);
                     }
                     grant.possession_proved = true;
                 } else if !grant.possession_proved {
+                    actor_listener_denial!(StatusNotProved, SignerAuthentication);
                     return Err(Error::Authentication);
                 }
                 grant.peer.clone()
@@ -543,8 +576,12 @@ fn handle(
             if is_status {
                 sender
                     .try_send(CoordinatedLocalEventV1::StatusProof(peer.clone()))
-                    .map_err(|_| Error::Unavailable)?;
-                crate::authority_bridge::durable_review_ipc_v1::bounded_write(
+                    .map_err(|_| { actor_listener_denial!(StatusEnqueue, SignerUnavailable); Error::Unavailable })?;
+                #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+                use crate::authority_bridge::durable_review_ipc_v1::bounded_write_actor_observed as write_status;
+                #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
+                use crate::authority_bridge::durable_review_ipc_v1::bounded_write as write_status;
+                actor_listener_result!(StatusWrite, write_status(
                     stream,
                     &serde_json::json!({"accepted":true,"reason_code":"REQUEST_ONLY"}),
                     received_request_deadline.min(peer.deadline()),
@@ -552,7 +589,7 @@ fn handle(
                         peer.check_current()
                             .map_err(|_| crate::authority_bridge::BridgeError::Permission)
                     },
-                )
+                ))
                 .map_err(|_| Error::Authentication)?;
             } else {
                 let request = match std::mem::replace(request, CoordinatedAppRequestV1::Status) {
@@ -568,7 +605,7 @@ fn handle(
                     CoordinatedAppRequestV1::Prepare { request } => {
                         CoordinatedRequestV1::Prepare(request)
                     }
-                    _ => return Err(Error::Authentication),
+                    _ => { actor_listener_denial!(RequestKind, SignerAuthentication); return Err(Error::Authentication); },
                 };
                 sender
                     .try_send(CoordinatedLocalEventV1::Request {
@@ -576,13 +613,13 @@ fn handle(
                             .min(bounds.deadline)
                             .min(peer.deadline()),
                         peer,
-                        stream: stream.try_clone()?,
+                        stream: actor_listener_result!(StreamClone, stream.try_clone())?,
                         request,
                     })
-                    .map_err(|_| Error::Unavailable)?;
+                    .map_err(|_| { actor_listener_denial!(RequestEnqueue, SignerUnavailable); Error::Unavailable })?;
             }
         }
-        _ => return Err(Error::Authentication),
+        _ => { actor_listener_denial!(RequestKind, SignerAuthentication); return Err(Error::Authentication); },
     }
     bounds.check()
 }

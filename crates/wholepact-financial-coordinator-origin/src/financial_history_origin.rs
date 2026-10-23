@@ -1,5 +1,9 @@
 //! Actual fixed initial-owner-history W custody. No public constructor, role,
 //! packet, descriptor or DTO can mint Setup or Serve. Read output always obeys R.
+
+macro_rules! actor_boundary {($stage:ident,$class:ident,$peer:expr)=>{{
+ #[cfg(wholepact_financial_rendered_host_semantic_ci)] {use crate::financial_ci_actor_diagnostics as d;d::origin(d::OriginStage::$stage,d::Class::$class,$peer);}
+}};}
 use crate::{
     bootstrap::{self, LeafCustody},
     channel::require_time,
@@ -40,14 +44,19 @@ impl HistoryCore {
             || unsafe { libc::getpid() } != self.pid
             || unsafe { libc::geteuid() } != self.uid
         {
+            actor_boundary!(ActorCustody,PredicateDenied,None);
             return Err(rejected("initial history original actor lost"));
         }
         self.peer.check()
     }
     fn action(&self) -> Result<()> {
         self.actors()?;
-        require_time(self.clocks.supervision())?;
+        require_time(self.clocks.supervision()).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::SessionDeadline,_error,None);
+        })?;
         if self.restricted.load(Ordering::Acquire) {
+            actor_boundary!(ActionRevoked,Restricted,None);
             return Err(rejected("initial history restricted"));
         }
         self.restriction.check_current()
@@ -77,7 +86,10 @@ struct SetupBinding {
 impl SetupBinding {
     fn read_current(&self) -> Result<()> {
         self.core.action()?;
-        require_time(self.read_ceiling)?;
+        require_time(self.read_ceiling).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::ReadDeadline,_error,None);
+        })?;
         let f = &self.wire.read_binding.read.facts;
         let wall = state::observe_shared_wall(
             &self.last_wall,
@@ -108,7 +120,10 @@ struct ReviewBinding {
 impl ReviewBinding {
     fn current(&self) -> Result<()> {
         self.setup.read_current()?;
-        require_time(self.ceiling)?;
+        require_time(self.ceiling).inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::BoundDeadline,_error,None);
+        })?;
         let wall = state::observe_shared_wall(
             &self.last_wall,
             self.ceiling.min(self.setup.read_ceiling).min(self.setup.core.clocks.supervision()),
@@ -298,6 +313,9 @@ impl WitnessFinancialHistoryOriginV1 {
     }
     pub fn try_receive(&mut self) -> Result<Option<FinancialHistoryRequestV1>> {
         let result = self.receive_inner();
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error)=&result {crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::WitnessReceive,error,None);}
+
         if result.is_err() {
             self.core.close();
         }
@@ -593,6 +611,9 @@ impl WitnessFinancialHistoryOriginV1 {
         Ok(())
     }
     pub fn complete(mut self, work: Result<()>) -> ! {
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error)=&work {crate::financial_ci_actor_diagnostics::work_fallback(crate::financial_ci_actor_diagnostics::DriverStage::WitnessWork,error);}
+
         let result = (|| {
             work?;
             if !self.disposed || !self.closed {

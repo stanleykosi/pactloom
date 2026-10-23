@@ -1,4 +1,8 @@
 //! Fresh pairing on the actual original-fork source. No native grant conversion.
+
+macro_rules! actor_boundary {($stage:ident,$class:ident,$peer:expr)=>{{
+ #[cfg(wholepact_financial_rendered_host_semantic_ci)] {use crate::financial_ci_actor_diagnostics as d;d::origin(d::OriginStage::$stage,d::Class::$class,$peer);}
+}};}
 use super::*;
 use crate::signer_v3_pair_data::*;
 pub(super) const PAIR_REVIEW: u8 = 128;
@@ -72,6 +76,7 @@ impl PairBinding {
             || wall >= self.p.facts.channel_expires_at_ms
             || Instant::now() >= self.channel_deadline
         {
+            actor_boundary!(PairChannel,PredicateDenied,None);
             return Err(rejected("Pair original channel expired"));
         }
         Ok(())
@@ -91,6 +96,7 @@ impl PairBinding {
             || wall >= self.p.facts.expires_at_ms
             || Instant::now() >= self.deadline
         {
+            actor_boundary!(PairAction,PredicateDenied,None);
             return Err(rejected("Pair original action expired"));
         }
         Ok(())
@@ -99,6 +105,7 @@ impl PairBinding {
         self.bounds()?;
         self.entry.core.check_action_restrictions()?;
         if self.entry.core.phase.phase(self.entry.slot()) != phase {
+            actor_boundary!(PairPhase,PredicateDenied,None);
             return Err(rejected("Pair purpose consumed"));
         }
         Ok(())

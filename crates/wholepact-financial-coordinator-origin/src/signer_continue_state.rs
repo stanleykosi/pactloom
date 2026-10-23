@@ -8,6 +8,10 @@ macro_rules! boundary {
     }};
 }
 
+macro_rules! actor_boundary {($stage:ident,$class:ident,$peer:expr)=>{{
+ #[cfg(wholepact_financial_rendered_host_semantic_ci)] {use crate::financial_ci_actor_diagnostics as d;d::origin(d::OriginStage::$stage,d::Class::$class,$peer);}
+}};}
+
 use crate::{process::PeerLifetime, rejected, Result};
 use std::{os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
@@ -306,22 +310,29 @@ impl Phases {
     }
 }
 
-pub(super) struct CheckedPeer { pidfd: OwnedFd, socket: OwnedFd }
+pub(super) struct CheckedPeer { pidfd: OwnedFd, socket: OwnedFd, #[cfg(wholepact_financial_rendered_host_semantic_ci)] role:crate::process::Role }
 impl CheckedPeer {
     pub(super) fn retain(peer: &PeerLifetime, socket: RawFd) -> Result<Self> {
         peer.check_alive()?;
-        let result = Self { pidfd: duplicate(peer.fd())?, socket: duplicate(socket)? };
+        let result = Self { pidfd: duplicate(peer.fd())?, socket: duplicate(socket)?, #[cfg(wholepact_financial_rendered_host_semantic_ci)] role:peer.role() };
         result.check()?;
         Ok(result)
     }
     pub(super) fn check(&self) -> Result<()> {
-        check_pidfd_at(&self.pidfd, true)?;
+        check_pidfd_at(&self.pidfd, true, {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)] {Some(crate::financial_ci_actor_diagnostics::PeerRole::from_role(self.role))}
+            #[cfg(not(wholepact_financial_rendered_host_semantic_ci))] {None::<()>}
+        })?;
         let mut poll = libc::pollfd { fd: self.socket.as_raw_fd(), events: libc::POLLIN | libc::POLLRDHUP, revents: 0 };
         let polled = unsafe { libc::poll(&mut poll, 1, 0) };
         if polled < 0
             || poll.revents & (libc::POLLHUP | libc::POLLRDHUP | libc::POLLERR | libc::POLLNVAL) != 0
         {
             if polled < 0 || poll.revents & (libc::POLLERR | libc::POLLNVAL) != 0 { boundary!(Core, PeerEdgePollError); } else { boundary!(Core, PeerEdgeClosed); }
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)] {
+                use crate::financial_ci_actor_diagnostics as d;let bad=polled<0||poll.revents&(libc::POLLERR|libc::POLLNVAL)!=0;
+                d::origin(if bad{d::OriginStage::PeerEdgePollError}else{d::OriginStage::PeerEdgeClosed},if bad{d::Class::EdgePollError}else{d::Class::EdgeClosed},Some(d::PeerRole::from_role(self.role)));
+            }
             return Err(rejected("original Continue edge lost"));
         }
         Ok(())
@@ -333,14 +344,25 @@ fn duplicate(fd: RawFd) -> Result<OwnedFd> {
     if raw < 0 { return Err(std::io::Error::last_os_error()); }
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
-fn check_pidfd(fd: &OwnedFd) -> Result<()> { check_pidfd_at(fd, false) }
-fn check_pidfd_at(fd: &OwnedFd, _peer: bool) -> Result<()> {
+fn check_pidfd(fd: &OwnedFd, _index:usize) -> Result<()> { check_pidfd_at(fd, false, {
+ #[cfg(wholepact_financial_rendered_host_semantic_ci)] {crate::financial_ci_actor_diagnostics::root_peer(_index)}
+ #[cfg(not(wholepact_financial_rendered_host_semantic_ci))] {None::<()>}
+}) }
+fn check_pidfd_at(fd: &OwnedFd, _peer: bool,
+ #[cfg(wholepact_financial_rendered_host_semantic_ci)] _role:Option<crate::financial_ci_actor_diagnostics::PeerRole>,
+ #[cfg(not(wholepact_financial_rendered_host_semantic_ci))] _role:Option<()>,
+) -> Result<()> {
     let mut poll = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
     let polled = unsafe { libc::poll(&mut poll, 1, 0) };
     if polled != 0 || poll.revents != 0 {
         #[cfg(wholepact_financial_rendered_host_semantic_ci)] {
             use crate::financial_ci_failure_boundary as diagnostic;
             diagnostic::latch(diagnostic::Boundary::Core(diagnostic::process_poll_code(_peer,polled,poll.revents)));
+        }
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)] {use crate::financial_ci_actor_diagnostics as d;
+            let bad=polled<0||poll.revents&(libc::POLLERR|libc::POLLNVAL)!=0||poll.revents&(libc::POLLIN|libc::POLLHUP)==0;
+            let stage=match(_peer,bad){(true,true)=>d::OriginStage::PeerProcessPollError,(true,false)=>d::OriginStage::PeerProcessExit,(false,true)=>d::OriginStage::RootProcessPollError,(false,false)=>d::OriginStage::RootProcessExit};
+            d::origin(stage,if bad{d::Class::ProcessPollError}else{d::Class::ProcessExited},_role);
         }
         return Err(rejected("original Continue process lost"));
     }
@@ -372,11 +394,12 @@ impl Core {
                 || unsafe { libc::geteuid() } != self.owner_uid
             {
                 if !alive { boundary!(Core, AlreadyClosedObserved); } else { boundary!(Core, CustodyMismatch); }
+                if !alive {actor_boundary!(ActorClosed,AlreadyClosed,None);} else {actor_boundary!(ActorCustody,CustodyMismatch,None);}
                 return Err(rejected("original Continue actor custody lost"));
             }
             self.peer.check()?;
             for (i,fd) in self.roots.iter().enumerate() {
-                if self.retired_roots.load(Ordering::Acquire)&(1<<i)==0{check_pidfd(fd)?;}
+                if self.retired_roots.load(Ordering::Acquire)&(1<<i)==0{check_pidfd(fd,i)?;}
             }
             if let Some(c) = &self.coordinator { c.check_alive()?; }
             Ok(())
@@ -390,8 +413,11 @@ impl Core {
     pub(super) fn check_action_restrictions(&self) -> Result<()> {
         let result = (|| {
             self.check()?;
-            crate::channel::require_time(self.session).inspect_err(|_| { boundary!(Core, SessionExpired); })?;
-            if self.phase.revoked()||self.phase.quiescent()||self.phase.normal_phase()>=2 { return Err(rejected("original workflow restricted, quiescent or closing")); }
+            crate::channel::require_time(self.session).inspect_err(|_| { boundary!(Core, SessionExpired); actor_boundary!(SessionDeadline,ClockExpired,None); })?;
+            let restricted=if self.phase.revoked(){actor_boundary!(ActionRevoked,Restricted,None);true}
+                else if self.phase.quiescent(){actor_boundary!(ActionQuiescent,Quiescent,None);true}
+                else if self.phase.normal_phase()>=2{actor_boundary!(ActionClosing,Closing,None);true}else{false};
+            if restricted { return Err(rejected("original workflow restricted, quiescent or closing")); }
             // Last sample uses the original shared cell, not a queued Cancel.
             if let Some(reader) = &self.signer_restriction { reader.check_current()?; }
             Ok(())
@@ -407,7 +433,7 @@ impl Core {
             ||unsafe{libc::getpid()}!=self.owner_pid||unsafe{libc::geteuid()}!=self.owner_uid
             ||!self.phase.quiescent()||self.phase.revoked(){return Err(rejected("invalid exclusive retirement custody"));}
         self.peer.check()?;crate::channel::require_time(self.session)?;
-        for(i,fd)in self.roots.iter().enumerate(){if i!=index&&self.retired_roots.load(Ordering::Acquire)&(1<<i)==0{check_pidfd(fd)?;}}
+        for(i,fd)in self.roots.iter().enumerate(){if i!=index&&self.retired_roots.load(Ordering::Acquire)&(1<<i)==0{check_pidfd(fd,i)?;}}
         if let Some(c)=&self.coordinator{c.check_alive()?;}Ok(())
     }
     #[cfg(feature="coordinated-financial-workflow-v1")]
@@ -608,18 +634,25 @@ pub(crate) fn observe_shared_wall(
 ) -> Result<Option<u64>> {
     loop {
         if Instant::now() >= deadline {
+            actor_boundary!(SharedWallDeadline,ClockExpired,None);
             return Ok(None);
         }
         let prior = last_wall.load(Ordering::Acquire);
-        let wall = wall_ms()?;
+        let wall = wall_ms().inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::origin_io(crate::financial_ci_actor_diagnostics::OriginStage::SharedWallRead,_error,None);
+        })?;
         if wall < prior || Instant::now() >= deadline {
+            if wall<prior {actor_boundary!(SharedWallRollback,WallRollback,None);} else {actor_boundary!(SharedWallDeadline,ClockExpired,None);}
             return Ok(None);
         }
         if last_wall
             .compare_exchange(prior, wall, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            return Ok((Instant::now() < deadline).then_some(wall));
+            let current=Instant::now() < deadline;
+            if !current {actor_boundary!(SharedWallDeadline,ClockExpired,None);}
+            return Ok(current.then_some(wall));
         }
         // Another observer published after our load. Resample, rather than
         // rejecting a stale sample or accepting it against a newer high-water.

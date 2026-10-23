@@ -88,6 +88,7 @@ class ObserverFiles:
         C.require(not final or len(self._roles)==17,'observer_missing')
         C.native_failure_sequence(records,self.expected_profile)
         C.validate_host_exit_cardinality(records)
+        C.validate_actor_cardinality(records)
         if self.expected_profile==C.SEMANTIC_PROFILE:self._join_host_views(records)
         return records
     @staticmethod
@@ -98,7 +99,7 @@ class ObserverFiles:
         """Bounded last-success copies only: no IO, clock reads, or proof use."""
         if self._diagnostics is None:
             return dict(progress=None,native=dict(version=1,availability='Unavailable',
-                **{name:'Unobserved' for name in C.NATIVE_FAILURE_COMPONENTS}),timing=self._unavailable_timing(),host_exit=C.unavailable_host_exit_diagnostic())
+                **{name:'Unobserved' for name in C.NATIVE_FAILURE_COMPONENTS}),timing=self._unavailable_timing(),host_exit=C.unavailable_host_exit_diagnostic(),actor=C.unavailable_actor_diagnostic())
         return copy.deepcopy(self._diagnostics)
     def _project_diagnostics(self,records):
         # Called only after the entire collection and semantic join validate.
@@ -110,6 +111,7 @@ class ObserverFiles:
         timing=dict(version=1,availability='Observed',observer_remaining_ns=None,
                     coordinator_last_elapsed_ns=None,last_phase=None)
         host_exit=C.unavailable_host_exit_diagnostic()
+        actor=C.unavailable_actor_diagnostic()
         prior_elapsed=None;ordered=True
         for record in records:
             kind=record['kind'];facts=record['facts'];row=None
@@ -122,6 +124,8 @@ class ObserverFiles:
             if kind in ('HostReapObservation','HostFailureBoundary'):
                 part=host_exit['reap' if kind=='HostReapObservation' else 'foreground']
                 part.update(copy.deepcopy({k:v for k,v in facts.items() if k!='version'}),availability='Observed')
+            if kind=='ActorFailureBoundary':actor['actors'][record['role']]['failure']=copy.deepcopy({k:facts[k] for k in ('driver','listener','origin')})
+            if kind=='ActorReapObservation':actor['actors'][facts['child']]['reap']=dict(parent=record['role'],**{k:facts[k] for k in ('context','exit_code','signal')})
             if record['role']!='Coordinator':continue
             elapsed=record['elapsed_ns'];timing['coordinator_last_elapsed_ns']=elapsed
             if prior_elapsed is not None and elapsed<prior_elapsed:ordered=False
@@ -134,7 +138,7 @@ class ObserverFiles:
                     timing['last_phase']=phase
                 phase['last_elapsed_ns']=elapsed;phase['snapshot_count']+=1
         if not ordered:timing=self._unavailable_timing()
-        return dict(progress=progress,native=native,timing=timing,host_exit=host_exit)
+        return dict(progress=progress,native=native,timing=timing,host_exit=host_exit,actor=actor)
     def _clear_host_view(self):
         if self._semantic_active is not None:
             self._semantic_active['text'][:]=b'\0'*len(self._semantic_active['text'])
@@ -153,14 +157,13 @@ class ObserverFiles:
     def _drain_failure(self,deadline_ns,records):
         # Failure is already latched. This bounded observer-only exception never
         # returns to phase/input dispatch, probes a process, or renews a clock.
+        # Host reap cannot prove independent Signer/Witness reporters finished.
         now=time.monotonic_ns()
         self._failure_drain_deadline=min(deadline_ns,self.deadline_ns,now+FAILURE_DRAIN_NS)
         bound=self._failure_drain_deadline
         try:
             while time.monotonic_ns()<bound:
-                if any(r['kind']=='HostReapObservation' for r in records):return
                 records=self.read(deadline_ns=bound)
-                if any(r['kind']=='HostReapObservation' for r in records):return
                 remaining=bound-time.monotonic_ns()
                 if remaining<=0:return
                 time.sleep(min(.01,remaining/1_000_000_000))
@@ -172,7 +175,7 @@ class ObserverFiles:
         while time.monotonic_ns()<deadline_ns:
             records=self.read(deadline_ns=deadline_ns)
             # Cache commits first; failure never returns to ordinary dispatch.
-            if any(r['kind'] in ('Failure','NativeFailureBoundary','HostFailureBoundary') for r in records):
+            if any(r['kind'] in ('Failure','NativeFailureBoundary','HostFailureBoundary','ActorFailureBoundary') for r in records):
                 self._failure_latched=True
                 if self.expected_profile==C.SEMANTIC_PROFILE:self._drain_failure(deadline_ns,records)
                 raise C.Rejected('observer_failure')

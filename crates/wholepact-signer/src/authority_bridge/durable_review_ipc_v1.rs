@@ -727,6 +727,32 @@ pub(crate) fn bounded_write<T: Serialize>(
 ) -> Result<()> {
     bounded_write_kernel_v2(stream, value, deadline, check, None)
 }
+/// Semantic-only supplement at the actual original Signer Status response.
+/// The same existing write kernel runs once; its original Result is returned.
+/// The collector contains fixed discriminants only and adds no check or IO.
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+pub(crate) fn bounded_write_actor_observed<T: Serialize>(
+    stream: &mut UnixStream, value: &T, deadline: Instant,
+    check: impl Fn() -> Result<()>,
+) -> Result<()> {
+    let collector=CurrentCollectorV2::default();
+    let result=bounded_write_kernel_v2(stream,value,deadline,check,Some(&collector));
+    if let Some(failure)=collector.0.get() {
+        use wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics as d;
+        use CurrentOutcomeV2 as O;
+        let class=match failure.outcome {
+            O::OriginIoTimedOut=>d::Class::IoTimedOut,O::OriginIoWouldBlock=>d::Class::IoWouldBlock,
+            O::OriginIoUnexpectedEof=>d::Class::IoUnexpectedEof,O::OriginIoInterrupted=>d::Class::IoInterrupted,
+            O::OriginIoPermissionDenied=>d::Class::IoPermissionDenied,
+            O::OriginIoBrokenPipe|O::OriginIoConnectionReset|O::OriginIoConnectionAborted|O::OriginIoNotConnected|O::OriginIoOther=>d::Class::IoOther,
+            O::BridgeBinding=>d::Class::BridgeBinding,O::BridgeLimit=>d::Class::BridgeLimit,
+            O::BridgePermission=>d::Class::BridgePermission,O::BridgeIpc=>d::Class::BridgeIpc,
+            _=>d::Class::PredicateDenied,
+        };
+        d::listener(d::ListenerStage::StatusWrite,class);
+    }
+    result
+}
 /// The final observer is denial-only and zero-wait. It must not re-enter
 /// source/consent or acquire transport/storage locks. It never replaces check.
 pub(crate) fn bounded_write_restricted<T: Serialize>(
@@ -851,6 +877,31 @@ fn bounded_write_expressions_restricted_v2<T: Serialize>(
 
 #[cfg(test)]
 mod current_diagnostics_v2_tests {
+    #[test]
+    fn status_response_observation_preserves_one_write_kernel_trace() {
+        use std::cell::Cell;
+        for (write_error, fail_current, deadline_error) in [
+            (None,0,false),(None,1,false),(None,2,false),
+            (Some(ErrorKind::TimedOut),0,false),(Some(ErrorKind::BrokenPipe),0,false),(None,0,true),
+        ] {
+            let mut runs=Vec::new();
+            for observed in [false,true] {
+                let trace=Rc::new(RefCell::new(Vec::new()));
+                let mut writer=FakeWriter::new(Rc::clone(&trace));writer.write_error=write_error;
+                let checks=Cell::new(0);let collector=CurrentCollectorV2::default();
+                let result=bounded_write_expressions_v2(&mut writer,
+                    &serde_json::json!({"accepted":true,"reason_code":"REQUEST_ONLY"}),
+                    || {trace.borrow_mut().push("deadline");if deadline_error{Err(BridgeError::Permission)}else{Ok(Duration::from_secs(1))}},
+                    || {trace.borrow_mut().push("current");let n=checks.get()+1;checks.set(n);if n==fail_current{Err(BridgeError::Permission)}else{Ok(())}},
+                    observed.then_some(&collector));
+                if result.is_ok(){assert!(labels(&collector).is_none());}
+                if observed&&write_error==Some(ErrorKind::TimedOut){assert_eq!(labels(&collector),Some(("RecipientWriteIo","OriginIoTimedOut")));}
+                runs.push((bridge_label(&result),writer.bytes.clone(),trace.borrow().clone(),checks.get()));
+            }
+            assert_eq!(runs[0],runs[1]);
+        }
+    }
+
     use super::*;
     use std::{cell::RefCell, io::ErrorKind, rc::Rc};
 

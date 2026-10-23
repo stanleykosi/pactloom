@@ -12,10 +12,15 @@ class IntegrationTests(unittest.TestCase):
   self.assertEqual(p['artifact_pins']['artifact_id'],12491706804)
   self.assertEqual(p['reviewed_runtime_changes'],{'scripts/ci-financial-flow.py': 'fae619497e7fc66f9195169565c04ea7150bc74684ae99d221c2f8555c34ea0a', 'scripts/tests/test_ci_financial_observer.py': '6371af4423436b82c7ee654bb92798b6aa6cf96ea5818a70de1acd0155b354a3'})
  def test_p40_parser_and_cleanup_exact_current_sources(self):
-  self.assertEqual((HERE/'producer_artifacts.py').read_bytes(),(ROOT/'scripts/ci-financial-artifacts.py').read_bytes())
+  self.assertEqual(hashlib.sha256((HERE/'producer_artifacts.py').read_bytes()).hexdigest(),'c6d12ee5a132083ee97f5aee7fcda3b3dc270a794b90d3d65e18b271c3426682')
+  self.assertEqual(hashlib.sha256((ROOT/'scripts/ci-financial-artifacts.py').read_bytes()).hexdigest(),'f31041a577f3fa0dc65f5880ac0a77d8fd145e53d4d576524ede3e2adbec29ce')
   for path,pin in L.CLEANUP_PINS.items():
    data=(HERE/path).read_bytes();self.assertEqual(hashlib.sha256(data).hexdigest(),pin)
-   self.assertEqual(data,b'financial-semantic\n' if path.endswith('/qualification-gate-mode') else (ROOT/pathlib.Path(path).relative_to('cleanup_snapshot')).read_bytes())
+   relative=str(pathlib.Path(path).relative_to('cleanup_snapshot'))
+   # Historical P40 cleanup remains pinned; fresh P43 uses exact reviewed current bytes.
+   fresh_changes={'scripts/ci-financial-container.py': '2b5769a8ecbcac522232c4af97ba718c42a64b9dda690ea66ddc59cd5bf2603f', 'scripts/ci-financial-contract.py': '21f0625cad0e43a4a9cc094ef2c1116471efb48ad8c2a997e5bd8b0f827f9e6b', 'scripts/ci-financial-external-output.py': '109dded70c7d7eca3160dd305601b3f5c9f31e24c8f0e6bb3c5161f8652c5587', 'scripts/ci-financial-observer.py': 'c1d8ba79194303c0e64b0a2b010ab81d122e535ac6c793afaea3e2421dd8bc96', 'scripts/ci-financial-scenario.py': 'db76d745c672a002cafe22b6195acd6ab5c2073a89fe79e4aad75d1cda6fc98e', 'scripts/ci-financial-supervisor.py': '4895660680f176408c52895e1f62d80b50d31e2860de08fcb27d36818edeee41', 'scripts/tests/test_ci_financial_observer.py': 'f8b621d0784122614855a4795ef03bb38016be1a65ca6ae087fe4a9d856337bd', 'scripts/ci-financial-artifacts.py': 'f31041a577f3fa0dc65f5880ac0a77d8fd145e53d4d576524ede3e2adbec29ce'}
+   if relative in fresh_changes:self.assertEqual(hashlib.sha256((ROOT/relative).read_bytes()).hexdigest(),fresh_changes[relative])
+   else:self.assertEqual(data,b'financial-semantic\n' if path.endswith('/qualification-gate-mode') else (ROOT/relative).read_bytes())
  def test_cleanup_dependency_closure_imports_without_execution(self):
   s=TRUSTED.module('cleanup_closure_probe',L.HERE/'cleanup_snapshot/scripts/ci-financial-supervisor.py')
   self.assertEqual(s.A.MANIFEST_VERSION,2);self.assertEqual(s.A.recipe(L.V.QUALIFICATION_PROFILE),L.V.A.recipe(L.V.QUALIFICATION_PROFILE))

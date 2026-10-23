@@ -26,11 +26,12 @@ MANIFEST_VERSION = 2
 PIXEL_PROFILE='coordinated-financial-external-pre-v3-witness-v1'
 SEMANTIC_PROFILE='coordinated-financial-rendered-host-semantic-v1'
 MODE_ENV='WHOLEPACT_FINANCIAL_BUILD_MODE'
-CFG_CRATES=('wholepact-financial-coordinator','wholepact-financial-coordinator-origin','wholepact-native-host')
+# Recipe v3 adds the fourth identical crate-local selector; historical v2 remains distinct.
+CFG_CRATES=('wholepact-financial-coordinator','wholepact-financial-coordinator-origin','wholepact-native-host','wholepact-signer')
 FINANCIAL_CFGS=('wholepact_financial_ci','wholepact_financial_external_ci','wholepact_financial_rendered_host_semantic_ci')
 BUILD_SCRIPTS=tuple('crates/'+name+'/build.rs' for name in CFG_CRATES)
-SCRIPT_SCOPES={name:list(CFG_CRATES) if name!='pristine-setup' else ['wholepact-native-host'] for name in NAMES}
-RECIPE = dict(build_recipe_version=2, qualification_profile=PIXEL_PROFILE,
+SCRIPT_SCOPES={name:list(CFG_CRATES) if name!='pristine-setup' else ['wholepact-native-host','wholepact-signer'] for name in NAMES}
+RECIPE = dict(build_recipe_version=3, qualification_profile=PIXEL_PROFILE,
     toolchain='1.99.0', rustc='rustc 1.99.0 (b940084d7 2026-09-28)',
     target='x86_64-unknown-linux-gnu', jobs=3, incremental=False,
     profile='release', default_features=False,
