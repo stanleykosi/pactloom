@@ -83,4 +83,89 @@ class ImageTests(unittest.TestCase):
    self.assertEqual((root/'opt/ci-financial/pristine-setup').stat().st_mode & 0o777,0o555)
    self.assertEqual({p.name:(uid,gid) for p,uid,gid in owners},{'pristine-setup':(10001,10001),'ci-synthetic-output.py':(0,0)})
    self.assertEqual(len([a for a in commands if a[0]=='apt-get']),1)
+ def test_shell_run_reaps_exited_orphans_but_keeps_live_identity_guard(self):
+  # Process-local subreaper is a PID1 adoption surrogate, NOT Docker evidence.
+  # Disposable probe owns/reaps every descendant; no sockets/native/package tools.
+  import subprocess,sys,json,textwrap
+  B,_=P.modules(SOURCE)
+  tree=ast.parse(B._INSTALL_SCRIPT)
+  process_source=ast.get_source_segment(B._INSTALL_SCRIPT,next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='processes'))
+  self.assertIn(process_source,P.installer(B))
+  self.assertIn("need(processes() <= before_processes, 'service_process')",P.installer(B))
+  self.assertIn('RUN --network=none python3 -I -B /ci-build/install.py runtime\n',P.dockerfile(B.BASE_IMAGE))
+  body=r'''
+import json,os,pathlib,subprocess,sys,time,tempfile
+exec(sys.argv[2])
+helper=r"""
+import os,pathlib,time
+p=os.fork()
+if p:
+ print(p,flush=True);os._exit(0)
+os.close(1);os.close(2)
+if os.environ['PROBE_MODE']=='live':
+ pathlib.Path(os.environ['PROBE_READY']).touch()
+ deadline=time.monotonic()+3
+ while not pathlib.Path(os.environ['PROBE_RELEASE']).exists():
+  if time.monotonic()>=deadline:os._exit(17)
+  time.sleep(.005)
+os._exit(0)
+"""
+with tempfile.TemporaryDirectory() as directory:
+ ready=pathlib.Path(directory)/'ready';release=pathlib.Path(directory)/'release'
+ before=processes()
+ env=dict(os.environ,PROBE_MODE=sys.argv[1],PROBE_READY=str(ready),PROBE_RELEASE=str(release))
+ p=subprocess.run([sys.executable,'-I','-B','-c',helper],env=env,capture_output=True,check=True)
+ pid=int(p.stdout);path=pathlib.Path('/proc')/str(pid)/'stat'
+ def state():
+  try:return path.read_text().rpartition(') ')[2].split()[0]
+  except FileNotFoundError:return 'absent'
+ deadline=time.monotonic()+2
+ expected_exit='Z' if sys.argv[3]=='direct' else 'absent'
+ while ((not ready.exists()) if sys.argv[1]=='live' else state()!=expected_exit):
+  if time.monotonic()>=deadline:raise RuntimeError('test observation deadline')
+  time.sleep(.005)
+ observed=state();after=processes();added=any(p==str(pid) for p,start in after-before)
+ release.touch()
+ while state()!=expected_exit:
+  if time.monotonic()>=deadline:raise RuntimeError('test child exit deadline')
+  time.sleep(.005)
+ try:os.waitpid(pid,0)
+ except ChildProcessError:pass
+ print(json.dumps({'added':added,'state':observed}),flush=True)
+'''
+  driver=r'''
+import ctypes,json,os,shlex,subprocess,sys
+libc=ctypes.CDLL(None,use_errno=True)
+def adopt():
+ if libc.prctl(36,1,0,0,0)!=0:raise RuntimeError('subreaper unavailable')
+adopt()
+results={}
+for mode in ('direct','shell'):
+ for state in ('exited','live'):
+  args=[sys.executable,'-I','-B','-c',sys.argv[1],state,sys.argv[2],mode]
+  if mode=='shell':args=['/bin/sh','-c',shlex.join(args)]
+  result=subprocess.run(args,preexec_fn=adopt,capture_output=True,timeout=5,check=True)
+  results[mode+'_'+state]=json.loads(result.stdout)
+  while True:
+   try:
+    pid,status=os.waitpid(-1,os.WNOHANG)
+    if pid==0:raise RuntimeError('live descendant retained')
+   except ChildProcessError:break
+print(json.dumps(results))
+'''
+  result=subprocess.run([sys.executable,'-I','-B','-c',driver,body,process_source],capture_output=True,timeout=20,check=True)
+  rows=json.loads(result.stdout)
+  self.assertEqual(rows['direct_exited'],{'added':True,'state':'Z'})
+  self.assertEqual(rows['shell_exited'],{'added':False,'state':'absent'})
+  for mode in ('direct','shell'):
+   self.assertTrue(rows[mode+'_live']['added']);self.assertNotEqual(rows[mode+'_live']['state'],'Z')
+ def test_shell_run_preserves_failure_status_and_identity_rejects_reuse(self):
+  import subprocess,sys,shlex
+  result=subprocess.run(['/bin/sh','-c',shlex.join([sys.executable,'-I','-B','-c','raise SystemExit(23)'])],capture_output=True,timeout=5)
+  self.assertEqual(result.returncode,23)
+  before={('1','10'),('7','20')}
+  self.assertFalse({('1','10'),('7','21')}<=before) # reused PID is not old owner
+  self.assertFalse({('1','10'),('7','20'),('8','22')}<=before)
+
 if __name__=='__main__':unittest.main()
+

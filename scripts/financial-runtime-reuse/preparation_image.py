@@ -65,7 +65,7 @@ def dockerfile(base):
 COPY image-build/ /ci-build/
 COPY packages/ /ci-packages/
 COPY inputs/ /ci-inputs/
-RUN ["/usr/local/bin/python3","-I","-B","/ci-build/install.py","runtime"]
+RUN --network=none python3 -I -B /ci-build/install.py runtime
 ENV CARGO_TARGET_DIR=/opt/ci-financial TMPDIR=/tmp HOME=/tmp PYTHONDONTWRITEBYTECODE=1
 WORKDIR /opt/ci-financial
 USER 10001:10001
