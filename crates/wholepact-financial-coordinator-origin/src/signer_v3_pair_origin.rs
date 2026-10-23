@@ -29,7 +29,7 @@ pub(super) struct PairBinding {
 // Its action still uses wall_ceiling's 120-second maximum below. This wall
 // restriction is intersected with the original epoch offset/source/supervision;
 // construction or later receive time cannot renew the captured channel.
-fn pair_channel_wall_ceiling(now: Instant, wall: u64, start: u64, end: u64) -> Result<Instant> {
+pub(super) fn pair_channel_wall_ceiling(now: Instant, wall: u64, start: u64, end: u64) -> Result<Instant> {
     if wall < start || wall >= end {
         return Err(rejected("original workflow wall bound elapsed"));
     }

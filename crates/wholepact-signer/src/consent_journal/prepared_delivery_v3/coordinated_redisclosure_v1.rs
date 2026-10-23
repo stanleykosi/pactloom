@@ -5,14 +5,14 @@ impl SignerConsentJournal {
     pub(in crate::consent_journal) fn with_coordinated_redisclosure_effect_v1<T>(
         &self,
         mut pin: PreparedDeliveryJournalRevisionV3,
-        lease: &PreconstructionRecordLease<'_>,
+        lease: &CoordinatedPurposeRecordLease<'_>,
         action: &SignerV3RediscloseFinalV1,
         effect: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T>,
     ) -> Result<(T, Result<PreparedDeliveryJournalRevisionV3>)> {
         let current = || action.check_current().map_err(|_| JournalError::Permission);
         current()?;
         lease.require_journal(&self.binding())?;
-        lease.require_current_durable_disclosure_receipts_v1()?;
+        lease.require_export(action)?;
         if pin.journal != self.binding()
             || !Arc::ptr_eq(&pin.registration, &self.source_registration)
         {
@@ -42,8 +42,8 @@ impl SignerConsentJournal {
         {
             return Err(JournalError::Conflict);
         }
-        // Nonce-map checks may wait: complete them BEFORE gate admission.
-        lease.require_current_durable_disclosure_receipts_v1()?;
+        // Purpose/provenance checks may wait: complete them BEFORE gate admission.
+        lease.require_export(action)?;
         current()?;
         let mut outcome = None;
         let slot = &mut outcome;

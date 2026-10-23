@@ -2,7 +2,7 @@
 use super::*;
 use crate::consent_journal::{
     AcceptedManifestRecord, AccountEnrollmentRecord, CoordinatedPreconstructionSessionV1,
-    PreparedCoordinatedEnrollmentV1, PreparedCoordinatedManifestV1,
+    PreparedCoordinatedEnrollmentV1, PreparedCoordinatedManifestV1, CoordinatedAcceptedProvenanceV1,
 };
 use crate::ipc::CoordinatedPairPeerV1;
 use sha2::Digest;
@@ -43,6 +43,7 @@ pub(crate) struct CoordinatedPreconstructionReadyV1 {
     pub(super) peer: CoordinatedPairPeerV1,
     pub(super) enrollment: AccountEnrollmentRecord,
     pub(super) manifest: AcceptedManifestRecord,
+    pub(super) accepted: CoordinatedAcceptedProvenanceV1,
 }
 impl CoordinatedSourcePairingV1 {
     pub(crate) fn begin_enrollment(
@@ -210,8 +211,8 @@ impl CoordinatedManifestReviewV1 {
             .session
             .commit_manifest(&self.pairing.source.journal, pin, self.prepared, action)
             .map_err(|_| Error::Uncertain)?;
-        let pin = match pin {
-            Ok(pin)=>pin,
+        let (pin, accepted) = match pin {
+            Ok(value)=>value,
             Err(_)=>return Ok(Err(CoordinatedRestrictedReceiptV1 {
                 _pairing:self.pairing,_session:self.session,_peer:self.peer,
                 _enrollment:self.enrollment,_manifest:Some(manifest),
@@ -224,6 +225,7 @@ impl CoordinatedManifestReviewV1 {
             peer: self.peer,
             enrollment: self.enrollment,
             manifest,
+            accepted,
         };
         if ready.check_current().is_err() {
             return Ok(Err(CoordinatedRestrictedReceiptV1 {
@@ -239,7 +241,7 @@ impl CoordinatedPreconstructionReadyV1 {
         self.pairing.check_current()?;
         self.peer.check_current()?;
         self.session
-            .require_current_receipts(&self.enrollment, &self.manifest)?;
+            .require_accepted_provenance(&self.accepted, &self.enrollment, &self.manifest)?;
         Ok(())
     }
 }

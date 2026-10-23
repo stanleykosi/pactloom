@@ -210,7 +210,7 @@ fn digest(domain: &[u8], value: &impl Serialize) -> Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::signer_continue_channel::SignerContinuePresentationV1;
     fn h(n: u8) -> String { format!("{n:02x}").repeat(32) }
@@ -241,7 +241,7 @@ mod tests {
         });
         CompletedPairOriginalV1 { owners }
     }
-    fn presentation() -> CompletedPairPresentationV1 {
+    pub(crate) fn presentation() -> CompletedPairPresentationV1 {
         let original = original();
         let accounts = original.owners.each_ref().map(|o| CompletedPairAccountV1 {
             account_id:o.account_id.clone(),network_profile_id:o.network_profile_id.clone(),

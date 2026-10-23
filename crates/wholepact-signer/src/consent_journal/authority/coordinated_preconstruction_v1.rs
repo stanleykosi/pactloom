@@ -10,7 +10,154 @@ pub(crate) struct CoordinatedPreconstructionSessionV1 {
     historical_enrollment: AccountEnrollmentRecord,
     historical_manifest: AcceptedManifestRecord,
     source_expires_at_ms: u64,
+    receipt_progress: CoordinatedReceiptProgressV1,
 }
+
+// Private one-attempt state. No historical row or externally supplied record
+// can manufacture evidence of the original successful Enrollment commit.
+enum CoordinatedReceiptProgressV1 {
+    Fresh,
+    Enrollment(AccountEnrollmentRecord),
+    Consumed,
+}
+impl CoordinatedReceiptProgressV1 {
+    fn begin_enrollment(&mut self) -> Result<()> {
+        if matches!(std::mem::replace(self, Self::Consumed), Self::Fresh) {
+            Ok(())
+        } else {
+            Err(JournalError::Permission)
+        }
+    }
+    fn begin_manifest(&mut self, expected: &AccountEnrollmentRecord) -> Result<AccountEnrollmentRecord> {
+        match std::mem::replace(self, Self::Consumed) {
+            Self::Enrollment(record) if &record == expected => Ok(record),
+            _ => Err(JournalError::Permission),
+        }
+    }
+}
+
+/// Accepted identity/provenance only. This is not a live receipt, permission,
+/// action, serializable record or cloneable capability. Only the successful
+/// original Manifest commit below can mint it, after BOTH original approvals.
+pub(crate) struct CoordinatedAcceptedProvenanceV1 {
+    session: Arc<SessionInner>,
+    generation: u64,
+    enrollment: AccountEnrollmentRecord,
+    manifest: AcceptedManifestRecord,
+    peer: CoordinatedPairPeerV1,
+    source_expires_at_ms: u64,
+}
+impl CoordinatedAcceptedProvenanceV1 {
+    pub(in crate::consent_journal) fn require_lease(
+        &self,
+        lease: &ReadLease<'_>,
+        enrollment: &AccountEnrollmentRecord,
+        manifest: &AcceptedManifestRecord,
+    ) -> Result<()> {
+        // The record lease already holds this exact session read guard. Never
+        // recursively acquire it while a revocation writer may be queued.
+        require_accepted_identity(&self.session, self.generation, lease,
+            enrollment, manifest, &self.enrollment, &self.manifest, self.source_expires_at_ms)?;
+        self.session.coordinated_peer.as_ref()
+            .ok_or(JournalError::Permission)?
+            .require_same_grant(&self.peer).map_err(|_| JournalError::Permission)?;
+        lease.check_current()
+    }
+
+    pub(in crate::consent_journal) fn require_session_metadata(&self, session: &SignerConsentSession) -> Result<()> {
+        let lease = ReadLease {
+            _guard: session.inner.read()?,
+            principal: &session.inner.principal_id,
+            session: &session.inner,
+        };
+        self.require_held_session(&lease)
+    }
+    pub(in crate::consent_journal) fn require_held_session(&self, lease: &ReadLease<'_>) -> Result<()> {
+        self.require_lease(lease, &self.enrollment, &self.manifest)
+    }
+
+    pub(in crate::consent_journal) fn require_record_references(&self, enrollment: &str, manifest: &str) -> Result<()> {
+        if enrollment != self.enrollment.reference() || manifest != self.manifest.reference() {
+            return Err(JournalError::Permission);
+        }
+        Ok(())
+    }
+
+    pub(in crate::consent_journal) fn require_pair_facts(
+        &self, source: &str, grant: &str, key: &str, channel: &str,
+        generation: u64, session: &str, enrollment: &str, manifest: &str,
+    ) -> Result<()> {
+        require_accepted_pair_identity(
+            (self.peer.source_identity(), self.peer.grant_id(), self.peer.key_digest(),
+             self.peer.channel_digest(), self.peer.generation(), &self.session.session_id,
+             self.enrollment.reference(), self.manifest.reference()),
+            (source, grant, key, channel, generation, session, enrollment, manifest),
+        )
+    }
+}
+
+// A pure equality kernel, not an authority constructor. The expected side is
+// always assembled by the nominal token from its retained original peer.
+fn require_accepted_pair_identity(
+    expected: (&str, &str, &str, &str, u64, &str, &str, &str),
+    actual: (&str, &str, &str, &str, u64, &str, &str, &str),
+) -> Result<()> {
+    if actual != expected { return Err(JournalError::Permission); }
+    Ok(())
+}
+
+// Pure identity/current-session restriction shared by the nominal token and
+// maintained tests. It cannot construct a token or authorize any purpose.
+fn require_accepted_identity(
+    session: &Arc<SessionInner>, generation: u64, lease: &ReadLease<'_>,
+    enrollment: &AccountEnrollmentRecord, manifest: &AcceptedManifestRecord,
+    expected_enrollment: &AccountEnrollmentRecord, expected_manifest: &AcceptedManifestRecord,
+    source_expires_at_ms: u64,
+) -> Result<()> {
+        lease.check_current()?;
+        if !std::ptr::eq(lease.session, Arc::as_ptr(session))
+            || lease._guard.generation != generation
+            || enrollment != expected_enrollment
+            || manifest != expected_manifest
+            || enrollment.account_id() != session.account_id
+            || enrollment.principal_id() != session.principal_id
+            || manifest.terms.account_id != session.account_id
+            || manifest.terms.principal_id != session.principal_id
+            || manifest.enrollment_ref() != enrollment.reference()
+        {
+            return Err(JournalError::Permission);
+        }
+        let now = now_ms()?;
+        if now >= source_expires_at_ms {
+            return Err(JournalError::Expired);
+        }
+        for receipt in [enrollment.receipt(), manifest.receipt()] {
+            if now < receipt.reviewed_at_ms() {
+                return Err(JournalError::Expired);
+            }
+            // Accepted nonces remain immutable identity. This intentionally
+            // neither renews nor consumes an expired generic receipt.
+            if receipt.native_session_id != session.session_id
+                || receipt.permission_generation != generation
+                || receipt.writer_epoch != session.writer_epoch
+                || receipt.trusted_launch_measurement != session.measurement
+            {
+                return Err(JournalError::Permission);
+            }
+        }
+    Ok(())
+}
+
+fn require_live_receipt_pair(
+    lease: &ReadLease<'_>, enrollment: &AccountEnrollmentRecord, manifest: &AcceptedManifestRecord,
+) -> Result<()> {
+    if manifest.enrollment_ref() != enrollment.reference() {
+        return Err(JournalError::InvalidBinding);
+    }
+    lease.require_spending_decision(enrollment.receipt())?;
+    lease.require_spending_decision(manifest.receipt())
+}
+
 pub(crate) struct PreparedCoordinatedEnrollmentV1 {
     pending: Pending<AccountEnrollmentRecord>,
     historical_enrollment_ref: String,
@@ -70,6 +217,7 @@ impl CoordinatedPreconstructionSessionV1 {
             historical_enrollment: historical,
             historical_manifest: manifest,
             source_expires_at_ms,
+            receipt_progress: CoordinatedReceiptProgressV1::Fresh,
         };
         result.check_current()?;
         Ok(result)
@@ -251,8 +399,23 @@ impl CoordinatedPreconstructionSessionV1 {
             principal: &self.session.inner.principal_id,
             session: &self.session.inner,
         };
-        lease.require_spending_decision(enrollment.receipt())?;
-        lease.require_spending_decision(manifest.receipt())?;
+        require_live_receipt_pair(&lease, enrollment, manifest)?;
+        drop(lease);
+        self.check_current()
+    }
+    pub(crate) fn require_accepted_provenance(
+        &self,
+        accepted: &CoordinatedAcceptedProvenanceV1,
+        enrollment: &AccountEnrollmentRecord,
+        manifest: &AcceptedManifestRecord,
+    ) -> Result<()> {
+        self.check_current()?;
+        let lease = ReadLease {
+            _guard: self.session.inner.read()?,
+            principal: &self.session.inner.principal_id,
+            session: &self.session.inner,
+        };
+        accepted.require_lease(&lease, enrollment, manifest)?;
         drop(lease);
         self.check_current()
     }
@@ -339,12 +502,15 @@ impl CoordinatedPreconstructionSessionV1 {
         })
     }
     pub(crate) fn commit_enrollment(
-        &self,
+        &mut self,
         journal: &SignerConsentJournal,
         pin: PreparedDeliveryJournalRevisionV3,
         prepared: PreparedCoordinatedEnrollmentV1,
         action: SignerV3EnrollmentFinalV1,
     ) -> Result<(AccountEnrollmentRecord, Result<PreparedDeliveryJournalRevisionV3>)> {
+        // Consume before any attempted effect. Failure/uncertainty cannot
+        // restore a receipt approval or permit a second publication attempt.
+        self.receipt_progress.begin_enrollment()?;
         let ApprovedCoordinatedEnrollmentV1 {
             approval: a,
             action,
@@ -388,17 +554,19 @@ impl CoordinatedPreconstructionSessionV1 {
         let (record, pin) = result;
         let pin = pin.and_then(|pin| {
             action.finish_review().map_err(|_| JournalError::Permission)?;
+            self.receipt_progress = CoordinatedReceiptProgressV1::Enrollment(record.clone());
             Ok(pin)
         });
         Ok((record, pin))
     }
     pub(crate) fn commit_manifest(
-        &self,
+        &mut self,
         journal: &SignerConsentJournal,
         pin: PreparedDeliveryJournalRevisionV3,
         prepared: PreparedCoordinatedManifestV1,
         action: SignerV3ManifestFinalV1,
-    ) -> Result<(AcceptedManifestRecord, Result<PreparedDeliveryJournalRevisionV3>)> {
+    ) -> Result<(AcceptedManifestRecord, Result<(PreparedDeliveryJournalRevisionV3, CoordinatedAcceptedProvenanceV1)>)> {
+        let accepted_enrollment = self.receipt_progress.begin_manifest(&prepared.enrollment)?;
         let ApprovedCoordinatedManifestV1 {
             approval: a,
             enrollment: expected,
@@ -437,7 +605,20 @@ impl CoordinatedPreconstructionSessionV1 {
         let (record, pin) = result;
         let pin = pin.and_then(|pin| {
             action.finish_review().map_err(|_| JournalError::Permission)?;
-            Ok(pin)
+            // This NEW nominal handoff is issued only while BOTH unchanged
+            // original120 receipt predicates still hold. A late failure keeps
+            // the actual committed record above, but mints no provenance.
+            self.require_current_receipts(&accepted_enrollment, &record)?;
+            let generation = self.session.inner.read()?.generation;
+            let accepted = CoordinatedAcceptedProvenanceV1 {
+                session: Arc::clone(&self.session.inner),
+                generation,
+                enrollment: accepted_enrollment,
+                manifest: record.clone(),
+                peer: self.peer.clone(),
+                source_expires_at_ms: self.source_expires_at_ms,
+            };
+            Ok((pin, accepted))
         });
         Ok((record, pin))
     }
@@ -545,10 +726,12 @@ impl PreparedCoordinatedManifestV1 {
 
 impl CoordinatedPreconstructionSessionV1 {
     pub(crate) fn acquire_construction_records<'a>(&'a self, journal: &'a SignerConsentJournal,
-        enrollment: &str, manifest: &str, action: &CoordinatedConstructionActionV1<'_>,
-    ) -> Result<PreconstructionRecordLease<'a>> {
+        enrollment: &str, manifest: &str, accepted: &'a CoordinatedAcceptedProvenanceV1,
+        action: CoordinatedConstructionActionV1<'a>,
+    ) -> Result<CoordinatedPurposeRecordLease<'a>> {
         self.check_current()?;
-        journal.acquire_coordinated_preconstruction_records(enrollment,manifest,&self.session,action)
+        self.require_accepted_provenance(accepted, &accepted.enrollment, &accepted.manifest)?;
+        journal.acquire_coordinated_preconstruction_records(enrollment,manifest,&self.session,accepted,action)
     }
 }
 impl CoordinatedPreconstructionSessionV1 {
@@ -561,3 +744,7 @@ impl CoordinatedPreconstructionSessionV1 {
         Ok(a.min(b).min(self.peer.deadline()))
     }
 }
+
+#[cfg(test)]
+#[path = "coordinated_preconstruction_v1/handoff_security_tests.rs"]
+mod handoff_security_tests;

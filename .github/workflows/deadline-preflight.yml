@@ -1,14 +1,14 @@
-name: Preparation response framing preflight only
+name: Coordinated handoff lease preflight only
 on:
   push:
-    branches: [checkpoint/framing-preflight-p49c]
+    branches: [checkpoint/handoff-preflight-p50]
 permissions: {}
 concurrency:
-  group: framing-preflight-p49c
+  group: handoff-preflight-p50
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/framing-preflight-p49c' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/handoff-preflight-p50' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -43,6 +43,7 @@ jobs:
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B -m unittest discover -s scripts/tests -p 'test*financial*.py'
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B scripts/ci-financial-launch-tests.py
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B -m unittest discover -s scripts/financial-runtime-reuse -p 'test_*.py'
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B scripts/ci-financial-handoff-source-audit.py --source "$PWD"
       - name: Pinned compiler, API fences and focused deadline regressions
         shell: bash
         working-directory: source
@@ -140,18 +141,20 @@ jobs:
           names += [packet_prefix+n for n in ['prepared_packet_roundtrip_and_denials', 'receive_display_packet_roundtrip_and_denials', 'received_packet_roundtrip_and_denials', 'admit_read_display_packet_roundtrip_and_denials']]
           names += ['signer_v3_pair_data::channel_clock_tests::'+n for n in ['channel_window_is_frozen_separately_from_action', 'action_cannot_outlive_original_channel']]
           names += ['financial_workflow_origin::v3_entry::pair::pair_channel_wall_tests::'+n for n in ['separate_channel_wall_horizon_does_not_change_action_horizon', 'channel_wall_reconstruction_does_not_restart_and_denies_rollback_expiry']]
-          assert len(names) == 12 and len(set(names)) == 12
+          names += ['financial_workflow_origin::v3_entry::delivery::tests::'+n for n in ['delivery_custody_wall_preserves_long_originals_without_widening_actions', 'delivery_custody_reconstruction_keeps_shorter_channel_epoch_and_expiry']]
+          names += ['completed_pair_origin::tests::'+n for n in ['completed_pair_received_service_preserves_original_long_horizon_and_review120', 'completed_pair_received_service_keeps_epoch_both_sources_and_supervision_without_pair900']]
+          assert len(names) == 16 and len(set(names)) == 16
           for name in names:
               listing = run([exe, '--list', '--exact', name], env=env, timeout=30)
               assert [line for line in listing.splitlines() if line.endswith(': test')] == [name+': test'], name
               result = run([exe, '--exact', name, '--test-threads=1'], env=env, timeout=30)
               assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in result, name
               print(name+': passed')
-          print('Four clock, four actual packet round-trip, two actual Pair DTO, two Pair wall-helper tests, and four source-extracted inert-carrier regressions passed. Compiler/API preflight only; not authority-flow, native/full qualification, deployment or settlement.')
+          print('Four clock, four actual packet round-trip, two actual Pair DTO, two Pair wall-helper tests, two delivery custody and two completed-Pair service clock tests, and four source-extracted inert-carrier regressions passed. Compiler/API preflight only; not authority-flow, native/full qualification, deployment or settlement.')
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/framing-preflight-p49c' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/handoff-preflight-p50' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -173,7 +176,7 @@ jobs:
           public_git -C source checkout --detach FETCH_HEAD
           test "$(public_git -C source rev-parse HEAD)" = "$SOURCE_COMMIT"
           test -z "$(public_git -C source status --porcelain --untracked-files=all)"
-      - name: Actual affected semantic test-context typechecks (not full native build)
+      - name: Affected semantic contexts and fixed maintained security tests (not fullflow)
         shell: bash
         working-directory: source
         env:

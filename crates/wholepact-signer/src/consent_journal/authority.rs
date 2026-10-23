@@ -997,4 +997,4 @@ pub(crate) use durable_delivery_admission_intent_v3::{
 #[path = "authority/coordinated_preconstruction_v1.rs"]
 mod coordinated_preconstruction_v1;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
-pub(crate) use coordinated_preconstruction_v1::{CoordinatedPreconstructionSessionV1, PreparedCoordinatedEnrollmentV1, PreparedCoordinatedManifestV1};
+pub(crate) use coordinated_preconstruction_v1::{CoordinatedAcceptedProvenanceV1, CoordinatedPreconstructionSessionV1, PreparedCoordinatedEnrollmentV1, PreparedCoordinatedManifestV1};

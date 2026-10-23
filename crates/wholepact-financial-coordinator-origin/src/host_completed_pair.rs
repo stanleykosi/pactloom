@@ -44,7 +44,7 @@ impl HostPairReceiveState {
         if service_ceiling_ms>data.original.owners[0].source_ceiling_ms||service_ceiling_ms>data.original.owners[1].source_ceiling_ms{
             return Err(rejected("Host Pair service exceeds original source"));}
         let deadline=lifecycle.clocks.restrict_received(PROFILE,service_ceiling_ms,source0.min(source1),now)?
-            .min(crate::financial_workflow_source::wall_ceiling(now,wall,data.valid_from_ms,data.valid_until_ms)?);
+            .min(crate::completed_pair_origin::completed_pair_service_wall_ceiling(now,wall,&data)?);
         let record=Arc::new(PairServiceRecord{data,witness_instance,serve_challenge,deadline,sources:[source0,source1],last_wall:AtomicU64::new(wall)});
         record.check(lifecycle)?;
         lifecycle.pair_service.set(record).map_err(|_|rejected("Host Pair service already retained"))?;

@@ -207,7 +207,7 @@ impl CoordinatorFinancialEndpointV1 {
                 }
                 let now = Instant::now(); let wall = state::wall_ms()?;
                 let service_deadline = self.clocks.restrict_received(PROFILE,service_ceiling_ms,setup.source_deadline,now)?
-                    .min(wall_ceiling(now,wall,data.valid_from_ms,data.valid_until_ms)?);
+                    .min(crate::completed_pair_origin::completed_pair_service_wall_ceiling(now,wall,&data)?);
                 let review_deadline = setup.ceiling.min(service_deadline).min(wall_ceiling(now,wall,data.prepared_at_ms,data.expires_at_ms)?);
                 let b = Arc::new(Review { setup:Arc::clone(setup), data, instance:witness_instance, challenge:serve_challenge, service_ceiling_ms, service_deadline, review_deadline, last_wall:AtomicU64::new(wall) });
                 b.review_current()?; slot.review = Some(Arc::clone(&b)); slot.wire_phase = CP_REVIEW;

@@ -1,5 +1,5 @@
 //! Distinct private preparation Read and exact one-payload Receive.
-use super::pair::PairBinding;
+use super::pair::{pair_channel_wall_ceiling, PairBinding};
 use super::*;
 use crate::signer_v3_delivery_data::*;
 use crate::signer_v3_pair_data::{SignerV3PairPresentationV1, SignerV3PairedV1};
@@ -45,11 +45,13 @@ impl PrepareReadBinding {
                 p.facts.reviewed_at_ms,
                 p.facts.expires_at_ms,
             )?);
+        // These are original custody bounds, not a new 120s Read approval.
+        // Exact predecessor matching bounds both to the validated Pair channel.
         let service_deadline = pair
             .entry
             .clocks
             .restrict_received(PROFILE, p.service_ceiling_ms, pair.channel_deadline, now)?
-            .min(wall_ceiling(
+            .min(pair_channel_wall_ceiling(
                 now,
                 state::wall_ms()?,
                 p.facts.reviewed_at_ms,
@@ -59,7 +61,7 @@ impl PrepareReadBinding {
             .entry
             .clocks
             .restrict_received(PROFILE, p.material_ceiling_ms, pair.channel_deadline, now)?
-            .min(wall_ceiling(
+            .min(pair_channel_wall_ceiling(
                 now,
                 state::wall_ms()?,
                 p.facts.reviewed_at_ms,
@@ -453,11 +455,13 @@ impl ReceiveBinding {
                 p.facts.reviewed_at_ms,
                 p.facts.expires_at_ms,
             )?);
+        // Receive carries the exact original PrepareRead custody ceilings.
+        // Only its independent review deadline above has the action120 cap.
         let service_deadline = pair
             .entry
             .clocks
             .restrict_received(PROFILE, p.service_ceiling_ms, pair.channel_deadline, now)?
-            .min(wall_ceiling(
+            .min(pair_channel_wall_ceiling(
                 now,
                 state::wall_ms()?,
                 p.facts.reviewed_at_ms,
@@ -467,7 +471,7 @@ impl ReceiveBinding {
             .entry
             .clocks
             .restrict_received(PROFILE, p.material_ceiling_ms, pair.channel_deadline, now)?
-            .min(wall_ceiling(
+            .min(pair_channel_wall_ceiling(
                 now,
                 state::wall_ms()?,
                 p.facts.reviewed_at_ms,
@@ -1430,6 +1434,42 @@ impl HostFinancialWorkflowRelayV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn delivery_custody_wall_preserves_long_originals_without_widening_actions() {
+        let epoch = Instant::now();
+        let clocks = FullWorkflowClocksV1::from_initial_epoch(epoch).unwrap();
+        let channel = epoch + Duration::from_secs(800);
+        // The same production helper is used for service and material in BOTH
+        // PrepareRead and Receive; the epoch offset remains an independent cap.
+        for (offset, end, expected) in [(650_000, 601_000, 600), (500_000, 551_000, 500)] {
+            let original = clocks.restrict_received(PROFILE, offset, channel, epoch).unwrap()
+                .min(pair_channel_wall_ceiling(epoch, 1_000, 1_000, end).unwrap());
+            assert_eq!(original, epoch + Duration::from_secs(expected));
+            assert!(original > epoch + Duration::from_secs(120));
+            let later = epoch + Duration::from_secs(200);
+            let received = clocks.restrict_received(PROFILE, offset, channel, later).unwrap()
+                .min(pair_channel_wall_ceiling(later, 201_000, 1_000, end).unwrap());
+            assert_eq!(received, original);
+        }
+        assert_eq!(wall_ceiling(epoch, 1_000, 1_000, 601_000).unwrap(),
+            epoch + Duration::from_secs(120));
+    }
+    #[test]
+    fn delivery_custody_reconstruction_keeps_shorter_channel_epoch_and_expiry() {
+        let epoch = Instant::now();
+        let clocks = FullWorkflowClocksV1::from_initial_epoch(epoch).unwrap();
+        let wall = pair_channel_wall_ceiling(epoch, 1_000, 1_000, 601_000).unwrap();
+        let channel = epoch + Duration::from_secs(75);
+        assert_eq!(clocks.restrict_received(PROFILE, 500_000, channel, epoch).unwrap().min(wall), channel);
+        assert_eq!(clocks.restrict_received(PROFILE, 50_000, channel, epoch).unwrap().min(wall),
+            epoch + Duration::from_secs(50));
+        assert_eq!(pair_channel_wall_ceiling(epoch, 1_000, 1_000, 61_000).unwrap(),
+            epoch + Duration::from_secs(60));
+        assert!(pair_channel_wall_ceiling(epoch, 999, 1_000, 601_000).is_err());
+        assert!(pair_channel_wall_ceiling(epoch, 601_000, 1_000, 601_000).is_err());
+        assert!(clocks.restrict_received(PROFILE, 50_000, channel,
+            epoch + Duration::from_secs(50)).is_err());
+    }
     #[test]
     fn actual_local_client_result_is_exact_preparation_not_remote_serving() {
         let r = crate::signer_v3_delivery_data::tests::read();

@@ -95,3 +95,36 @@ class SignerAbsencePreflightTests(unittest.TestCase):
    for child in features[name]:
     if '/' not in child and not child.startswith('dep:'):visit(child)
   visit('coordinated-financial-workflow-v1');self.assertEqual(sorted(seen),list(C.SIGNER_FEATURES))
+
+class HandoffSecurityExecutionPreflightTests(unittest.TestCase):
+ def setUp(self):
+  SignerAbsencePreflightTests.setUp(self)
+  for row in self.rows:
+   if row['reason']=='build-script-executed':row['cfgs']=list(C.S.A.FINANCIAL_CFGS)
+  self.rows[-1]['profile']={'test':True};self.rows[-1]['executable']=str(self.metadata)
+ def check(self,rows,cfgs=()):return C.signer_test_executable(b'\n'.join(json.dumps(x).encode() for x in rows),self.target)
+ def test_exact_test_executable_and_two_script_scopes(self):
+  self.assertEqual(self.check(self.rows),self.metadata)
+ def test_wrong_target_features_profile_or_metadata_rejected(self):
+  for field,value in [('features',[]),('profile',dict(test=False)),('profile',dict(test=1)),('executable','/outside'),('filenames',[])]:
+   rows=copy.deepcopy(self.rows);rows[-1][field]=value
+   with self.assertRaises(AssertionError):self.check(rows)
+  for field,value in [('kind',['bin']),('kind',['test']),('name','other'),('src_path','/wrong.rs')]:
+   rows=copy.deepcopy(self.rows);rows[-1]['target'][field]=value
+   with self.assertRaises(AssertionError):self.check(rows)
+  with self.assertRaises(AssertionError):self.check(self.rows+[self.rows[-1]])
+ def test_no_extra_cfg_consumer_or_side_effects(self):
+  for field,value in [('cfgs',[]),('linked_libs',['x']),('env',[['X','y']]),('out_dir','/')]:
+   rows=copy.deepcopy(self.rows);rows[1][field]=value
+   with self.assertRaises(AssertionError):self.check(rows)
+ def test_fixed_execution_rejects_empty_listing_ignored_or_zero_pass(self):
+  from unittest import mock
+  import contextlib,io
+  name='consent_journal::authority::coordinated_preconstruction_v1::handoff_security_tests::fixed_fixture'
+  for listing,result,ok in [(name+': test\n','test result: ok. 1 passed; 0 failed; 0 ignored;',True),('', 'test result: ok. 1 passed; 0 failed; 0 ignored;',False),(name+': test\n','test result: ok. 0 passed; 0 failed; 1 ignored;',False)]:
+   with mock.patch.object(C,'HANDOFF_SECURITY_TESTS',(name,)),mock.patch.object(C.S,'select_build_environment',return_value={}),mock.patch.object(C,'signer_test_executable',return_value=self.metadata),mock.patch.object(C.S,'checked',side_effect=[b'compiler',listing.encode(),result.encode()]) as checked,contextlib.redirect_stdout(io.StringIO()):
+    if ok:self.assertEqual(C.run_handoff_security_tests(self.target,{}),1)
+    else:
+     with self.assertRaises(AssertionError):C.run_handoff_security_tests(self.target,{})
+    self.assertEqual(checked.call_args_list[0].kwargs['seconds'],900)
+    for call in checked.call_args_list[1:]:self.assertLessEqual(call.kwargs['seconds'],30)

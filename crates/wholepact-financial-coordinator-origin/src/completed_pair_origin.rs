@@ -577,6 +577,21 @@ impl Drop for WitnessCompletedPairOriginV1 {
     }
 }
 
+/// Restriction-only wall reconstruction for the separately displayed original
+/// CompletedPair service. Its review is still action120; its service is not a
+/// V3 Pair900 channel. C/H intersect this with the once-encoded W epoch ceiling,
+/// both original source ceilings and supervision. Receipt time cannot renew it.
+pub(crate) fn completed_pair_service_wall_ceiling(
+    now: Instant, wall: u64, data: &CompletedPairPresentationV1,
+) -> Result<Instant> {
+    data.validate()?;
+    if wall < data.valid_from_ms || wall >= data.valid_until_ms {
+        return Err(rejected("completed pair original service wall bound"));
+    }
+    now.checked_add(std::time::Duration::from_millis(data.valid_until_ms - wall))
+        .ok_or_else(|| rejected("completed pair service bound overflow"))
+}
+
 fn frozen_service_ceiling(original:Instant,source:Instant,wall_cap:Instant)->Instant{original.min(source).min(wall_cap)}
 #[cfg(test)]mod tests{use super::*;
 #[test]fn completed_pair_service_clock_never_renews_and_has_no_completed_setup_ancestor(){
@@ -584,5 +599,36 @@ fn frozen_service_ceiling(original:Instant,source:Instant,wall_cap:Instant)->Ins
  let setup=epoch+std::time::Duration::from_secs(120);let wall=epoch+std::time::Duration::from_secs(450);
  let retained=frozen_service_ceiling(actual,source,wall);assert_eq!(retained,actual);assert!(retained>setup);
  assert_eq!(frozen_service_ceiling(actual,source,epoch+std::time::Duration::from_secs(350)),epoch+std::time::Duration::from_secs(350));
+}
+#[test]fn completed_pair_received_service_preserves_original_long_horizon_and_review120(){
+ let epoch=Instant::now();let data=crate::completed_pair_data::tests::presentation();
+ let original=completed_pair_service_wall_ceiling(epoch,2_000,&data).unwrap();
+ assert_eq!(original,epoch+std::time::Duration::from_millis(298_000));
+ assert_eq!(completed_pair_service_wall_ceiling(epoch+std::time::Duration::from_secs(150),152_000,&data).unwrap(),original);
+ assert_eq!(wall_ceiling(epoch,2_000,data.prepared_at_ms,data.expires_at_ms).unwrap(),epoch+std::time::Duration::from_secs(120));
+ assert!(completed_pair_service_wall_ceiling(epoch,999,&data).is_err());
+ assert!(completed_pair_service_wall_ceiling(epoch,data.valid_until_ms,&data).is_err());
+ let mut invalid=data.clone();invalid.valid_until_ms+=1;
+ assert!(completed_pair_service_wall_ceiling(epoch,2_000,&invalid).is_err());
+}
+#[test]fn completed_pair_received_service_keeps_epoch_both_sources_and_supervision_without_pair900(){
+ let epoch=Instant::now();let clocks=FullWorkflowClocksV1::from_initial_epoch(epoch).unwrap();
+ let mut data=crate::completed_pair_data::tests::presentation();
+ data.valid_until_ms=1_500_000;
+ for owner in &mut data.original.owners{owner.source_expires_at_ms=1_500_000;owner.source_ceiling_ms=1_500_000;}
+ data.presentation_digest=data.calculate_presentation_digest().unwrap();
+ let wall=completed_pair_service_wall_ceiling(epoch,2_000,&data).unwrap();
+ assert!(wall>epoch+std::time::Duration::from_secs(900));
+ let source0=epoch+std::time::Duration::from_secs(1_450);
+ let source1=epoch+std::time::Duration::from_secs(1_300);
+ let original=clocks.restrict_received(PROFILE,1_400_000,source0.min(source1),epoch).unwrap().min(wall);
+ assert_eq!(original,source1);
+ let later=epoch+std::time::Duration::from_secs(300);
+ let received=clocks.restrict_received(PROFILE,1_400_000,source0.min(source1),later).unwrap()
+     .min(completed_pair_service_wall_ceiling(later,302_000,&data).unwrap());
+ assert_eq!(received,original);
+ assert_eq!(clocks.restrict_received(PROFILE,1_200_000,source0.min(source1),epoch).unwrap().min(wall),epoch+std::time::Duration::from_secs(1_200));
+ assert!(clocks.restrict_received(PROFILE,1_800_001,clocks.supervision(),epoch).is_err());
+ assert!(clocks.restrict_received(PROFILE,1_400_000,source0.min(source1),source1).is_err());
 }
 }

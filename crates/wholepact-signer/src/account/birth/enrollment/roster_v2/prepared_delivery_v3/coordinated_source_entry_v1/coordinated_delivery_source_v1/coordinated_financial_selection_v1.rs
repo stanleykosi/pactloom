@@ -16,16 +16,16 @@ impl CoordinatedPreparedDeliverySourceV1 {
         action.check_current()?;
         action.presentation().validate()?;
         terms.require_live(wall_ms()?).map_err(|_|Error::Locked)?;
-        let ready=&self.staged.source.ready;
+        let ready=&self.custody.staged.source.ready;
         let source=&ready.pairing.source;
         let wholepact_authority::OwnerControl::AdmitDurablePaymentWithDeliveryV2 { record } = &retained.request().control
             else { return Err(Error::ReviewMismatch); };
-        if action.facts().received.source_identity_digest != self.staged.source_identity()
+        if action.facts().received.source_identity_digest != self.custody.staged.source_identity()
             || action.facts().received.prepare_read_presentation_digest != self.read.presentation_digest
             || action.original_source_deadline() != self.original_source_deadline()
             || action.original_channel_deadline() != self.original_channel_deadline()
             || action.original_material_deadline() != self.original_material_deadline()
-            || action.original_service_deadline() != self.lifetime.original_service_deadline()
+            || action.original_service_deadline() != self.custody.lifetime.original_service_deadline()
             || intent != retained.recipient_intent()
             || terms.scope != record.scope
             || terms.original_delivery_operation_id != retained.request().operation_id
@@ -40,7 +40,7 @@ impl CoordinatedPreparedDeliverySourceV1 {
             || retained.owner_certificate_digest() != source.retained.record.account_record.genesis.owner_certificate_digest
         { return Err(Error::ReviewMismatch); }
         source.host.check_alive()?;
-        ready.session.require_current_receipts(&ready.enrollment,&ready.manifest)?;
+        ready.session.require_accepted_provenance(&ready.accepted,&ready.enrollment,&ready.manifest)?;
         action.check_current()?;
         source.retained.check()?;
         if publication::read_commit(&source.retained)? != source.original_commit
@@ -49,10 +49,10 @@ impl CoordinatedPreparedDeliverySourceV1 {
         action.check_current()?;
         let binding=source.journal.prepare_coordinated_v3_audit_source_binding_v1(
             &source.retained.record.account_record.genesis,
-            self.staged.source_identity(),retained,action,
+            self.custody.staged.source_identity(),retained,action,
         )?;
         let selected=OriginalFinancialReentrySelectionV1::capture_coordinated_under_audit_v1(
-            &source.retained,&binding,terms,intent,self.staged.source_identity(),&source.host,action,
+            &source.retained,&binding,terms,intent,self.custody.staged.source_identity(),&source.host,action,
         )?;
         // This observer reads only the existing identity/revision pin, never
         // replays the private audit after its genuine purpose has ended.
@@ -77,9 +77,9 @@ impl CoordinatedPreparedDeliverySourceV1 {
             || completed.original_source_deadline()!=self.original_source_deadline()
             || completed.original_channel_deadline()!=self.original_channel_deadline()
             || completed.original_material_deadline()!=self.original_material_deadline()
-            || completed.original_service_deadline()!=self.lifetime.original_service_deadline()
+            || completed.original_service_deadline()!=self.custody.lifetime.original_service_deadline()
         {return Err(Error::ReviewMismatch);}
-        let ready=self.staged.source.ready;
+        let ready=self.custody.staged.source.ready;
         let (transport,host)=ready.pairing.into_financial_role_transport(completed)?;
         transport.require_peer(&ready.peer)?;
         // Dropping this original nonce map cannot revoke the still-retained

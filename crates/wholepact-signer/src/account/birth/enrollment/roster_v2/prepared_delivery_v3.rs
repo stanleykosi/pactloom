@@ -7,7 +7,7 @@ mod coordinated_source_entry_v1;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 pub(crate) use coordinated_source_entry_v1::{
     PreparedCoordinatedV3SourceEntryV1, PresentedCoordinatedV3SourceEntryV1,
-    CoordinatedPreparingDeliverySourceV1,CoordinatedPreparedDeliverySourceV1,
+    CoordinatedPreparingDeliverySourceV1,CoordinatedPreparedDeliverySourceV1,CoordinatedPreparedPurposeBindingV1,
     CoordinatedRedisclosureReadV1,CoordinatedRediscloseV1,CoordinatedRedisclosedSourceV1,
     CoordinatedOriginalDeliverySourceV1, CoordinatedSourcePairingV1, CoordinatedSourceReceiptBindingV1, CoordinatedFinancialRoleTransportV1, CoordinatedEnrollmentReviewV1, CoordinatedManifestReviewV1, CoordinatedPreconstructionReadyV1, CoordinatedRestrictedReceiptV1,
 };

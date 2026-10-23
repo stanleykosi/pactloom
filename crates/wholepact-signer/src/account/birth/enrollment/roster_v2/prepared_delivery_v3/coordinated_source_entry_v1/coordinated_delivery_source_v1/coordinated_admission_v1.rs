@@ -2,6 +2,64 @@
 use super::*;
 use wholepact_financial_coordinator_origin::SignerV3AdmitReadFinalV1;
 
+/// Exact retained Prepare→Received lineage. Inert DATA only; private constructor
+/// borrows the real prepared source, never caller-supplied presentation data.
+/// It carries no Final, read permission, Clone or deserialization constructor.
+pub(crate) struct CoordinatedPreparedPurposeBindingV1 {
+    read: SignerV3PrepareReadPresentationV1,
+    source: Instant,
+    channel: Instant,
+    material: Instant,
+    service: Instant,
+}
+impl CoordinatedPreparedPurposeBindingV1 {
+    pub(crate) fn prepare_read(&self) -> &SignerV3PrepareReadPresentationV1 { &self.read }
+    pub(crate) fn require_admit_read(&self, action: &SignerV3AdmitReadFinalV1) -> Result<()> {
+        require_admit_read_purpose_binding(
+            &self.read, action.presentation(),
+            [self.source, self.channel, self.material, self.service],
+            [action.original_source_deadline(), action.original_channel_deadline(),
+             action.original_material_deadline(), action.original_service_deadline()],
+        )
+    }
+}
+// Pure comparison only; never creates a Final, provenance or read permission.
+// Both the production opaque binding and maintained DTO-mutation tests use it.
+fn require_admit_read_purpose_binding(
+    read: &SignerV3PrepareReadPresentationV1,
+    admission: &wholepact_financial_coordinator_origin::SignerV3AdmitReadPresentationV1,
+    expected_caps: [Instant; 4], actual_caps: [Instant; 4],
+) -> Result<()> {
+    let received = &admission.facts.received;
+    let expected = &read.facts;
+    if admission.actor != read.actor
+        || received.source_identity_digest != expected.source_identity_digest
+        || received.prepare_read_presentation_digest != read.presentation_digest
+        || received.payload_digest != expected.payload_digest
+        || received.payload_bytes != expected.payload_bytes
+        || received.fixed_identity_digest != expected.fixed_identity_digest
+        || admission.facts.owner_selection_digest != expected.owner_selection_digest
+        || admission.facts.owner_certificate_digest != expected.owner_certificate_digest
+        || admission.facts.disclosure_digest != expected.disclosure_digest
+        || expected_caps != actual_caps
+    { return Err(Error::ReviewMismatch); }
+    Ok(())
+}
+
+impl CoordinatedPreparedDeliverySourceV1 {
+    fn purpose_binding(&self, action: &SignerV3AdmitReadFinalV1) -> Result<CoordinatedPreparedPurposeBindingV1> {
+        let value = CoordinatedPreparedPurposeBindingV1 {
+            read: self.read.clone(),
+            source: self.custody.lifetime.original_source_deadline(),
+            channel: self.custody.lifetime.original_channel_deadline(),
+            material: self.original_material_deadline(),
+            service: self.custody.lifetime.original_service_deadline(),
+        };
+        value.require_admit_read(action)?;
+        Ok(value)
+    }
+}
+
 impl CoordinatedPreparedDeliverySourceV1 {
     /// This is a fresh guarded read, never an INSERT or a replacement receipt.
     /// Retained metadata is checked against the original live session owner.
@@ -10,16 +68,16 @@ impl CoordinatedPreparedDeliverySourceV1 {
         action.check_current()?;
         action.presentation().validate()?;
         let received = &action.facts().received;
-        if received.source_identity_digest != self.staged.source_identity()
+        if received.source_identity_digest != self.custody.staged.source_identity()
             || received.prepare_read_presentation_digest != self.read.presentation_digest
-            || action.original_source_deadline() != self.lifetime.original_source_deadline()
-            || action.original_channel_deadline() != self.lifetime.original_channel_deadline()
-            || action.original_material_deadline() != self.staged.original_material_deadline
-            || action.original_service_deadline() != self.lifetime.original_service_deadline()
+            || action.original_source_deadline() != self.custody.lifetime.original_source_deadline()
+            || action.original_channel_deadline() != self.custody.lifetime.original_channel_deadline()
+            || action.original_material_deadline() != self.custody.staged.original_material_deadline()
+            || action.original_service_deadline() != self.custody.lifetime.original_service_deadline()
         {
             return Err(Error::ReviewMismatch);
         }
-        let ready = &self.staged.source.ready;
+        let ready = &self.custody.staged.source.ready;
         let source = &ready.pairing.source;
         source.retained.check()?;
         action.check_current()?;
@@ -31,12 +89,13 @@ impl CoordinatedPreparedDeliverySourceV1 {
             &source.journal,
             ready.enrollment.reference(),
             ready.manifest.reference(),
-            &CoordinatedConstructionActionV1::AdmitRead(action),
+            &ready.accepted,
+            CoordinatedConstructionActionV1::AdmitRead(action, self.purpose_binding(action)?),
         )?;
         if lease.enrollment() != &ready.enrollment || lease.manifest() != &ready.manifest {
             return Err(Error::ReviewMismatch);
         }
-        lease.require_current_durable_disclosure_receipts_v1()?;
+        lease.require_admit_read(action)?;
         action.check_current()?;
         drop(lease);
         source
@@ -66,13 +125,14 @@ impl CoordinatedPreparedDeliverySourceV1 {
         {
             return Err(Error::ReviewMismatch);
         }
-        let ready = &self.staged.source.ready;
+        let ready = &self.custody.staged.source.ready;
         let source = &ready.pairing.source;
         let lease = ready.session.acquire_construction_records(
             &source.journal,
             ready.enrollment.reference(),
             ready.manifest.reference(),
-            &CoordinatedConstructionActionV1::AdmitRead(action),
+            &ready.accepted,
+            CoordinatedConstructionActionV1::AdmitRead(action, self.purpose_binding(action)?),
         )?;
         action.check_current()?;
         let record = &source.retained.record;
@@ -133,7 +193,7 @@ impl CoordinatedPreparedDeliverySourceV1 {
             &intent.delivery,
             &intent.material_scopes,
         )?;
-        lease.require_current_durable_disclosure_receipts_v1()?;
+        lease.require_admit_read(action)?;
         action.check_current()?;
         drop(lease);
         self.check_admit_read_source(action)?;
@@ -149,7 +209,7 @@ impl CoordinatedPreparedDeliverySourceV1 {
     ) -> Result<()> {
         self.check_admit_read_source(action)?;
         if !std::ptr::eq(
-            std::sync::Arc::as_ptr(&self.staged.source.ready.pairing.source.journal),
+            std::sync::Arc::as_ptr(&self.custody.staged.source.ready.pairing.source.journal),
             journal,
         ) {
             return Err(Error::ReviewMismatch);
@@ -173,7 +233,7 @@ impl CoordinatedPreparedDeliverySourceV1 {
         recipient: &crate::authority_bridge::durable_review_ipc_v3::coordinated_recipient_v1::CoordinatedRecipientIntentV1,
         history: &wholepact_authority::ReconciledAuthorityHistory,
     ) -> Result<crate::consent_journal::durable_delivery_admission_intent_v3::coordinated_v1::PreparedCoordinatedAdmissionIntentV1>{
-        self.staged
+        self.custody.staged
             .source
             .ready
             .pairing
@@ -201,15 +261,16 @@ impl CoordinatedPreparedDeliverySourceV1 {
         use crate::consent_journal::durable_delivery_admission_intent_v3::coordinated_v1::CoordinatedAdmissionRetentionV1;
         self.check_current()?;
         action.check_current()?;
-        if action.facts().read.source_identity_digest != self.staged.source_identity()
-            || action.original_source_deadline() != self.lifetime.original_source_deadline()
-            || action.original_channel_deadline() != self.lifetime.original_channel_deadline()
-            || action.original_material_deadline() != self.staged.original_material_deadline
-            || action.original_service_deadline() != self.lifetime.original_service_deadline()
+        if action.facts().read.source_identity_digest != self.custody.staged.source_identity()
+            || action.original_source_deadline() != self.custody.lifetime.original_source_deadline()
+            || action.original_channel_deadline() != self.custody.lifetime.original_channel_deadline()
+            || action.original_material_deadline() != self.custody.staged.original_material_deadline()
+            || action.original_service_deadline() != self.custody.lifetime.original_service_deadline()
         {
             return Err(Error::ReviewMismatch);
         }
-        let ready = &mut self.staged.source.ready;
+        let purpose = prepared.purpose_binding(self, action)?;
+        let ready = &mut self.custody.staged.source.ready;
         let source = &mut ready.pairing.source;
         source.retained.check()?;
         action.check_current()?;
@@ -217,9 +278,10 @@ impl CoordinatedPreparedDeliverySourceV1 {
             &source.journal,
             ready.enrollment.reference(),
             ready.manifest.reference(),
-            &CoordinatedConstructionActionV1::Admit(action),
+            &ready.accepted,
+            CoordinatedConstructionActionV1::Admit(action, purpose),
         )?;
-        lease.require_current_durable_disclosure_receipts_v1()?;
+        lease.require_admit(action)?;
         action.check_current()?;
         // Old revision is consumed before the sole possible effect. Never put
         // it back on error, and never auto-retry a publication or network send.
@@ -265,3 +327,7 @@ impl CoordinatedPreparedDeliverySourceV1 {
         Ok(&self.read)
     }
 }
+
+#[cfg(test)]
+#[path = "coordinated_admission_v1/handoff_chain_tests.rs"]
+mod handoff_chain_tests;

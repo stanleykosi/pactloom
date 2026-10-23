@@ -139,6 +139,28 @@ pub(crate) fn validate_original(
     lease.check_current()?;
     Ok(())
 }
+/// Same immutable request/record checks under the distinct fresh-purpose lease.
+/// No conversion to the legacy live-receipt authority is exposed.
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) fn validate_coordinated_original(
+    request: &DurableConstructionRequestV1,
+    lease: &crate::consent_journal::CoordinatedPurposeRecordLease<'_>,
+) -> authority_bridge::Result<()> {
+    let proposal = request.validate()?;
+    if lease.sponsor_required()
+        || lease.sponsor_policy().is_some()
+        || lease.enrollment().account_id() != request.scope.account_id
+        || lease.enrollment().participant_id() != request.scope.participant_id
+        || lease.enrollment().agreement_id() != proposal.manifest().agreement.agreement_id
+        || lease.enrollment().account_fvk_digest() != request.material.fvk_digest()
+        || lease.manifest().proposal_input() != &request.scope.proposal
+        || lease.manifest().enrollment_ref() != request.enrollment_ref
+    {
+        return Err(BridgeError::Binding);
+    }
+    lease.check_current()?;
+    Ok(())
+}
 impl PreparedDurableConstructionV1 {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare(

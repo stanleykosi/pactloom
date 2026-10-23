@@ -7,7 +7,7 @@ impl SignerConsentJournal {
     pub(crate) fn read_coordinated_redisclosure_original_v1(
         &self,
         request: &DurableConstructionRedisclosureSourceV1,
-        lease: &PreconstructionRecordLease<'_>,
+        lease: &CoordinatedPurposeRecordLease<'_>,
         action: &SignerV3RedisclosureReadFinalV1,
     ) -> Result<DurableConstructionOutboxV1> {
         action
@@ -17,7 +17,16 @@ impl SignerConsentJournal {
             .validate()
             .map_err(|_| JournalError::InvalidBinding)?;
         lease.require_journal(&self.binding())?;
-        lease.require_current_durable_disclosure_receipts_v1()?;
+        lease.require_read(action)?;
+        let selector: crate::authority_bridge::durable_construction_v1::DurableConstructionRedisclosureRequestV1 =
+            serde_json::from_str(&action.facts().selector_json).map_err(|_| JournalError::InvalidBinding)?;
+        selector.validate().map_err(|_| JournalError::InvalidBinding)?;
+        if &selector.original != request
+            || selector.enrollment_ref != lease.enrollment().reference()
+            || selector.accepted_manifest_ref != lease.manifest().reference()
+        {
+            return Err(JournalError::InvalidBinding);
+        }
         let c = self.connection.lock().map_err(|_| JournalError::Database)?;
         action
             .check_current()
@@ -43,7 +52,7 @@ impl SignerConsentJournal {
     pub(crate) fn append_coordinated_redisclosure_v1(
         &self,
         pin: PreparedDeliveryJournalRevisionV3,
-        lease: &PreconstructionRecordLease<'_>,
+        lease: &CoordinatedPurposeRecordLease<'_>,
         candidate: &DurableConstructionOutboxV1,
         action: &SignerV3RediscloseFinalV1,
     ) -> Result<(

@@ -6,14 +6,19 @@ impl SignerConsentJournal {
     pub(crate) fn read_coordinated_delivery_outboxes_v1(
         &self,
         preparation: &CoordinatedPrepareClosedRecipientRequestV1,
-        lease: &PreconstructionRecordLease<'_>,
+        lease: &CoordinatedPurposeRecordLease<'_>,
         action: &SignerV3PrepareReadFinalV1,
     ) -> Result<(DurableConstructionOutboxV1, DurableConstructionOutboxV1)> {
         action
             .check_current()
             .map_err(|_| JournalError::Permission)?;
         lease.require_journal(&self.binding())?;
-        lease.require_current_durable_disclosure_receipts_v1()?;
+        lease.require_prepare(action)?;
+        if action.facts().preparation_digest != preparation.digest().map_err(|_| JournalError::InvalidBinding)?
+            || action.facts().preparation_json != serde_json::to_string(preparation).map_err(|_| JournalError::InvalidBinding)?
+        {
+            return Err(JournalError::InvalidBinding);
+        }
         let request = &preparation.request;
         let current = request
             .current_disclosure

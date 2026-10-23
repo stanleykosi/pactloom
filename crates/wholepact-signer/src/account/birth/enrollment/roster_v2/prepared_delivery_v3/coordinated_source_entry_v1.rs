@@ -404,7 +404,7 @@ pub(crate) use coordinated_redisclosure_v1::{CoordinatedRedisclosureReadV1,Coord
 
 #[path = "coordinated_source_entry_v1/coordinated_delivery_source_v1.rs"]
 mod coordinated_delivery_source_v1;
-pub(crate) use coordinated_delivery_source_v1::{CoordinatedPreparingDeliverySourceV1,CoordinatedPreparedDeliverySourceV1};
+pub(crate) use coordinated_delivery_source_v1::{CoordinatedPreparingDeliverySourceV1,CoordinatedPreparedDeliverySourceV1,CoordinatedPreparedPurposeBindingV1};
 
 #[cfg(test)]
 mod initial_entry_display_regression {

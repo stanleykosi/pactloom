@@ -8,7 +8,37 @@ pub(crate) struct CoordinatedPreparingDeliverySourceV1 {
     pub(super) source: CoordinatedRedisclosedSourceV1,
     pub(super) preparation: CoordinatedPrepareClosedRecipientRequestV1,
     pub(super) preparation_digest: String,
-    pub(super) original_material_deadline: Instant,
+    material_selection: CoordinatedOriginalMaterialSelectionV1,
+}
+/// Non-authoritative, non-Clone selection. No journal/read/effect API accepts it.
+/// Absolute material/source/channel ceilings are frozen once, never refreshed.
+struct CoordinatedOriginalMaterialSelectionV1 {
+    deadline: Instant,
+    valid_from_ms: u64,
+    expires_at_ms: u64,
+}
+impl CoordinatedOriginalMaterialSelectionV1 {
+    fn capture(captured: Instant, wall: u64, valid_from_ms: u64, expires_at_ms: u64,
+        source: Instant, channel: Instant) -> Result<Self> {
+        if wall < valid_from_ms || wall >= expires_at_ms { return Err(Error::Locked); }
+        let deadline = captured.checked_add(Duration::from_millis(expires_at_ms - wall))
+            .ok_or(Error::Locked)?.min(source).min(channel);
+        let value = Self { deadline, valid_from_ms, expires_at_ms };
+        value.check_current(captured, wall)?;
+        Ok(value)
+    }
+    fn check_current(&self, now: Instant, wall: u64) -> Result<()> {
+        if now >= self.deadline || wall < self.valid_from_ms || wall >= self.expires_at_ms {
+            return Err(Error::Locked);
+        }
+        Ok(())
+    }
+}
+/// A new custody owner, not an extension of an old receipt/material token.
+/// Only seal_read can build it after an actual read and consumed Prepare Final.
+struct CoordinatedPreparedMaterialCustodyV1 {
+    staged: CoordinatedPreparingDeliverySourceV1,
+    lifetime: std::sync::Arc<SignerV3PreparedLifetimeV1>,
 }
 impl CoordinatedRedisclosedSourceV1 {
     pub(crate) fn next_event(&self) -> Result<Option<crate::ipc::CoordinatedLocalEventV1>> {
@@ -81,32 +111,31 @@ impl CoordinatedRedisclosedSourceV1 {
         {
             return Err(Error::Locked);
         }
-        let original_material_deadline = captured
-            .checked_add(Duration::from_millis(ceiling - wall))
-            .ok_or(Error::Locked)?
-            .min(self.ready.pairing.source.original_source_deadline)
-            .min(peer.deadline())
-            .min(
-                self.ready
-                    .session
-                    .current_receipt_deadline(&self.ready.enrollment, &self.ready.manifest)?,
-            );
+        // This is immutable selection metadata, NOT a private-read capability.
+        // Accepted receipt provenance does not revive its old 120s permission.
+        // A different nominal custody owner is minted only after PrepareRead.
+        let material_selection = CoordinatedOriginalMaterialSelectionV1::capture(
+            captured, wall,
+            preparation.material_scopes.iter()
+                .map(|v| v.valid_from_unix_seconds.saturating_mul(1000))
+                .max().ok_or(Error::ReviewMismatch)?,
+            ceiling,
+            self.ready.pairing.source.original_source_deadline,
+            peer.deadline(),
+        )?;
         let preparation_digest = preparation.digest().map_err(|_| Error::ReviewMismatch)?;
         Ok(CoordinatedPreparingDeliverySourceV1 {
             source: self,
             preparation,
             preparation_digest,
-            original_material_deadline,
+            material_selection,
         })
     }
 }
 impl CoordinatedPreparingDeliverySourceV1 {
     pub(crate) fn check_current(&self) -> Result<()> {
         self.source.check_current()?;
-        if Instant::now() >= self.original_material_deadline {
-            return Err(Error::Locked);
-        }
-        Ok(())
+        self.material_selection.check_current(Instant::now(), wall_ms()?)
     }
     pub(crate) fn preparation(&self) -> &CoordinatedPrepareClosedRecipientRequestV1 {
         &self.preparation
@@ -115,7 +144,7 @@ impl CoordinatedPreparingDeliverySourceV1 {
         &self.preparation_digest
     }
     pub(crate) fn original_material_deadline(&self) -> Instant {
-        self.original_material_deadline
+        self.material_selection.deadline
     }
     pub(crate) fn original_source_deadline(&self) -> Instant {
         self.source.ready.pairing.source.original_source_deadline
@@ -190,12 +219,12 @@ pub(crate) struct CoordinatedReadOpenedSourceV1 {
     staged: CoordinatedPreparingDeliverySourceV1,
     original: DurableConstructionOutboxV1,
     read: SignerV3PrepareReadPresentationV1,
+    original_service_deadline: Instant,
 }
 pub(crate) struct CoordinatedPreparedDeliverySourceV1 {
-    pub(super) staged: CoordinatedPreparingDeliverySourceV1,
+    custody: CoordinatedPreparedMaterialCustodyV1,
     pub(super) original: DurableConstructionOutboxV1,
     pub(super) read: SignerV3PrepareReadPresentationV1,
-    pub(super) lifetime: std::sync::Arc<SignerV3PreparedLifetimeV1>,
 }
 impl CoordinatedPreparingDeliverySourceV1 {
     pub(crate) fn read(
@@ -205,7 +234,10 @@ impl CoordinatedPreparingDeliverySourceV1 {
         self.check_current()?;
         action.check_current()?;
         let f = action.facts();
-        if f.preparation_digest != self.preparation_digest
+        if action.original_source_deadline() != self.original_source_deadline()
+            || action.original_channel_deadline() != self.original_channel_deadline()
+            || action.original_material_deadline() != self.original_material_deadline()
+            || f.preparation_digest != self.preparation_digest
             || f.preparation_json
                 != serde_json::to_string(&self.preparation).map_err(|_| Error::InvalidData)?
             || f.source_identity_digest != self.source_identity()
@@ -233,7 +265,8 @@ impl CoordinatedPreparingDeliverySourceV1 {
             &source.journal,
             self.enrollment().reference(),
             self.manifest().reference(),
-            &CoordinatedConstructionActionV1::Prepare(action),
+            &self.source.ready.accepted,
+            CoordinatedConstructionActionV1::Prepare(action),
         )?;
         let (original, fresh) = source.journal.read_coordinated_delivery_outboxes_v1(
             &self.preparation,
@@ -248,7 +281,7 @@ impl CoordinatedPreparingDeliverySourceV1 {
         {
             return Err(Error::ReviewMismatch);
         }
-        crate::native_ui::durable_construction_v1::validate_original(fresh.request(), &lease)
+        crate::native_ui::durable_construction_v1::validate_coordinated_original(fresh.request(), &lease)
             .map_err(|_| Error::ReviewMismatch)?;
         original
             .request()
@@ -271,7 +304,7 @@ impl CoordinatedPreparingDeliverySourceV1 {
         {
             return Err(Error::ReviewMismatch);
         }
-        lease.require_current_durable_disclosure_receipts_v1()?;
+        lease.require_prepare(action)?;
         drop(lease);
         source
             .journal
@@ -282,6 +315,7 @@ impl CoordinatedPreparingDeliverySourceV1 {
             staged: self,
             original,
             read,
+            original_service_deadline: action.original_service_deadline(),
         })
     }
 }
@@ -291,16 +325,20 @@ impl CoordinatedReadOpenedSourceV1 {
         lifetime: std::sync::Arc<SignerV3PreparedLifetimeV1>,
     ) -> Result<CoordinatedPreparedDeliverySourceV1> {
         lifetime.check_current()?;
+        self.staged.check_current()?;
         if lifetime.read_presentation_digest() != self.read.presentation_digest
             || lifetime.source_identity_digest() != self.staged.source_identity()
+            || lifetime.original_material_deadline() != self.staged.original_material_deadline()
+            || lifetime.original_source_deadline() != self.staged.original_source_deadline()
+            || lifetime.original_channel_deadline() != self.staged.original_channel_deadline()
+            || lifetime.original_service_deadline() != self.original_service_deadline
         {
             return Err(Error::ReviewMismatch);
         }
         Ok(CoordinatedPreparedDeliverySourceV1 {
-            staged: self.staged,
+            custody: CoordinatedPreparedMaterialCustodyV1 { staged: self.staged, lifetime },
             original: self.original,
             read: self.read,
-            lifetime,
         })
     }
 }
@@ -308,38 +346,41 @@ impl CoordinatedPreparedDeliverySourceV1 {
     /// Restriction/cache only. Every new private journal/owner read needs its
     /// own exact nominal action; the prepared lifetime grants none of them.
     pub(crate) fn check_current(&self) -> Result<()> {
-        self.lifetime.check_current()?;
-        self.staged.check_current()
+        self.custody.lifetime.check_current()?;
+        self.custody.staged.check_current()
     }
     pub(crate) fn read_presentation_digest(&self) -> &str {
         &self.read.presentation_digest
     }
     pub(crate) fn source_identity(&self) -> &str {
-        self.staged.source_identity()
+        self.custody.staged.source_identity()
     }
     pub(crate) fn manifest(&self) -> &crate::consent_journal::AcceptedManifestRecord {
-        self.staged.manifest()
+        self.custody.staged.manifest()
     }
     pub(crate) fn enrollment(&self) -> &crate::consent_journal::AccountEnrollmentRecord {
-        self.staged.enrollment()
+        self.custody.staged.enrollment()
     }
     pub(crate) fn original_outbox(&self) -> &DurableConstructionOutboxV1 {
         &self.original
     }
     pub(crate) fn original_material_deadline(&self) -> Instant {
-        self.staged.original_material_deadline
+        self.custody.staged.original_material_deadline()
     }
     pub(crate) fn original_source_deadline(&self) -> Instant {
-        self.staged.original_source_deadline()
+        self.custody.staged.original_source_deadline()
     }
     pub(crate) fn original_channel_deadline(&self) -> Instant {
-        self.staged.original_channel_deadline()
+        self.custody.staged.original_channel_deadline()
+    }
+    pub(crate) fn original_service_deadline(&self) -> Instant {
+        self.custody.lifetime.original_service_deadline()
     }
     pub(crate) fn peer(&self) -> &CoordinatedPairPeerV1 {
-        self.staged.peer()
+        self.custody.staged.peer()
     }
     pub(crate) fn preparation(&self) -> &CoordinatedPrepareClosedRecipientRequestV1 {
-        &self.staged.preparation
+        &self.custody.staged.preparation
     }
 }
 impl CoordinatedPreparingDeliverySourceV1 {
@@ -351,12 +392,90 @@ impl CoordinatedPreparingDeliverySourceV1 {
 impl CoordinatedPreparedDeliverySourceV1 {
     pub(crate) fn next_event(&self) -> Result<Option<crate::ipc::CoordinatedLocalEventV1>> {
         self.check_current()?;
-        self.staged.next_event()
+        self.custody.staged.next_event()
     }
 }
 
 #[path = "coordinated_delivery_source_v1/coordinated_admission_v1.rs"]
 mod coordinated_admission_v1;
+pub(crate) use coordinated_admission_v1::CoordinatedPreparedPurposeBindingV1;
 
 #[path = "coordinated_delivery_source_v1/coordinated_financial_selection_v1.rs"]
 mod coordinated_financial_selection_v1;
+
+#[cfg(test)]
+mod material_selection_handoff_tests {
+    use super::*;
+
+    #[test]
+    fn accepted_selection_preserves_absolute_material_not_old_receipt_window() {
+        let start = Instant::now();
+        let selected = CoordinatedOriginalMaterialSelectionV1::capture(
+            start, 1_000, 500, 601_000,
+            start + Duration::from_secs(800), start + Duration::from_secs(900),
+        ).unwrap();
+        assert_eq!(selected.deadline, start + Duration::from_secs(600));
+        // This tests selection metadata only, not permission to read/effect.
+        assert!(selected.check_current(start + Duration::from_secs(121), 122_000).is_ok());
+        assert!(selected.check_current(start + Duration::from_secs(599), 600_000).is_ok());
+        assert!(selected.check_current(start + Duration::from_secs(600), 601_000).is_err());
+    }
+
+    #[test]
+    fn material_selection_intersects_original_source_and_channel() {
+        let start = Instant::now();
+        for (source, channel, expected) in [(200, 300, 200), (300, 200, 200), (900, 900, 600)] {
+            let selected = CoordinatedOriginalMaterialSelectionV1::capture(
+                start, 1_000, 500, 601_000,
+                start + Duration::from_secs(source), start + Duration::from_secs(channel),
+            ).unwrap();
+            assert_eq!(selected.deadline, start + Duration::from_secs(expected));
+            assert!(selected.check_current(selected.deadline, 1_000 + expected * 1000).is_err());
+        }
+    }
+
+    #[test]
+    fn material_selection_does_not_refresh_on_later_observation() {
+        let start = Instant::now();
+        let selected = CoordinatedOriginalMaterialSelectionV1::capture(
+            start, 1_000, 500, 601_000,
+            start + Duration::from_secs(500), start + Duration::from_secs(900),
+        ).unwrap();
+        let original = selected.deadline;
+        for elapsed in [0, 1, 119, 120, 121, 499] {
+            selected.check_current(start + Duration::from_secs(elapsed), 1_000 + elapsed * 1000).unwrap();
+            assert_eq!(selected.deadline, original);
+        }
+        assert!(selected.check_current(start + Duration::from_secs(500), 501_000).is_err());
+        assert_eq!(selected.deadline, original);
+    }
+
+    #[test]
+    fn material_selection_rejects_wall_rollback_and_absolute_expiry() {
+        let start = Instant::now();
+        let selected = CoordinatedOriginalMaterialSelectionV1::capture(
+            start, 1_000, 900, 601_000,
+            start + Duration::from_secs(800), start + Duration::from_secs(900),
+        ).unwrap();
+        assert!(selected.check_current(start, 899).is_err());
+        assert!(selected.check_current(start, 601_000).is_err());
+        assert!(selected.check_current(start, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn material_selection_refuses_expired_or_unstarted_originals() {
+        let start = Instant::now();
+        let later = start + Duration::from_secs(300);
+        for (wall, from, until, source, channel) in [
+            (1_000, 1_001, 3_000, later, later),
+            (1_000, 500, 1_000, later, later),
+            (1_000, 500, 999, later, later),
+            (1_000, 500, 3_000, start, later),
+            (1_000, 500, 3_000, later, start),
+        ] {
+            assert!(CoordinatedOriginalMaterialSelectionV1::capture(
+                start, wall, from, until, source, channel,
+            ).is_err());
+        }
+    }
+}

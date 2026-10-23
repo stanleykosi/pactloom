@@ -439,7 +439,7 @@ pub(crate) fn validated_delivery_manifest_proposal_v3(
 }
 
 #[cfg(feature = "coordinated-financial-workflow-v1")]
-pub(crate) use preconstruction_lease::CoordinatedConstructionActionV1;
+pub(crate) use preconstruction_lease::{CoordinatedConstructionActionV1, CoordinatedPurposeRecordLease};
 
 #[cfg(all(feature = "coordinated-financial-workflow-v1", feature = "durable-proposal", feature = "pending-birth-owner-signing", feature = "native-ui", target_os = "linux"))]
 pub(crate) use storage::financial_profile_v1::{PreparedCoordinatedFinancialSpendV1, PresentedCoordinatedFinancialSpendV1, ApprovedCoordinatedFinancialSpendConsentV1};

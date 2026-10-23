@@ -72,8 +72,7 @@ impl CoordinatedPreconstructionReadyV1 {
             self.peer
                 .deadline()
                 .min(self.pairing.source.original_source_deadline)
-                .min(original_request_deadline)
-                .min(self.session.current_receipt_deadline(&self.enrollment,&self.manifest)?),
+                .min(original_request_deadline),
         )?;
         let mut facts=SignerV3RedisclosureReadFactsV1 {
             entry_presentation_digest:self.pairing.source.opened.entry_presentation_digest.clone(),
@@ -82,8 +81,8 @@ impl CoordinatedPreconstructionReadyV1 {
             coordinated_session_id:self.enrollment.receipt().native_session_id().into(),
             current_enrollment_ref:self.enrollment.reference().into(),current_manifest_ref:self.manifest.reference().into(),
             selector_json:serde_json::to_string(&selector).map_err(|_|Error::InvalidData)?,selector_digest:String::new(),
-            reviewed_at_ms:wall,expires_at_ms:wall_deadline(captured,wall,deadline,self.pairing.source.facts.source_expires_at_ms)?.min(self.enrollment.receipt().expires_at_ms()).min(self.manifest.receipt().expires_at_ms()),source_expires_at_ms:self.pairing.source.facts.source_expires_at_ms,
-            display:format!("READ EXACT ORIGINAL OUTBOX ONLY\nOriginal operation: {}\nExpected original digest: {:?}\nNew operation: {}\nFresh enrollment: {}\nFresh manifest: {}\nNo append or material export is approved.",selector.original.operation_id,selector.original.expected_request_digest,selector.operation_id,self.enrollment.reference(),self.manifest.reference()),
+            reviewed_at_ms:wall,expires_at_ms:wall_deadline(captured,wall,deadline,self.pairing.source.facts.source_expires_at_ms)?,source_expires_at_ms:self.pairing.source.facts.source_expires_at_ms,
+            display:format!("READ EXACT ORIGINAL OUTBOX ONLY\nOriginal operation: {}\nExpected original digest: {:?}\nNew operation: {}\nAccepted enrollment: {}\nAccepted manifest: {}\nNo append or material export is approved.",selector.original.operation_id,selector.original.expected_request_digest,selector.operation_id,self.enrollment.reference(),self.manifest.reference()),
         };
         facts.selector_digest = facts.calculate_selector_digest()?;
         facts.validate()?;
@@ -130,7 +129,8 @@ impl CoordinatedRedisclosureReadV1 {
             &source.journal,
             self.ready.enrollment.reference(),
             self.ready.manifest.reference(),
-            &CoordinatedConstructionActionV1::Read(&action),
+            &self.ready.accepted,
+            CoordinatedConstructionActionV1::Read(&action),
         )?;
         let original = source.journal.read_coordinated_redisclosure_original_v1(
             &self.selector.original,
@@ -144,7 +144,7 @@ impl CoordinatedRedisclosureReadV1 {
         request.scope.constructor.authenticated_local_grant_digest =
             self.ready.peer.key_digest().into();
         request.scope.prover.authenticated_local_grant_digest = self.ready.peer.key_digest().into();
-        crate::native_ui::durable_construction_v1::validate_original(&request, &lease)
+        crate::native_ui::durable_construction_v1::validate_coordinated_original(&request, &lease)
             .map_err(|_| Error::ReviewMismatch)?;
         request
             .scope
@@ -161,7 +161,7 @@ impl CoordinatedRedisclosureReadV1 {
             .verify_owner(&source.retained.account.account().fvk()?)
             .map_err(|_| Error::ReviewMismatch)?;
         action.check_current()?;
-        lease.require_current_durable_disclosure_receipts_v1()?;
+        lease.require_read(&action)?;
         drop(lease);
         source
             .journal
@@ -169,7 +169,7 @@ impl CoordinatedRedisclosureReadV1 {
         let prepared=SignerV3RedisclosurePreparedV1 {
             read_presentation_digest:action.presentation().presentation_digest.clone(),source_identity_digest:self.facts.source_identity_digest.clone(),current_enrollment_ref:self.facts.current_enrollment_ref.clone(),current_manifest_ref:self.facts.current_manifest_ref.clone(),coordinated_session_id:self.facts.coordinated_session_id.clone(),
             next_request_digest:request.digest().map_err(|_|Error::ReviewMismatch)?,material_digest:request.material.digest().map_err(|_|Error::ReviewMismatch)?,original_outbox_reference:original.reference().into(),original_request_digest:original.request_digest().into(),scope_digest:request.scope.digest().map_err(|_|Error::ReviewMismatch)?,
-            display:format!("REDISCLOSE SAME ORIGINAL MATERIAL TO ACTUAL PAIRED HOST\nOriginal operation: {}\nOriginal outbox: {}\nNew operation: {}\nFresh enrollment: {}\nFresh manifest: {}\nExact material scope:\n{}",original.request().operation_id,original.reference(),request.operation_id,request.enrollment_ref,request.accepted_manifest_ref,serde_json::to_string(&request.scope).map_err(|_|Error::InvalidData)?),
+            display:format!("REDISCLOSE SAME ORIGINAL MATERIAL TO ACTUAL PAIRED HOST\nOriginal operation: {}\nOriginal outbox: {}\nNew operation: {}\nAccepted enrollment: {}\nAccepted manifest: {}\nExact material scope:\n{}",original.request().operation_id,original.reference(),request.operation_id,request.enrollment_ref,request.accepted_manifest_ref,serde_json::to_string(&request.scope).map_err(|_|Error::InvalidData)?),
         };
         prepared.validate()?;
         let candidate = DurableConstructionOutboxV1 {
@@ -217,7 +217,7 @@ impl CoordinatedRedisclosureReadV1 {
         })
     }
 }
-impl CoordinatedRediscloseV1 {
+
     pub(crate) fn facts(&self) -> &SignerV3RediscloseFactsV1 {
         &self.facts
     }
@@ -258,9 +258,10 @@ impl CoordinatedRediscloseV1 {
             &source.journal,
             self.ready.enrollment.reference(),
             self.ready.manifest.reference(),
-            &CoordinatedConstructionActionV1::Export(&action),
+            &self.ready.accepted,
+            CoordinatedConstructionActionV1::Export(&action),
         )?;
-        crate::native_ui::durable_construction_v1::validate_original(
+        crate::native_ui::durable_construction_v1::validate_coordinated_original(
             self.candidate.request(),
             &lease,
         )
@@ -299,7 +300,7 @@ impl CoordinatedRediscloseV1 {
                     .check_current()
                     .map_err(|_| crate::authority_bridge::BridgeError::Permission)?;
                 lease
-                    .require_current_durable_disclosure_receipts_v1()
+                    .require_export(&action)
                     .map_err(|_| crate::authority_bridge::BridgeError::Permission)?;
                 outbox
                     .request()

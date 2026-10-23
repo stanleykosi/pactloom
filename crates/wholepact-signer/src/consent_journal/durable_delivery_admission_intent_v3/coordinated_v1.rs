@@ -382,6 +382,108 @@ pub(crate) struct PreparedCoordinatedAdmissionIntentV1 {
     intent: CoordinatedAdmissionIntentV1,
     review_digest: String,
 }
+// Pure exact-chain restrictions only. The fixed-cardinality entries below
+// are assembled exclusively from the original prepared intent, retained source
+// and genuine Final. Tests exercise the same predicate without minting any of
+// those authorities. Digests/JSON are computed by the real methods at the call.
+struct AdmissionPurposeChainV1<'a> {
+    actors: (&'a wholepact_financial_coordinator_origin::FinancialActorContextV1,
+             &'a wholepact_financial_coordinator_origin::FinancialActorContextV1),
+    identities: [(&'a str, &'a str); 21],
+    wall_ceilings: [(u64, u64); 3],
+    original_deadlines: [(std::time::Instant, std::time::Instant); 4],
+}
+fn require_admission_purpose_chain(chain: &AdmissionPurposeChainV1<'_>) -> Result<()> {
+    if chain.actors.0 != chain.actors.1
+        || chain.identities.iter().any(|(a,b)| a != b)
+        || chain.wall_ceilings.iter().any(|(a,b)| a != b)
+        || chain.original_deadlines.iter().any(|(a,b)| a != b)
+    {
+        return Err(JournalError::Permission);
+    }
+    Ok(())
+}
+
+/// Inert exact-chain evidence, not a Final, permission or lease. Only the
+/// original prepared intent joined to its retained source can construct it.
+/// Owning these immutable presentations avoids a borrow of the intent that
+/// must later move into the sole publication attempt.
+pub(crate) struct CoordinatedAdmissionPurposeBindingV1 {
+    prepare_read: wholepact_financial_coordinator_origin::SignerV3PrepareReadPresentationV1,
+    admission: wholepact_financial_coordinator_origin::SignerV3AdmitPresentationV1,
+}
+impl CoordinatedAdmissionPurposeBindingV1 {
+    pub(in crate::consent_journal) fn prepare_read(&self) -> &wholepact_financial_coordinator_origin::SignerV3PrepareReadPresentationV1 {
+        &self.prepare_read
+    }
+    pub(in crate::consent_journal) fn require_admit(&self, action: &wholepact_financial_coordinator_origin::SignerV3AdmitFinalV1) -> Result<()> {
+        action.check_current().map_err(invalid)?;
+        if action.presentation() != &self.admission {
+            return Err(JournalError::Permission);
+        }
+        Ok(())
+    }
+}
+impl PreparedCoordinatedAdmissionIntentV1 {
+    pub(crate) fn purpose_binding(
+        &self,
+        source: &crate::account::birth::enrollment::roster_v2::durable_entry_v1::CoordinatedPreparedDeliverySourceV1,
+        action: &wholepact_financial_coordinator_origin::SignerV3AdmitFinalV1,
+    ) -> Result<CoordinatedAdmissionPurposeBindingV1> {
+        action.check_current().map_err(invalid)?;
+        self.intent.validate_review()?;
+        let read = source.cached_prepare_read().map_err(invalid)?;
+        read.validate().map_err(invalid)?;
+        action.presentation().validate().map_err(invalid)?;
+        let facts = action.facts();
+        let request_digest = self.intent.request_digest()?;
+        let recipient_digest = self.intent.recipient_intent.digest().map_err(invalid)?;
+        let request_json = serde_json::to_string(&self.intent.request).map_err(invalid)?;
+        require_admission_purpose_chain(&AdmissionPurposeChainV1 {
+            actors: (&action.presentation().actor, &read.actor),
+            identities: [
+                (&self.source_identity, source.source_identity()),
+                (&self.source_identity, &read.facts.source_identity_digest),
+                (&self.source_identity, &facts.read.source_identity_digest),
+                (&self.intent.enrollment_ref, source.enrollment().reference()),
+                (&self.intent.manifest_ref, source.manifest().reference()),
+                (&self.intent.enrollment_ref, &read.facts.current_enrollment_ref),
+                (&self.intent.manifest_ref, &read.facts.current_manifest_ref),
+                (source.enrollment().receipt().native_session_id(), &read.facts.coordinated_session_id),
+                (&self.intent.read.principal_id, source.enrollment().principal_id()),
+                (&self.intent.read.measurement, source.peer().common_image_measurement()),
+                (&self.intent.read.prepare_read_presentation_digest, &read.presentation_digest),
+                (&self.intent.read.read_session_digest, &read.presentation_digest),
+                (&self.intent.read.owner_selection_digest, &read.facts.owner_selection_digest),
+                (&self.intent.owner_certificate_digest, &read.facts.owner_certificate_digest),
+                (&self.review_digest, &facts.read.admission_review_digest),
+                (&request_digest, &facts.read.admission_request_digest),
+                (&self.intent.admit_read.presentation_digest, &facts.read.admit_read_presentation_digest),
+                (&self.intent.admit_read.authenticated_history_digest, &facts.read.authenticated_history_digest),
+                (&self.intent.read.owner_service_digest, &facts.read.owner_service_digest),
+                (&recipient_digest, &facts.read.recipient_intent_digest),
+                (&request_json, &facts.request_json),
+            ],
+            wall_ceilings: [
+                (self.intent.ceilings.original_source_expires_at_ms, read.facts.source_expires_at_ms),
+                (self.intent.ceilings.original_material_expires_at_ms, read.facts.material_expires_at_ms),
+                (self.intent.ceilings.original_owner_service_expires_at_ms, read.facts.service_expires_at_ms),
+            ],
+            original_deadlines: [
+                (action.original_source_deadline(), source.original_source_deadline()),
+                (action.original_channel_deadline(), source.original_channel_deadline()),
+                (action.original_material_deadline(), source.original_material_deadline()),
+                (action.original_service_deadline(), source.original_service_deadline()),
+            ],
+        })?;
+        action.check_current().map_err(invalid)?;
+        Ok(CoordinatedAdmissionPurposeBindingV1 {
+            prepare_read: read.clone(),
+            admission: action.presentation().clone(),
+        })
+    }
+}
+
 impl PreparedCoordinatedAdmissionIntentV1 {
     pub(crate) fn request(&self) -> &OwnerControlRequest {
         &self.intent.request
@@ -553,7 +655,7 @@ impl SignerConsentJournal {
         &self,
         prepared: PreparedCoordinatedAdmissionIntentV1,
         pin: PreparedDeliveryJournalRevisionV3,
-        lease: &PreconstructionRecordLease<'_>,
+        lease: &CoordinatedPurposeRecordLease<'_>,
         action: &wholepact_financial_coordinator_origin::SignerV3AdmitFinalV1,
         channel: &wholepact_authority::transport::durable_delivery_admission_v3::AuthenticatedDurableAdmissionChannelV3<'_>,
     ) -> Result<CoordinatedAdmissionRetentionV1> {
@@ -582,7 +684,7 @@ impl SignerConsentJournal {
         {
             return Err(JournalError::Permission);
         }
-        lease.require_current_durable_disclosure_receipts_v1()?;
+        lease.require_admit(action)?;
         let mut intent = prepared.intent;
         intent.admission = AdmissionProvenanceV1 {
             read_session_digest: intent.read.read_session_digest.clone(),
@@ -612,3 +714,7 @@ impl SignerConsentJournal {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "coordinated_v1/handoff_chain_tests.rs"]
+mod handoff_chain_tests;
