@@ -1,43 +1,66 @@
-"""Concrete launch wiring checks. No network, product or Docker execution."""
-import hashlib
-import json
-import pathlib
-import unittest
-from test_setup import L
+"""Private unbound scaffold wiring; never activate or execute native artifacts."""
+import hashlib,json,pathlib,unittest
+from test_setup import L,TRUSTED
 HERE=pathlib.Path(__file__).resolve().parent
 ROOT=HERE.parents[1]
 class IntegrationTests(unittest.TestCase):
- def test_concrete_plan_pins_and_exact_delta(self):
-  plan=L.validate_plan(json.loads((HERE/'plan.json').read_text()))
-  self.assertEqual(plan['harness']['source'],'ecda810b7167a54bdb3f6d587fb60956b56c6b6d')
-  self.assertEqual(plan['harness']['source_tree'],'ee97fd0b7902e550d94ded2f4d5bde10abbd9e3e')
-  self.assertEqual(plan['artifact_pins']['artifact_id'],12395613903)
-  self.assertEqual(set(plan['reviewed_runtime_changes']),{'scripts/ci-financial-container.py','scripts/ci-financial-controller.py','scripts/ci-financial-flow.py','scripts/tests/test_ci_financial_observer.py'})
-  self.assertNotIn('launcher',plan)
-  for path,pin in plan['reviewed_runtime_changes'].items():
-   data=(ROOT/path).read_bytes()
-   self.assertEqual(hashlib.sha256(b'100644\0'+data).hexdigest(),pin)
- def test_gate_and_context_do_not_request_native_rebuild(self):
-  self.assertEqual((ROOT/'scripts/qualification-gate-mode').read_bytes(),b'financial-reuse\n')
-  workflow=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
-  self.assertIn("steps.mode.outputs.gate != 'financial-ui' && steps.mode.outputs.gate != 'financial-reuse'",workflow)
-  self.assertIn("if: steps.mode.outputs.gate == 'financial-ui'",workflow)
-  self.assertIn('branches: [qualification/durable-proposal-v1]',workflow)
-  self.assertNotIn('financial-runtime-reuse-04',workflow)
- def test_runtime_and_cleanup_have_no_acquisition_token(self):
-  workflow=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
-  self.assertEqual(workflow.count('FINANCIAL_ARTIFACT_READ_TOKEN:'),1)
-  runtime=workflow.split('      - name: Actual synthetic financial runtime',1)[1]
-  self.assertNotIn('github.token',runtime)
-  self.assertIn('env -i PATH=',runtime)
-  self.assertIn("if: always() && steps.mode.outputs.gate == 'financial-reuse'",runtime)
-  self.assertIn('launch_adapter.py" cleanup "${GITHUB_WORKSPACE}/source"',runtime)
-  self.assertNotIn('acquire_archive.py',workflow)
- def test_smoke_is_original_cleanup_not_native_execution(self):
-  workflow=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
-  smoke=workflow.split('      - name: Pre-runtime trusted cleanup smoke',1)[1].split('      - name:',1)[0]
-  self.assertIn('launch_adapter.py" cleanup',smoke)
-  self.assertNotIn(' smoke ',smoke)
-  self.assertNotIn(' run ',smoke)
-  self.assertNotIn('pristine-setup',smoke)
+ def test_concrete_identical_source_v2_plan(self):
+  p=json.loads((HERE/'plan.json').read_text());self.assertEqual(p['harness'],{k:L.V.PRODUCER[k] for k in ('repository','source','source_tree')})
+  self.assertEqual(L.validate_plan(p),p)
+  self.assertEqual(p['producer'],L.V.PRODUCER);self.assertEqual(p['artifact_pins'],L.V.ARTIFACT_PINS);self.assertEqual(p['api_pins'],L.V.API_PINS)
+  self.assertEqual(p['manifest_version'],2);self.assertEqual(p['build_recipe_version'],2);self.assertEqual(p['version'],6)
+  self.assertEqual(p['artifact_pins']['artifact_id'],12483805195)
+ def test_p35_parser_and_cleanup_exact_current_sources(self):
+  self.assertEqual((HERE/'producer_artifacts.py').read_bytes(),(ROOT/'scripts/ci-financial-artifacts.py').read_bytes())
+  for path,pin in L.CLEANUP_PINS.items():
+   data=(HERE/path).read_bytes();self.assertEqual(hashlib.sha256(data).hexdigest(),pin)
+   self.assertEqual(data,b'financial-semantic\n' if path.endswith('/qualification-gate-mode') else (ROOT/pathlib.Path(path).relative_to('cleanup_snapshot')).read_bytes())
+ def test_cleanup_dependency_closure_imports_without_execution(self):
+  s=TRUSTED.module('cleanup_closure_probe',L.HERE/'cleanup_snapshot/scripts/ci-financial-supervisor.py')
+  self.assertEqual(s.A.MANIFEST_VERSION,2);self.assertEqual(s.A.recipe(L.V.QUALIFICATION_PROFILE),L.V.A.recipe(L.V.QUALIFICATION_PROFILE))
+ def test_mandatory_tests_and_cleanup_remain_wired(self):
+  text=(HERE/'launch_adapter.py').read_text()
+  self.assertIn("'scripts/ci-financial-launch-tests.py'",text);self.assertIn("'test*financial*.py'",text)
+  self.assertIn('clean=S.cleanup(token,tag)',text);self.assertIn('clean=trusted_cleanup(trusted)',text)
+  self.assertNotIn('S.build_inputs(',text);self.assertNotIn("'cargo'",text)
+ def test_exact_private_workflow_wiring(self):
+  self.assertEqual((ROOT/'scripts/qualification-gate-mode').read_bytes(),b'financial-semantic-reuse\n')
 if __name__=='__main__':unittest.main()
+
+class CleanupProfileTests(unittest.TestCase):
+ def test_current_p35_cleanup_main_has_pinned_profile_input(self):
+  from unittest.mock import patch
+  import tempfile,os
+  s=TRUSTED.module('cleanup_main_probe',L.HERE/'cleanup_snapshot/scripts/ci-financial-supervisor.py')
+  with tempfile.TemporaryDirectory() as tmp,patch.dict(os.environ,{'RUNNER_TEMP':tmp}),patch.object(s,'context',return_value=('a'*40,'token')),patch.object(s.sys,'argv',['supervisor','cleanup']),patch.object(s,'cleanup',return_value=True) as cleanup,patch.object(s,'emit'):
+   self.assertEqual(s.main(),0);cleanup.assert_called_once()
+
+class IdenticalSourceTests(unittest.TestCase):
+ def test_zero_delta_only_for_exact_producer_identity(self):
+  p=json.loads((HERE/'plan.json').read_text());self.assertEqual(p['reviewed_runtime_changes'],{});L.validate_plan(p)
+  import copy
+  for key in ('source','source_tree','repository'):
+   changed=copy.deepcopy(p);changed['harness'][key]='f'*40
+   with self.assertRaises(L.V.A.Rejected):L.validate_plan(changed)
+ def test_zero_delta_still_rejects_native_or_annex_change(self):
+  inv={'Cargo.lock':'a'*64,'scripts/ci-financial-flow.py':'b'*64}
+  self.assertEqual(L.V.equivalent(inv,inv),[])
+  with self.assertRaises(L.V.A.Rejected):L.V.equivalent(inv,{**inv,'Cargo.lock':'c'*64})
+  with self.assertRaises(L.V.A.Rejected):L.V.equivalent(inv,inv,{})
+
+class WorkflowCustodyTests(unittest.TestCase):
+ def test_exact_p_h_and_credential_cleanup_boundaries(self):
+  w=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
+  self.assertEqual(w.count('fetch_exact P 8f145cf7a4f90346fad22fc1dd2c600aa8f7db02'),1)
+  self.assertEqual(w.count('fetch_exact H 8f145cf7a4f90346fad22fc1dd2c600aa8f7db02'),1)
+  self.assertEqual(w.count('FINANCIAL_ARTIFACT_READ_TOKEN:'),1)
+  runtime=w.split('      - name: Actual synthetic financial runtime',1)[1]
+  self.assertNotIn('github.token',runtime);self.assertIn('env -i PATH=',runtime)
+  self.assertIn("if: always() && steps.mode.outputs.gate == 'financial-semantic-reuse'",runtime)
+  self.assertIn('launch_adapter.py" cleanup "${GITHUB_WORKSPACE}/source"',runtime)
+ def test_mandatory_launcher_tests_and_no_native_smoke(self):
+  w=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
+  self.assertIn("unittest discover -s source/scripts/financial-runtime-reuse -p 'test_*.py'",w)
+  smoke=w.split('      - name: Pre-runtime trusted cleanup smoke',1)[1].split('      - name:',1)[0]
+  self.assertIn('launch_adapter.py" cleanup',smoke);self.assertNotIn('pristine-setup',smoke);self.assertNotIn(' run ',smoke)
+

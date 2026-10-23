@@ -223,12 +223,12 @@ def exact_source(sha):
             'source', 'source_commit')
     require(checked(['git', 'status', '--porcelain', '--untracked-files=all'], 'source', limit=65536) == b'',
             'source', 'dirty_source')
-    require((HERE / 'qualification-gate-mode').read_bytes() == b'financial-ui\n', 'source', 'gate_mode')
+    require((HERE / 'qualification-gate-mode').read_bytes() in (b'financial-ui\n',b'financial-semantic\n'), 'source', 'gate_mode')
 
 
 BUILD_LOG_LIMIT = 64 * 1024
 BUILD_ENV_KEYS = frozenset(('PATH', 'HOME', 'CARGO_HOME', 'CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS',
-    'CARGO_INCREMENTAL', 'RUSTUP_HOME', 'RUSTFLAGS', 'WHOLEPACT_BUILD_JOBS',
+    'CARGO_INCREMENTAL', 'RUSTUP_HOME', A.MODE_ENV, 'WHOLEPACT_BUILD_JOBS',
     'WHOLEPACT_SQLCIPHER_PREFIX', 'SQLCIPHER_LIB_DIR', 'SQLCIPHER_INCLUDE_DIR',
     'SQLCIPHER_STATIC', 'PKG_CONFIG_ALL_STATIC', 'PKG_CONFIG_PATH',
     'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_TERMINAL_PROMPT'))
@@ -421,6 +421,73 @@ def build_recipe(name):
     return args
 
 
+def select_build_environment(environment, name, profile):
+    require(name in FEATURES and profile in (A.PIXEL_PROFILE,A.SEMANTIC_PROFILE), 'compile','artifact_profile')
+    require(type(environment) is dict and set(environment)<=BUILD_ENV_KEYS
+            and all(type(value) is str for value in environment.values()), 'compile','build_environment')
+    require(A.MODE_ENV not in environment or environment[A.MODE_ENV] in
+            ('production','observed-pixel','observed-semantic'), 'compile','build_environment')
+    # Always explicitly reset production/setup; never inherit an observed mode.
+    selected=dict(environment)
+    selected[A.MODE_ENV]=A.recipe(profile)['cfg_delivery']['artifact_modes'][name]
+    return selected
+
+
+def validate_compiler_cfg(raw, name, target, profile):
+    """Verify actual Cargo script output, including fresh/cached script records.
+
+    This never trusts filenames or binary inequality as proof of cfg selection.
+    Cargo's exact-source custom-build records bind package IDs to script paths.
+    """
+    require(name in FEATURES and profile in (A.PIXEL_PROFILE,A.SEMANTIC_PROFILE), 'compile','artifact_profile')
+    delivery=A.recipe(profile)['cfg_delivery']
+    expected=set(delivery['artifact_script_crates'][name])
+    manifests={str(REPO/'crates'/crate/'Cargo.toml'):crate for crate in A.CFG_CRATES}
+    packages={};outputs=[]
+    for line in raw.splitlines():
+        require(len(line)<=2*1024*1024, 'compile','record_limit')
+        try:row=json.loads(line)
+        except (ValueError,UnicodeDecodeError):continue
+        if type(row) is not dict:continue
+        manifest=row.get('manifest_path')
+        if row.get('reason')=='compiler-artifact':
+            item=row.get('target',{})
+            if type(item) is not dict or item.get('kind')!=['custom-build']:continue
+            source=item.get('src_path')
+            require(type(manifest) is str and type(source) is str, 'compile','artifact_profile')
+            local=pathlib.Path(manifest).is_relative_to(REPO) or pathlib.Path(source).is_relative_to(REPO)
+            if not local:continue
+            # No unreviewed source-local script may silently expand the scope.
+            require(manifest in manifests, 'compile','artifact_profile')
+            crate=manifests[row['manifest_path']];package=row.get('package_id')
+            require(crate in expected and type(package) is str and package and package not in packages
+                    and crate not in packages.values()
+                    and item.get('name')=='build-script-build'
+                    and item.get('src_path')==str(REPO/'crates'/crate/'build.rs'), 'compile','artifact_profile')
+            packages[package]=crate
+        elif row.get('reason')=='build-script-executed':
+            outputs.append(row)
+    require(set(packages.values())==expected, 'compile','artifact_profile')
+    seen=set()
+    for row in outputs:
+        cfgs=row.get('cfgs');package=row.get('package_id')
+        require(type(package) is str and package and type(cfgs) is list
+                and all(type(cfg) is str for cfg in cfgs), 'compile','artifact_profile')
+        if package not in packages:
+            require(not any(cfg.startswith('wholepact_financial_') for cfg in cfgs), 'compile','artifact_profile')
+            continue
+        require(package not in seen and cfgs==delivery['effective_cfgs'][name]
+                and row.get('linked_libs')==[] and row.get('linked_paths')==[] and row.get('env')==[],
+                'compile','artifact_profile')
+        out=row.get('out_dir')
+        require(type(out) is str, 'compile','artifact_path')
+        directory=pathlib.Path(out)
+        require(directory.is_absolute() and directory.is_dir() and not directory.is_symlink()
+                and directory.resolve(strict=True).is_relative_to(target.resolve(strict=True)), 'compile','artifact_path')
+        seen.add(package)
+    require(seen==set(packages), 'compile','artifact_profile')
+
+
 def export_compiled_artifacts(artifacts, sha):
     # Host-only output established before any container/fixture starts. This
     # directory is never mounted into a container. No environment dump or logs.
@@ -457,7 +524,7 @@ def export_compiled_artifacts(artifacts, sha):
     destination.mkdir(mode=0o700, exist_ok=False)
     bundle = destination / 'build.tar'
     try:
-        A.export_bundle(artifacts, bundle, producer, inventory)
+        A.export_bundle(artifacts, bundle, producer, inventory,I.profile())
         exact_source(sha)
         digest = hashlib.sha256()
         with bundle.open('rb') as stream:
@@ -465,7 +532,7 @@ def export_compiled_artifacts(artifacts, sha):
         output = os.environ['GITHUB_OUTPUT']
         with open(output, 'a', encoding='ascii') as stream:
             stream.write('artifact_bundle_ready=true\n')
-        emit('BUILD_BUNDLE', dict(source=sha, source_tree=tree, run_id=producer['run_id'],
+        emit('BUILD_BUNDLE', dict(source=sha, source_tree=tree,profile=I.profile(), run_id=producer['run_id'],
             attempt=producer['attempt'], sha256=digest.hexdigest(), size=bundle.stat().st_size,
             artifacts=list(A.NAMES), pre_credential=True, reused=False, uploaded=False))
     except Exception:
@@ -489,10 +556,10 @@ def build_inputs(root, sha):
             'toolchain','toolchain_version')
     exact_source(sha);env=encrypted_build_environment(root,env)
     for name in I.ARTIFACT_FILES:
-        exact_source(sha);selected=dict(env);setup=name=='pristine-setup'
-        if name=='coordinator-observed':selected['RUSTFLAGS']='--cfg wholepact_financial_ci --cfg wholepact_financial_external_ci'
+        exact_source(sha);selected=select_build_environment(env,name,I.profile());setup=name=='pristine-setup'
         args=build_recipe(name)
         raw=build_command(name,args,'compile',selected,seconds=1800,limit=32*1024*1024)
+        validate_compiler_cfg(raw,name,root/'target',I.profile())
         artifact=select_artifact(raw,name,root/'target')
         shutil.copyfile(artifact,inputs/name);(inputs/name).chmod(0o555)
         if setup:
@@ -646,7 +713,10 @@ FIXTURE_REASONS = frozenset(('Setup','Unclassified','Deadline','ChildObservation
 
 
 class RuntimeRecords:
-    def __init__(self,mode):self.mode,self.first_failure,self.result,self.location,self.fixture_diagnostic=mode,None,None,None,None
+    def __init__(self,mode,expected_profile=None):
+        self.expected_profile=P.C.EXTERNAL_PROFILE if expected_profile is None else expected_profile
+        require(self.expected_profile in (P.C.EXTERNAL_PROFILE,P.C.SEMANTIC_PROFILE),'projection','result_schema')
+        self.mode,self.first_failure,self.result,self.location,self.fixture_diagnostic=mode,None,None,None,None;self.progress_diagnostic=None;self.host_diagnostic=None;self.native_failure_diagnostic=None;self.observation_timing_diagnostic=None;self.host_exit_diagnostic=None;self.input_diagnostic=None
     def __call__(self,line):
         require(type(line) is bytes and 0<len(line)<=8192 and self.result is None,'projection','result_records')
         if line.startswith(b'CI_FINANCIAL_LOCATION '):
@@ -668,16 +738,69 @@ class RuntimeRecords:
                     and type(value['process_cleanup']) is bool and type(value['root_cleanup']) is bool,
                     'projection','result_schema')
             self.fixture_diagnostic=value;emit('FIXTURE_DIAGNOSTIC',value)
+        elif line.startswith(b'CI_FINANCIAL_INPUT_DIAGNOSTIC '):
+            require(self.input_diagnostic is None,'projection','result_schema')
+            value=loads(line[len(b'CI_FINANCIAL_INPUT_DIAGNOSTIC '):])
+            try:P.C.validate_input_diagnostic(value)
+            except Exception:raise Failure('projection','result_schema') from None
+            self.input_diagnostic=value
+        elif line.startswith(b'CI_FINANCIAL_PROGRESS_DIAGNOSTIC '):
+            require(self.progress_diagnostic is None,'projection','result_schema')
+            value=loads(line[len(b'CI_FINANCIAL_PROGRESS_DIAGNOSTIC '):])
+            try:P.C.validate_progress_diagnostic(value)
+            except Exception:raise Failure('projection','result_schema') from None
+            # Hold until a failed RESULT; never publish this as success evidence.
+            self.progress_diagnostic=value
+        elif line.startswith(b'CI_FINANCIAL_HOST_DIAGNOSTIC '):
+            require(self.host_diagnostic is None and self.result is None,'projection','result_schema')
+            value=loads(line[len(b'CI_FINANCIAL_HOST_DIAGNOSTIC '):])
+            try:P.C.validate_host_diagnostic(value)
+            except Exception:raise Failure('projection','result_schema') from None
+            self.host_diagnostic=value
+        elif line.startswith(b'CI_FINANCIAL_NATIVE_FAILURE_DIAGNOSTIC '):
+            require(self.expected_profile==P.C.SEMANTIC_PROFILE and self.native_failure_diagnostic is None,'projection','result_schema')
+            value=loads(line[len(b'CI_FINANCIAL_NATIVE_FAILURE_DIAGNOSTIC '):])
+            try:P.C.validate_native_failure_diagnostic(value)
+            except Exception:raise Failure('projection','result_schema') from None
+            self.native_failure_diagnostic=value
+        elif line.startswith(b'CI_FINANCIAL_OBSERVATION_TIMING_DIAGNOSTIC '):
+            require(self.observation_timing_diagnostic is None,'projection','result_schema')
+            value=loads(line[len(b'CI_FINANCIAL_OBSERVATION_TIMING_DIAGNOSTIC '):])
+            try:P.C.validate_observation_timing_diagnostic(value)
+            except Exception:raise Failure('projection','result_schema') from None
+            # Cached timing is failure context only, never authority or success evidence.
+            self.observation_timing_diagnostic=value
+        elif line.startswith(b'CI_FINANCIAL_HOST_EXIT_DIAGNOSTIC '):
+            require(self.expected_profile==P.C.SEMANTIC_PROFILE and self.host_exit_diagnostic is None,'projection','result_schema')
+            value=loads(line[len(b'CI_FINANCIAL_HOST_EXIT_DIAGNOSTIC '):])
+            try:P.C.validate_host_exit_diagnostic(value)
+            except Exception:raise Failure('projection','result_schema') from None
+            self.host_exit_diagnostic=value
         elif line.startswith(b'CI_FINANCIAL_CANDIDATE '):
             value=loads(line[len(b'CI_FINANCIAL_CANDIDATE '):])
-            expected=dict(schema=1,profile=P.C.EXTERNAL_PROFILE,native_oracle_verified=True,
+            expected=dict(schema=1,profile=self.expected_profile,native_oracle_verified=True,
                           fixture_cleaned=True,display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)
             require(type(value) is dict and value==expected and all(type(value[k]) is type(v) for k,v in expected.items())
-                    and self.first_failure is None and self.location is None and self.fixture_diagnostic is None,'projection','result_schema');self.result=value
+                    and self.first_failure is None and self.location is None and self.fixture_diagnostic is None
+                    and self.progress_diagnostic is None and self.host_diagnostic is None and self.native_failure_diagnostic is None and self.observation_timing_diagnostic is None and self.host_exit_diagnostic is None and self.input_diagnostic is None,'projection','result_schema');self.result=value
         elif line.startswith(b'CI_FINANCIAL_RESULT '):
             value=loads(line[len(b'CI_FINANCIAL_RESULT '):])
-            require(type(value) is dict and value==P.failure(value.get('code')),'projection','result_schema')
-            self.first_failure=value;self.result=value;emit('FAILURE',value)
+            require(type(value) is dict and value==P.failure(value.get('code'),self.expected_profile),'projection','result_schema')
+            require(self.input_diagnostic is None or value.get('code')=='input_budget','projection','result_schema')
+            self.first_failure=value;self.result=value
+            if self.input_diagnostic is not None:
+                try:emit('INPUT_DIAGNOSTIC',self.input_diagnostic)
+                except Exception:pass  # Preserve the original failure and cleanup.
+            if self.progress_diagnostic is not None:emit('PROGRESS_DIAGNOSTIC',self.progress_diagnostic)
+            if self.host_diagnostic is not None:emit('HOST_DIAGNOSTIC',self.host_diagnostic)
+            if self.native_failure_diagnostic is not None:emit('NATIVE_FAILURE_DIAGNOSTIC',self.native_failure_diagnostic)
+            if self.observation_timing_diagnostic is not None:
+                try:emit('OBSERVATION_TIMING_DIAGNOSTIC',self.observation_timing_diagnostic)
+                except Exception:pass  # A best-effort diagnostic cannot replace the original failure.
+            if self.host_exit_diagnostic is not None:
+                try:emit('HOST_EXIT_DIAGNOSTIC',self.host_exit_diagnostic)
+                except Exception:pass
+            emit('FAILURE',value)
         else:raise Failure('projection','result_records')
     def finish(self,status):
         require(self.result is not None,'projection','result_records')
@@ -687,7 +810,7 @@ class RuntimeRecords:
 
 def run_case(mode, image_id, token, sha):
     name = 'wp-financial-' + token + '-' + mode
-    records = RuntimeRecords(mode)
+    records = RuntimeRecords(mode,I.profile())
     removed, create_pending, result, first = False, False, None, None
     try:
         require(name not in names(token), 'container', 'container_identity')
@@ -892,7 +1015,8 @@ def main():
     try:
         if not cleanup_only:
             exact_source(sha)
-            emit('SOURCE',dict(source=sha,profile=P.C.EXTERNAL_PROFILE,toolchain='1.99.0',container_base=BASE,
+            emit('SOURCE',dict(source=sha,profile=I.profile(),
+                semantic_assisted_host_observation=I.profile()==P.C.SEMANTIC_PROFILE,toolchain='1.99.0',container_base=BASE,
                 cargo_lock_sha256=hashlib.sha256((REPO/'Cargo.lock').read_bytes()).hexdigest(),
                 financial_session_seconds=1800,original_fixture_ceiling_seconds=900,
                 active_financial_witnesses=7,retained_inert_witnesses=6,external_native_witness=True,
@@ -913,7 +1037,9 @@ def main():
         try:shutil.rmtree(root)
         except OSError:clean=False
         passed=passed and clean and first is None
-        emit('RESULT',dict(passed=passed,cleanup_only=cleanup_only,source=sha,profile=P.C.EXTERNAL_PROFILE,
+        emit('RESULT',dict(passed=passed,cleanup_only=cleanup_only,source=sha,profile=I.profile(),
+            semantic_assisted_host_observation=I.profile()==P.C.SEMANTIC_PROFILE,
+            pixel_only_ui_verified=passed and not cleanup_only and I.profile()==P.C.EXTERNAL_PROFILE,
             synthetic_external_witness_flow_verified=passed and not cleanup_only,
             synthetic_full_native_verified=False,integrated_witness_services=7,retained_inert_witnesses=6,
             containers_and_image_removed=clean,public_chain_verified=False,dispatch_requested=False,

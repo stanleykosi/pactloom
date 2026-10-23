@@ -13,16 +13,19 @@ import stat
 import zipfile
 
 HERE=pathlib.Path(__file__).resolve().parent
-PARSER_SHA='d24433f973c77d34e6d1f5c299cc1c7d00a7d024584bbfcb3d45e077c0e92f5d'
+PARSER_SHA='c6d12ee5a132083ee97f5aee7fcda3b3dc270a794b90d3d65e18b271c3426682'
 # Source-bound callback executes verified parser bytes without bytecode.
 assert hashlib.sha256((HERE/'producer_artifacts.py').read_bytes()).hexdigest()==PARSER_SHA
 A=_reviewed_parser()
+QUALIFICATION_PROFILE='coordinated-financial-rendered-host-semantic-v1'
+POLICY='p35-crate-local-cfg-reuse-v2'
 
-PRODUCER=dict(repository='stanleykosi/pactloom',source='f98de7fd79389ce340343292086c852825f59b60',
- source_tree='1b4df59f4e2e664cad33440a947645e66424e410',run_id=39704950389,attempt=1)
-JOB_ID=119582700875
+PRODUCER=dict(repository='stanleykosi/pactloom',source='8f145cf7a4f90346fad22fc1dd2c600aa8f7db02',
+ source_tree='3f29b3df7560b0a7fc2dee20b20dcf8ea9a61e59',run_id=39908531507,attempt=1)
+JOB_ID=120265923196
 # Exact existing runtime files, NOT a suffix/directory exclusion. Contract,
 # output projection, fixture profile/scenario, image and orchestration are fixed.
+# Original eight paths unchanged. No diagnostics annex is reviewed for P35.
 RUNTIME_ONLY=frozenset((
  'scripts/ci-financial-container.py',
  'scripts/ci-financial-fixture.py',
@@ -68,12 +71,12 @@ def inventory_checkout(root,commit):
     return tree,result
 
 
-def equivalent(producer,current):
+def equivalent(producer,current,diagnostic_compatibility=None):
     A.closure(producer);A.closure(current)
     require(set(producer)==set(current),'tracked_path_set')
     changed=sorted(name for name in producer if producer[name]!=current[name])
+    require(diagnostic_compatibility is None,'diagnostic_annex_not_reviewed')
     require(set(changed)<=RUNTIME_ONLY,'native_or_unreviewed_input_changed')
-    # Empty change is valid; it does not imply runtime acceptance.
     return changed
 
 
@@ -92,12 +95,17 @@ def archive_digest(archive,pins):
     return digest
 
 
-def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventory,harness):
+def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventory,harness,diagnostic_compatibility=None,*,binding=None,job=None):
     """Pins are independently reviewed API/log facts; never manifest-supplied.
 
     ZIP must contain exactly build.tar with independently pinned bytes.
     Both archive and TAR are checked; no extraction or execution occurs.
     """
+    validate_binding(binding)
+    require(harness==binding['harness'],'harness_binding')
+    authenticate_metadata(run,artifact,job)
+    require(pins==ARTIFACT_PINS,'exact_artifact_pins')
+    require(hashlib.sha256(A.canonical(producer_inventory)).hexdigest()==SOURCE_INVENTORY_SHA,'producer_inventory_pin')
     require(type(pins) is dict and set(pins)=={'artifact_id','archive_sha256','bundle_sha256'},'pin_set')
     require(type(pins['artifact_id']) is int and pins['artifact_id']>0,'artifact_pin')
     for key in ('archive_sha256','bundle_sha256'):
@@ -112,7 +120,7 @@ def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventor
         and run.get('repository',{}).get('full_name')==PRODUCER['repository'],'producer_run')
     # A runtime-failed job is expected and does not invalidate its pre-fixture build.
     require(run.get('conclusion') in ('failure','success'),'producer_terminal')
-    name='financial-build-39704950389-1-'+PRODUCER['source']
+    name='financial-build-39908531507-1-'+PRODUCER['source']
     origin=artifact.get('workflow_run',{})
     require(artifact.get('id')==pins['artifact_id'] and type(artifact.get('id')) is int
         and artifact.get('name')==name and artifact.get('expired') is False
@@ -122,17 +130,53 @@ def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventor
     with pathlib.Path(bundle).open('rb') as stream:bundle_digest=hashlib.file_digest(stream,'sha256').hexdigest()
     require(bundle_digest==pins['bundle_sha256'],'bundle_digest')
     # Original full closure stays exact, including all old runtime files.
-    original=A.verify_bundle(bundle,PRODUCER,producer_inventory)
+    original=A.verify_bundle(bundle,PRODUCER,producer_inventory,QUALIFICATION_PROFILE)
     require(type(harness) is dict and set(harness)=={'repository','source','source_tree'},'harness_identity')
     require(harness['repository']==PRODUCER['repository'] and
         A.COMMIT.fullmatch(harness['source']) is not None and
         A.COMMIT.fullmatch(harness['source_tree']) is not None,'harness_identity')
-    changes=equivalent(producer_inventory,current_inventory)
+    changes=equivalent(producer_inventory,current_inventory,diagnostic_compatibility)
+    require({name:current_inventory[name] for name in changes if name in RUNTIME_ONLY}==binding['reviewed_runtime_changes'],'reviewed_changes_binding')
     require(not changes or (harness['source']!=PRODUCER['source'] and
         harness['source_tree']!=PRODUCER['source_tree']),'contradictory_harness_identity')
-    return dict(schema=1,native_producer=PRODUCER.copy(),harness=harness.copy(),
+    evidence=dict(schema=6,policy=POLICY,qualification_profile=QUALIFICATION_PROFILE,native_producer=PRODUCER.copy(),harness=harness.copy(),
         original_manifest=original,current_source_inventory=current_inventory.copy(),
-        permitted_runtime_changes=changes,artifact_pins=pins.copy(),
+        permitted_runtime_changes=[name for name in changes if name in RUNTIME_ONLY],
+        permitted_diagnostic_changes=[name for name in changes if name not in RUNTIME_ONLY],artifact_pins=pins.copy(),
         native_binaries_reused=True,native_binaries_freshly_compiled=False,
         runtime_verified=False,synthetic_full_native_verified=False,
         public_chain_verified=False,dispatch_requested=False)
+    if diagnostic_compatibility is not None:evidence['diagnostic_compatibility']=diagnostic_compatibility.copy()
+    return evidence
+
+ARTIFACT_PINS={'archive_sha256': 'b002f2711e0a12fb6d808968d7e99dbba05230ff545d83b2123c0475e5aef52c', 'artifact_id': 12483805195, 'bundle_sha256': '69b1740da15bdfe45ac84f9f0c4306713882f8b1cacb36b4d97881905df65f5a'}
+API_PINS={'artifact': '2e147633febe57627bbcacc1c7d8d7fe74ee0df16f664089e61d1ccbefa84c79', 'job': '8245c1b9981fdeb244773dbed1fcb85aa2a815f8d9f6e5262b80506f7ecc7565', 'run': '54ba50da8b22778c9a6d4988491ebbfcfd70393d17157d208700bfaccb1d7496'}
+SOURCE_INVENTORY_SHA='2edf0bced3865eb4e1ae9e376c5a4261b46ac5f9a782957aec359315e20a1301'
+
+
+def authenticate_metadata(run,artifact,job):
+    for name,value in [('run',run),('artifact',artifact),('job',job)]:
+        require(type(value) is dict and hashlib.sha256(A.canonical(value)).hexdigest()==API_PINS[name],'api_custody_'+name)
+    require(artifact['node_id']=='MDg6QXJ0aWZhY3QxMjQ4MzgwNTE5NQ==','artifact_node')
+    require(run['head_commit']['tree_id']==PRODUCER['source_tree'],'producer_tree')
+    require(job['id']==JOB_ID and job['run_id']==PRODUCER['run_id'],'producer_job')
+    for name in ('Preserve exact credential-free compiled financial bundle','Verify financial containers, temporary images and build cache removed'):
+        rows=[s for s in job['steps'] if s['name']==name]
+        require(len(rows)==1 and rows[0]['conclusion']=='success','producer_step')
+
+
+def validate_binding(plan):
+    keys={'version','policy','qualification_profile','manifest_version','build_recipe_version','producer','harness','artifact_pins','api_pins','producer_inventory_sha256','parser_sha256','reviewed_runtime_changes'}
+    require(type(plan) is dict and set(plan)==keys,'binding_schema')
+    require(type(plan['version']) is int and plan['version']==6 and plan['policy']==POLICY,'binding_policy')
+    require(type(plan['manifest_version']) is int and plan['manifest_version']==2 and type(plan['build_recipe_version']) is int and plan['build_recipe_version']==2,'recipe_version')
+    require(plan['qualification_profile']==QUALIFICATION_PROFILE and type(plan['producer']) is dict and A.canonical(plan['producer'])==A.canonical(PRODUCER),'binding_producer')
+    require(plan['artifact_pins']==ARTIFACT_PINS and plan['api_pins']==API_PINS and plan['producer_inventory_sha256']==SOURCE_INVENTORY_SHA and plan['parser_sha256']==PARSER_SHA,'binding_pins')
+    h=plan['harness']
+    require(type(h) is dict and set(h)=={'repository','source','source_tree'} and h['repository']==PRODUCER['repository'] and all(type(h[k]) is str and A.COMMIT.fullmatch(h[k]) for k in ('source','source_tree')),'harness_unbound')
+    changes=plan['reviewed_runtime_changes']
+    require(type(changes) is dict,'reviewed_change_set')
+    if changes:A.closure(changes)
+    else:require(A.canonical(h)==A.canonical({k:PRODUCER[k] for k in ('repository','source','source_tree')}),'empty_delta_requires_producer_harness')
+    require(set(changes)<=RUNTIME_ONLY,'reviewed_change_set')
+    return plan
