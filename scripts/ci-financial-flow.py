@@ -81,7 +81,7 @@ class FullFlow:
         self.done=set();self.filled=set();self.scrolls={};self.actions=0;self.host_lines=0
         self.last_ocr=0;self.ocr_delay=1_000_000_000;self.last_capture=None;self.challenges=set();self.host_paths=set()
         self.reviewer_index=0;self.continue_index=0;self.result_index=0
-        self.records=[];self.pending_host=None;self.location=None
+        self.records=[];self.pending_host=None;self.location=None;self.pending_selection=None
         self.startup_index=0;self.startup_issued=None;self.pending_startup=None
         self.startup_waiting=False;self.startup_input_attempted=False
         self.commands_instruction_observed=False;self.commands_instruction_context=None
@@ -155,6 +155,19 @@ class FullFlow:
         w=self.find(latest,tag,owner);C.require(w is not None and w['enabled'],'input_disabled')
         self.done.add(key);self.actions+=1;C.input_budget(self.actions<=512,'actions',self.actions)
         self.controller.click(*self.native.point(latest,tag,owner));self.controller.wait_render_progress()
+    def selection_handoff_pending(self,s):
+        if self.pending_selection is None:return False
+        key=(s['phase'],s['subphase'],s['owner'])
+        if key!=self.pending_selection:
+            self.pending_selection=None;return False
+        # A real outgoing selection was already sent. Its painted click frame
+        # precedes the native intent tail; it grants no second action or retry.
+        # Preserve restrictive input guards and wait only through fresh snapshots.
+        h=s['host_observation']
+        C.require(not(s['secret_input'] or s['host_input']) and h['context_valid']
+                  and h['entry']=='Idle' and self.pending_host is None
+                  and self.host_prepared is None,'input_phase')
+        return True
     def used(self,s,tag,owner):return self.key(s,tag,owner)+(None,) in self.done
     def scroll(self,s,body,owner,direction='down'):
         w=self.find(s,body,owner)
@@ -633,6 +646,7 @@ class FullFlow:
                     if audited:self.operator.signal(role,'audit_stop',audited)
                 retired=next((r for r in self.records if r['kind']=='SignerMilestone' and r['facts']=={'owner':'Signer1','step':'SigningRetired'}),None)
                 if retired:self.operator.signal('Signer2','start',retired)
+            if self.selection_handoff_pending(s):continue
             if self.pump_host(s):continue
             if not self.host_startup_complete:
                 # Native startup is independent of Signer selection. Do not
@@ -702,10 +716,10 @@ class FullFlow:
                             if self.operator is not None and action in ('ConfigureFinancialSetup','Configure'):
                                 if not self.operator.parked(target):continue
                                 self.operator.financial_gate(target,self.records)
-                            self.press(s,action,target);selected=True;break
+                            self.press(s,action,target);self.pending_selection=phase_key;selected=True;break
                     if selected:continue
                 if phase in RESULT_PHASES and self.find(s,'SelectNextV3',owner) and not self.used(s,'SelectNextV3',owner):
-                    self.press(s,'SelectNextV3',owner);continue
+                    self.press(s,'SelectNextV3',owner);self.pending_selection=phase_key;continue
                 if not self.wait_initial_pair_after_sweep(s,target):self.idle_scan(s)
             elif phase=='Waiting':self.idle_scan(s)
             # All other phases wait actual observations under original deadline.
