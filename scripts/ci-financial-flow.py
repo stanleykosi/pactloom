@@ -552,6 +552,9 @@ class FullFlow:
         line=self.expected_host_line(suffix)
         if line is None:return False
         self.host_prepared=(occurrence,line);self.host_deferred=None
+        # Capture may admit a newer context than s. Never dispatch prepared
+        # input against that stale pre-capture snapshot; re-observe normally.
+        if context!=(occurrence[2],occurrence[1]):return True
         return self.pump_host(s)
     def run(self):
         while True:
