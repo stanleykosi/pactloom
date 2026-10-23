@@ -217,7 +217,7 @@ impl CoordinatedRedisclosureReadV1 {
         })
     }
 }
-
+impl CoordinatedRediscloseV1 {
     pub(crate) fn facts(&self) -> &SignerV3RediscloseFactsV1 {
         &self.facts
     }

@@ -67,6 +67,16 @@ def main():
         evidence.append({'path': relative, 'original_kernel_sha256': expected,
                          'current_file_sha256': digest(raw)})
 
+    # A method-body audit cannot detect a missing enclosing impl declaration.
+    # Pin this original declaration and its method containment separately.
+    redisclosure = (signer / 'account/birth/enrollment/roster_v2/prepared_delivery_v3/'
+                    'coordinated_source_entry_v1/coordinated_redisclosure_v1.rs').read_text()
+    assert redisclosure.count('impl CoordinatedRediscloseV1 {') == 1
+    redisclose_impl = function(redisclosure, 'impl CoordinatedRediscloseV1 {')
+    for method in ['fn facts(', 'fn prepared_report(', 'fn original_review_deadline(',
+                   'fn check_current(', 'fn export(']:
+        assert method in redisclose_impl, method
+
     raw = (signer / 'native_ui/durable_construction_v1.rs').read_text()
     old = function(raw, 'pub(crate) fn validate_original(')
     new = function(raw, 'pub(crate) fn validate_coordinated_original(')

@@ -1,14 +1,14 @@
 name: Coordinated handoff lease preflight only
 on:
   push:
-    branches: [checkpoint/handoff-preflight-p50]
+    branches: [checkpoint/handoff-preflight-p50b]
 permissions: {}
 concurrency:
-  group: handoff-preflight-p50
+  group: handoff-preflight-p50b
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/handoff-preflight-p50' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/handoff-preflight-p50b' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -154,7 +154,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/handoff-preflight-p50' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/handoff-preflight-p50b' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
