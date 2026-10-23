@@ -116,3 +116,37 @@ append failure permanently disables further diagnostic attempts; original error
 and cleanup behavior continues. The semantic qualification consumer rejects a
 failure-boundary record as incompatible with success. Legacy pixel and production
 profiles expose neither this diagnostic API nor its output.
+
+### Semantic qualification: original Host failure evidence
+
+Only the existing rendered-Host semantic CI profile additionally retains two
+independent, bounded observations. Production and older pixel profiles have no
+such API or output. Neither record changes custody, authority, clocks, restriction,
+cleanup, or any successful-completion proof.
+
+* Coordinator `HostReapObservation` is neutral and at most once. Its exact facts
+  are `{version:1,context,exit_code,signal}`. Only an original successful Host
+  `waitpid` supplies status: exactly one exit code 0..255 or signal 1..64.
+  `FinishPath`, `RetirementTryReap`, and `DropKillAttempted` identify the actual
+  reap path, not its cause. A kill attempt does not prove delivery or causation;
+  exit 101 does not prove panic. No PID, raw wait word, or new wait is recorded.
+* Host `HostFailureBoundary` is failure-only and at most once. Exact facts are
+  `{version:1,stage,class,relay}`. Required foreground stage/class retain the first
+  locally observed propagated error using finite variant/IO-kind names, never
+  payloads. Nullable `relay` is an independent first local `{stage,class}` from an
+  actual failing relay-pump predicate before its unchanged poison and owned
+  cleanup. Fixed checkpoints distinguish the original Coordinator and Signer
+  lifetime checks, receive/send, protocol validation and original clock checks.
+  Neither slot establishes cross-thread or global first cause. The relay slot
+  alone cannot emit a record. A Host failure record disqualifies successful
+  qualification; a reap record alone neither qualifies nor disqualifies it.
+
+Failure/reap sites only write PID-bound atomics. The existing private actor writer
+attempts each record once at safe boundaries; uncertain/failed appends are not
+retried. Coordinator drainage precedes, never splits, the rendered-view/snapshot
+pair and also follows the original runner/join. Host drainage follows its original
+runner cleanup/join, before main discards the result. No IO is added in reap,
+Drop, poison, or abort. If an actor is killed, panics, never returns from join, or
+cannot append, its observation is unavailable, not evidence of no failure. The
+original byte/record/deadline and private-file limits remain unchanged. Public
+failure reporting projects only the validated finite observations, independently.

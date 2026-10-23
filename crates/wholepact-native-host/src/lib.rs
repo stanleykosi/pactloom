@@ -4,6 +4,8 @@
 mod authority;
 mod backup;
 mod files;
+#[cfg(all(wholepact_financial_rendered_host_semantic_ci, feature="coordinated-financial-workflow-v1", target_os="linux"))]
+mod financial_ci_host_failure;
 #[cfg(feature = "financial-runtime")]
 mod financial_backup;
 #[cfg(feature = "financial-runtime")]

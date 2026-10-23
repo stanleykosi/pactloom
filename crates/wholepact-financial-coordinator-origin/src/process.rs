@@ -422,6 +422,8 @@ impl DirectChild {
         if rc<0{let e=std::io::Error::last_os_error();return if e.kind()==std::io::ErrorKind::Interrupted{Ok(false)}else{Err(e)};}
         if rc!=self.peer.pid{return Err(rejected("wrong retirement reap"));}
         self.reaped=true;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        crate::financial_ci_host_diagnostics::reap(self.peer.role,crate::financial_ci_host_diagnostics::ReapContext::RetirementTryReap,status);
         #[cfg(wholepact_financial_ci)]
         crate::financial_observer::reaped(self.peer.role,self.peer.pid,status)?;
         #[cfg(wholepact_bootstrap_ci)]
@@ -451,6 +453,8 @@ impl DirectChild {
             let rc = unsafe { libc::waitpid(self.peer.pid, &mut status, libc::WNOHANG) };
             if rc == self.peer.pid {
                 self.reaped = true;
+                #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+                crate::financial_ci_host_diagnostics::reap(self.peer.role,crate::financial_ci_host_diagnostics::ReapContext::FinishPath,status);
                 #[cfg(wholepact_financial_ci)]
                 crate::financial_observer::reaped(self.peer.role,self.peer.pid,status)?;
                 #[cfg(wholepact_bootstrap_ci)]
@@ -502,6 +506,8 @@ impl DirectChild {
             let rc = unsafe { libc::waitpid(self.peer.pid, &mut status, 0) };
             if rc == self.peer.pid {
                 self.reaped = true;
+                #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+                crate::financial_ci_host_diagnostics::reap(self.peer.role,crate::financial_ci_host_diagnostics::ReapContext::DropKillAttempted,status);
                 #[cfg(wholepact_bootstrap_ci)]
                 crate::ci::reaped(self.peer.role, self.peer.pid, status);
                 #[cfg(wholepact_delivery_ci)]

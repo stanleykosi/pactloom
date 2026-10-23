@@ -27,6 +27,24 @@ use wholepact_financial_coordinator_origin::{
 #[cfg(wholepact_financial_ci)]
 use wholepact_financial_coordinator_origin::FinancialCiHostMilestoneV1;
 
+// Evaluate once, retain the exact original Result and failure ordering.
+macro_rules! observed {
+    ($stage:ident,$expression:expr) => {{
+        let result=$expression;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error)=&result {crate::financial_ci_host_failure::native(crate::financial_ci_host_failure::Stage::$stage,error);}
+        result
+    }};
+}
+macro_rules! observed_io {
+    ($stage:ident,$expression:expr) => {{
+        let result=$expression;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error)=&result {crate::financial_ci_host_failure::io(crate::financial_ci_host_failure::Stage::$stage,error);}
+        result
+    }};
+}
+
 /// Test-build observation only: no values, authority or workflow decisions.
 #[cfg(wholepact_financial_ci)]
 fn observe_host_milestone(step: FinancialCiHostMilestoneV1) -> Result<()> {
@@ -79,17 +97,17 @@ fn open_original_financial_foreground_selected_v1(
 > {
     use OriginalForegroundOpenFailureV1::Joined;
     // Irreversible obligation precedes EVERY fallible custody extraction.
-    Terminal::require_coordinated_restriction().map_err(before_monitor_failure)?;
-    let (tty, restriction) = origin.take_host_terminal_custody()
+    observed!(TerminalSetup,Terminal::require_coordinated_restriction()).map_err(before_monitor_failure)?;
+    let (tty, restriction) = observed_io!(OriginalCustody,origin.take_host_terminal_custody())
         .map_err(|error| before_monitor_failure(Error::from(error)))?;
-    let terminal = Terminal::open_coordinated(tty, restriction).map_err(before_monitor_failure)?;
-    let foreground = origin.take_financial_foreground()
+    let terminal = observed!(TerminalSetup,Terminal::open_coordinated(tty, restriction)).map_err(before_monitor_failure)?;
+    let foreground = observed_io!(OriginalCustody,origin.take_financial_foreground())
         .map_err(|error| before_monitor_failure(Error::from(error)))?;
-    let [first, second] = origin.take_original_signer_verifiers()
+    let [first, second] = observed_io!(OriginalCustody,origin.take_original_signer_verifiers())
         .map_err(|error| before_monitor_failure(Error::from(error)))?;
-    let relay = origin.into_financial_workflow_relay()
+    let relay = observed_io!(OriginalCustody,origin.into_financial_workflow_relay())
         .map_err(|error| before_monitor_failure(Error::from(error)))?;
-    let monitor = OwnedHostRelayMonitorV1::start(relay).map_err(before_monitor_failure)?;
+    let monitor = observed!(RelaySetup,OwnedHostRelayMonitorV1::start(relay)).map_err(before_monitor_failure)?;
     let (profile, workspace) = match selected.map(Ok).unwrap_or_else(|| {
         let profile = PathBuf::from(terminal.ask("Existing original Host profile directory (absolute): ")?.as_str());
         let workspace = PathBuf::from(terminal.ask("Existing original dispatcher workspace directory (absolute): ")?.as_str());
@@ -97,19 +115,27 @@ fn open_original_financial_foreground_selected_v1(
         Ok((profile, workspace))
     }) {
         Ok(paths) => paths,
-        Err(error) => return Err(Joined(monitor.abort_and_join(error))),
+        Err(error) => {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_host_failure::native(crate::financial_ci_host_failure::Stage::StartupSelection,&error);
+            return Err(Joined(monitor.abort_and_join(error)));
+        },
     };
     // The sole relay already progresses while the original foreground opens
     // its real encrypted Host and waits for actual human TTY responses.
-    let host = match Host::open_workspace_dispatcher_registered_v4(
+    let host = match observed!(HostOpen,Host::open_workspace_dispatcher_registered_v4(
         terminal, &profile, &workspace, false,
-    ) {
+    )) {
         Ok(host) => host,
         Err(error) => return Err(Joined(monitor.abort_and_join(error))),
     };
+    #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
     let commands = read_selection::<SessionCommandsV1>(&host,
-        "Exact immutable command keys JSON file {version:1,bind_key,intake_keys:[first,second],completion_key} (absolute): ")
-        .and_then(|commands| { commands.check()?; Ok(commands) });
+        "Exact immutable command keys JSON file {version:1,bind_key,intake_keys:[first,second],completion_key} (absolute): ");
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    let commands = super::durable_financial_commands_v1::read_session_commands_observed(&host,
+        "Exact immutable command keys JSON file {version:1,bind_key,intake_keys:[first,second],completion_key} (absolute): ");
+    let commands=commands.and_then(|commands| { observed!(CommandsCheck,commands.check())?; Ok(commands) });
     let commands = match commands {
         Ok(commands) => commands,
         Err(error) => {
@@ -135,10 +161,10 @@ impl OpenedOriginalFinancialHostV1 {
     fn complete_and_join(self, close: HostNormalCloseV1, operation: &str) -> std::io::Result<()> {
         let Self { monitor, host, workspace: _, commands: _ } = self;
         drop(host);
-        if let Err(error) = close.acknowledge_disposed() {
+        if let Err(error) = observed_io!(NormalClose,close.acknowledge_disposed()) {
             return Err(joined_runner_failure(monitor.abort_and_join(error.into()), Some(operation)));
         }
-        monitor.complete_and_join()
+        observed_io!(NormalClose,monitor.complete_and_join())
     }
 
     pub(super) fn abort_and_join(self, error: Error) -> HostRelayFailureV1 {
@@ -159,7 +185,7 @@ impl FirstOriginalAdmissionSetupV1 {
     pub(super) fn begin<'host>(
         self, owner: &'host OpenedOriginalFinancialHostV1,
     ) -> Result<FirstOriginalAdmissionAttemptV1<'host>> {
-        owner.host.terminal.message("Select original reviewer 1 of 2 for its separate closed V3 admission.\n")?;
+        observed!(Reviewer1Message,owner.host.terminal.message("Select original reviewer 1 of 2 for its separate closed V3 admission.\n"))?;
         let endpoint = wait_original_coordinated_pair_endpoint_v1(&self.foreground, SignerContinueRoleV1::Signer1)?;
         let admission = begin_original_coordinated_admission_v1(
             &owner.host, &owner.workspace, None, self.first, endpoint,
@@ -669,13 +695,17 @@ pub fn run_coordinated_financial_host_v1(origin: HostOriginV1) -> std::io::Resul
             .wait_completed_pair_service()?.complete()
     })();
     match outcome {
-        Err(error) => Err(joined_runner_failure(owner.abort_and_join(restrict_failed_foreground(error)), None)),
+        Err(error) => {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_host_failure::native(crate::financial_ci_host_failure::Stage::LaterWorkflow,&error);
+            Err(joined_runner_failure(owner.abort_and_join(restrict_failed_foreground(error)), None))
+        },
         Ok(completed) => {
             // Disclosure is a separate real Read. Its refusal cannot undo the
             // committed transaction or manufacture a successful shutdown.
             let _disclosure = completed.display_summary();
             let operation = completed.operation.clone();
-            match completed.wait_for_normal_close() {
+            match observed!(NormalClose,completed.wait_for_normal_close()) {
                 Ok(close) => owner.complete_and_join(close, &operation),
                 Err(error) => Err(joined_runner_failure(owner.abort_and_join(restrict_failed_foreground(error)), Some(&operation))),
             }
@@ -699,7 +729,13 @@ fn wait_original_coordinated_pair_endpoint_v1(
         let endpoint = match target {
             SignerContinueRoleV1::Signer1 => foreground.take_v3_pair_endpoint_signer1(),
             SignerContinueRoleV1::Signer2 => foreground.take_v3_pair_endpoint_signer2(),
-        }.map_err(|error| restrict_failed_foreground(error.into()))?;
+        }.map_err(|error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            if target==SignerContinueRoleV1::Signer1 {
+                crate::financial_ci_host_failure::io(crate::financial_ci_host_failure::Stage::Reviewer1EndpointWait,&error);
+            }
+            restrict_failed_foreground(error.into())
+        })?;
         if let Some(endpoint) = endpoint { return Ok(endpoint); }
         // Original actors/session/shared restrictions are checked by each
         // mailbox observation; no new authority is accumulated by this wait.

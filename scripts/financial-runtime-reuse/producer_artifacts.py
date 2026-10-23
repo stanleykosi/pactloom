@@ -38,18 +38,6 @@ RECIPE = dict(toolchain='1.99.0', rustc='rustc 1.99.0 (b940084d7 2026-09-28)',
         'pristine-setup':['durable-proposal','financial-runtime','manual-admission',
             'synthetic-born-joined-qualification']})
 
-PIXEL_PROFILE='coordinated-financial-external-pre-v3-witness-v1'
-SEMANTIC_PROFILE='coordinated-financial-rendered-host-semantic-v1'
-SEMANTIC_CFG='--cfg wholepact_financial_rendered_host_semantic_ci'
-
-def recipe(profile):
-    need(profile in (PIXEL_PROFILE,SEMANTIC_PROFILE),'qualification_profile')
-    value=json.loads(json.dumps(RECIPE))
-    if profile==SEMANTIC_PROFILE:
-        value['observed_rustflags']+=' '+SEMANTIC_CFG
-        value['qualification_profile']=profile
-    return value
-
 class Rejected(Exception):
     pass
 
@@ -102,12 +90,12 @@ def file_pin(path):
     return dict(size=meta.st_size, sha256=digest)
 
 
-def validate_manifest(value, expected_identity, expected_closure,profile=PIXEL_PROFILE):
+def validate_manifest(value, expected_identity, expected_closure):
     need(type(value) is dict and set(value) == {'version', 'identity', 'closure', 'recipe', 'files'}, 'manifest')
     need(type(value['version']) is int and value['version'] == 1, 'version')
     need(identity(value['identity']) == identity(expected_identity), 'provenance')
     need(closure(value['closure']) == closure(expected_closure), 'closure_mismatch')
-    need(type(value['recipe']) is dict and canonical(value['recipe']) == canonical(recipe(profile)), 'recipe')
+    need(type(value['recipe']) is dict and canonical(value['recipe']) == canonical(RECIPE), 'recipe')
     need(type(value['files']) is dict and set(value['files']) == set(NAMES), 'file_set')
     total = 0
     for row in value['files'].values():
@@ -119,13 +107,13 @@ def validate_manifest(value, expected_identity, expected_closure,profile=PIXEL_P
     return value
 
 
-def export_bundle(artifacts, destination, producer, inputs,profile=PIXEL_PROFILE):
+def export_bundle(artifacts, destination, producer, inputs):
     """Called before any fixture exists; exclusive output, exact four entries."""
     artifacts, destination = pathlib.Path(artifacts), pathlib.Path(destination)
     need({p.name for p in artifacts.iterdir()} == set(NAMES), 'file_set')
-    value = dict(version=1, identity=identity(producer), closure=closure(inputs), recipe=recipe(profile),
+    value = dict(version=1, identity=identity(producer), closure=closure(inputs), recipe=RECIPE,
                  files={name: file_pin(artifacts / name) for name in NAMES})
-    validate_manifest(value, producer, inputs,profile)
+    validate_manifest(value, producer, inputs)
     raw = canonical(value)
     need(len(raw) <= MAX_MANIFEST, 'manifest_size')
     with destination.open('xb') as output:
@@ -141,11 +129,11 @@ def export_bundle(artifacts, destination, producer, inputs,profile=PIXEL_PROFILE
         output.flush(); os.fsync(output.fileno())
     destination.chmod(0o444)
     # Revalidate the actual exported bytes, not just their original inputs.
-    verify_bundle(destination, producer, inputs,profile)
+    verify_bundle(destination, producer, inputs)
     return value
 
 
-def verify_bundle(bundle, expected_identity, expected_closure,profile=PIXEL_PROFILE):
+def verify_bundle(bundle, expected_identity, expected_closure):
     path = pathlib.Path(bundle)
     meta = path.lstat()
     need(stat.S_ISREG(meta.st_mode) and meta.st_nlink == 1 and
@@ -173,7 +161,7 @@ def verify_bundle(bundle, expected_identity, expected_closure,profile=PIXEL_PROF
                 except (ValueError, UnicodeError, RecursionError):
                     raise Rejected('json') from None
                 need(canonical(value) == raw, 'canonical')
-                validate_manifest(value, expected_identity, expected_closure,profile)
+                validate_manifest(value, expected_identity, expected_closure)
             else:
                 pin = value['files'][name]
                 need(member.size == pin['size'] and member.mode == 0o555, 'archive_pin')

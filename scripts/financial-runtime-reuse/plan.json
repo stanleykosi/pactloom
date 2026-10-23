@@ -1,61 +1,31 @@
 {
-  "version": 5,
-  "policy": "p26-observation-diagnostics-reuse-v1",
-  "qualification_profile": "coordinated-financial-rendered-host-semantic-v1",
+  "version": 1,
   "producer": {
+    "attempt": 1,
     "repository": "stanleykosi/pactloom",
-    "source": "8f1d67bdef50d886955d026e5fce2c8e8635ecbb",
-    "source_tree": "82591c243dc981cafee4e768db3339ae31994ecc",
-    "run_id": 39864693253,
-    "attempt": 1
+    "run_id": 39704950389,
+    "source": "f98de7fd79389ce340343292086c852825f59b60",
+    "source_tree": "1b4df59f4e2e664cad33440a947645e66424e410"
   },
   "harness": {
     "repository": "stanleykosi/pactloom",
-    "source": "d6ff33c5fa0186d4ba06a7debae756af34f705ec",
-    "source_tree": "b786e8e684e57e3133c3cabaa8eaa3ade18977a2"
+    "source": "ecda810b7167a54bdb3f6d587fb60956b56c6b6d",
+    "source_tree": "ee97fd0b7902e550d94ded2f4d5bde10abbd9e3e"
   },
   "artifact_pins": {
-    "archive_sha256": "f31d67a28c558cd273cc8060605182ba54c5a12108a523e010e631a957436db9",
-    "artifact_id": 12466205927,
-    "bundle_sha256": "b3daa2cf013ca6b763e63330694000e1483cd0686feaccf3304c6810176fdb34"
+    "archive_sha256": "8b9ea1f9badca360db272153b628a246544d7b1c524d2ea5162c5de512c2e24c",
+    "artifact_id": 12395613903,
+    "bundle_sha256": "d97af71f6a864829581610425122936cff65159617e19863d2d3f6930de1ed56"
   },
   "api_pins": {
-    "artifact": "e81407426a2367b1f76879730d46bac54fd31c003ae39cf569b4ce1668048e12",
-    "job": "b3148ba375099794e338bd2c4bad58b7f7f0c46e06d16ff2535db6034767c02d",
-    "run": "a35061569e2bc84815db8bda732967cb0a6ec3e5d0f3b6c785e4d81330d7d743"
+    "artifact": "0e4edbab13a523155935c5981ae5349618aa878ae8204624c7b3c060781a5e62",
+    "job": "6c0a8f4cd83eadadaf11cf14cd48cb0183d7e42bb6f484924f1772cb7f528f4e",
+    "run": "0cc79e2d685a7f2cbc45a4beded54671fe03b7f4c3a176fa76548be45038fd24"
   },
   "reviewed_runtime_changes": {
-    "scripts/ci-financial-container.py": "a0f3d65ac190a354364956b4e75f2c02f6ca9e4a702dbf8668d5331e97c7772c",
-    "scripts/ci-financial-fixture.py": "8157587dda9f2bc1b6b4aebc897fa33c96965830f362138933a791b883d25ea2",
-    "scripts/ci-financial-flow.py": "0fd2dba028892706df8bd0f5f7989b12d26f9e46b1b29b1cdf87dc236b5f47be",
-    "scripts/ci-financial-observer.py": "b9a026c89823b395ff383c4ce51fbe81b09c4e56eb9e348953c46a1536839704",
-    "scripts/tests/test_ci_financial_fixture_diagnostics.py": "360275baa12892e29f00790fcb409012f38e7e00f23069dfc11a79380377422d",
-    "scripts/tests/test_ci_financial_observer.py": "45e4ba444df7799b790eeb11bceee275181af4e53af15ad040884d130b3f6777"
-  },
-  "diagnostic_compatibility": {
-    "version": 1,
-    "name": "observer30-exact-diagnostics-v1",
-    "files": {
-      "scripts/ci-financial-contract.py": {
-        "producer_git_blob": "af880f7dbbcfce22c22ccc35b2828c3be5cf893d",
-        "producer_sha256": "c273975d5384b6c0d61c15881cce8da77d57fe2a75c9fccac489892a8ea97bc2",
-        "producer_mode": "100644",
-        "producer_mode_sha256": "3c355c49a6b7c57f4ed5a59658fa9d6300fe916e3e87f2e9662216fcc50a49c4",
-        "harness_git_blob": "8cb62540f1405d9ed016ebf92c95edd0bb719244",
-        "harness_sha256": "f495a9f6adc783b6c8ad6427e7f5f19d1237fdd9a9a385d34683314f03b700dd",
-        "harness_mode": "100644",
-        "harness_mode_sha256": "01b201d560c3f81eb4a20f9b204ac6116553964f1a09b9395d54242123216b41"
-      },
-      "scripts/ci-financial-supervisor.py": {
-        "producer_git_blob": "ab44f75fc60ae6e67ec9e8bf3981492effb5d6ab",
-        "producer_sha256": "3f7496bb716869622e77b37b061262c8053a7518a8b3a7f48f11be0ff0deb6fd",
-        "producer_mode": "100644",
-        "producer_mode_sha256": "1fab5efee2a6913acc944eaf2c821331edbaecbeb12b07a6fb167ec01a0477fb",
-        "harness_git_blob": "36d051b1666c5f434230b7ad3af0ada59356a5c9",
-        "harness_sha256": "50118fd69f010a06c93177095f1636aa652a12796ce7fceedb5364fc0f8d02ad",
-        "harness_mode": "100644",
-        "harness_mode_sha256": "0e752367fde4adc1adb58c5c40a05887152f753dfb51c8da27a043429f679710"
-      }
-    }
+    "scripts/ci-financial-container.py": "afb8031ca1211aab0f91e54e95448fd42a485bb5b75a525c019967f568a723a3",
+    "scripts/ci-financial-controller.py": "496d6a100f80f88244f05f7489b63b8f80de93bd7a3cc9d8a383df2ef2fe9815",
+    "scripts/ci-financial-flow.py": "307078a402553b9ef56ad37fa95000bbea6d589f2bb96828b39ca1193e8cc4e0",
+    "scripts/tests/test_ci_financial_observer.py": "8f7537d96730a4430f1adbbcfa2cf4fc52c4010b7a193f715ba9ccca53473589"
   }
 }

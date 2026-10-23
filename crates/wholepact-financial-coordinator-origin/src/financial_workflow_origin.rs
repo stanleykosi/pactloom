@@ -845,6 +845,24 @@ pub struct HostFinancialWorkflowRelayV1{
     host:Option<HostOriginV1>,clocks:FullWorkflowClocksV1,image:String,coordinator:Option<String>,session:Option<String>,
     slots:[Option<HSlot>;2],restricted:bool,cancel_seen:bool,disposed:[bool;2],cleanup:Option<Instant>,
 }
+// Read-only tags at the existing failing expression, before pump poisons/drops.
+macro_rules! relay_boundary {
+    ($stage:ident,$expression:expr) => {{
+        let result=$expression;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error)=&result {crate::financial_ci_host_diagnostics::latch_relay(crate::financial_ci_host_diagnostics::RelayStage::$stage,error);}
+        result
+    }};
+}
+macro_rules! relay_lifetimes {
+    ($host:expr) => {{
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        let result=$host.continue_check_lifetimes_for_relay();
+        #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
+        let result=$host.continue_check_lifetimes();
+        result
+    }};
+}
 impl HostFinancialWorkflowRelayV1 {
     pub(super) fn from_host(host:HostOriginV1)->Result<Self>{
         host.continue_check()?;let clocks=host.continue_clocks().workflow();let image=host.workflow_image()?;
@@ -862,28 +880,44 @@ impl HostFinancialWorkflowRelayV1 {
     fn restrict(&mut self)->Result<()>{self.restricted=true;if self.cleanup.is_none(){self.cleanup=Some(self.clocks.first_cleanup_ceiling(Instant::now())?);}Ok(())}
     pub fn pump(&mut self)->Result<bool>{let result=self.pump_inner();if result.is_err(){self.lifecycle.poison();drop(self.host.take());}result}
     fn pump_inner(&mut self)->Result<bool>{
-        self.lifecycle.check_not_poisoned()?;
-        crate::channel::require_time(self.cleanup.unwrap_or(self.clocks.hard_cleanup()))?;
-        self.host.as_ref().ok_or_else(||rejected("workflow Host consumed"))?.continue_check_lifetimes()?;
+        relay_boundary!(LifecycleCheck,self.lifecycle.check_not_poisoned())?;
+        relay_boundary!(DeadlineCheck,crate::channel::require_time(self.cleanup.unwrap_or(self.clocks.hard_cleanup())))?;
+        let host=relay_boundary!(HostAbsent,self.host.as_ref().ok_or_else(||rejected("workflow Host consumed")))?;
+        relay_lifetimes!(host)?;
         let mut progress=false;
-        if let Some(packet)=self.host.as_ref().unwrap().workflow_receive_c()?{
-            if self.normal_control(&packet)?||self.completed_pair_control(&packet)?||self.retirement_control(&packet)?{progress=true;}else{
-            self.down(&packet)?;let host=self.host.as_ref().unwrap();
+        if let Some(packet)=relay_boundary!(CoordinatorReceive,self.host.as_ref().unwrap().workflow_receive_c())?{
+            if relay_boundary!(NormalControl,self.normal_control(&packet))?||relay_boundary!(CompletedPairControl,self.completed_pair_control(&packet))?||relay_boundary!(RetirementControl,self.retirement_control(&packet))?{progress=true;}else{
+            relay_boundary!(DownstreamValidation,self.down(&packet))?;let host=self.host.as_ref().unwrap();
             if matches!(packet,Packet::Cancel{..}){
-                host.continue_child(Target::Signer1)?.workflow_send(&packet)?;host.continue_child(Target::Signer2)?.workflow_send(&packet)?;
-            }else{host.continue_child(packet.target()?.ok_or_else(||rejected("workflow target missing"))?)?.workflow_send(&packet)?;}
+                relay_boundary!(Signer1Send,host.continue_child(Target::Signer1).and_then(|child|child.workflow_send(&packet)))?;
+                relay_boundary!(Signer2Send,host.continue_child(Target::Signer2).and_then(|child|child.workflow_send(&packet)))?;
+            }else{
+                let target=relay_boundary!(TargetSelection,packet.target().and_then(|target|target.ok_or_else(||rejected("workflow target missing"))))?;
+                match target {
+                    Target::Signer1=>relay_boundary!(Signer1Send,host.continue_child(target).and_then(|child|child.workflow_send(&packet)))?,
+                    Target::Signer2=>relay_boundary!(Signer2Send,host.continue_child(target).and_then(|child|child.workflow_send(&packet)))?,
+                }
+            }
             progress=true;}
         }
-        progress|=self.retirement_observation()?;
-        progress|=self.normal_observation()?;
+        progress|=relay_boundary!(RetirementObservation,self.retirement_observation())?;
+        progress|=relay_boundary!(NormalObservation,self.normal_observation())?;
         for target in [Target::Signer1,Target::Signer2]{
             if self.disposed[target.index()]{continue;}
-            if let Some(packet)=self.host.as_ref().unwrap().continue_child(target)?.workflow_receive()?{
-                let forward=self.up(target,&packet)?;
-                if forward{self.host.as_ref().unwrap().workflow_send_c(&packet)?;}progress=true;
+            let received=match target {
+                Target::Signer1=>relay_boundary!(Signer1Receive,self.host.as_ref().unwrap().continue_child(target).and_then(|child|child.workflow_receive()))?,
+                Target::Signer2=>relay_boundary!(Signer2Receive,self.host.as_ref().unwrap().continue_child(target).and_then(|child|child.workflow_receive()))?,
+            };
+            if let Some(packet)=received{
+                let forward=match target {
+                    Target::Signer1=>relay_boundary!(Signer1UpstreamValidation,self.up(target,&packet))?,
+                    Target::Signer2=>relay_boundary!(Signer2UpstreamValidation,self.up(target,&packet))?,
+                };
+                if forward{relay_boundary!(CoordinatorSend,self.host.as_ref().unwrap().workflow_send_c(&packet))?;}progress=true;
             }
         }
-        self.host.as_ref().unwrap().continue_check_lifetimes()?;self.lifecycle.check_not_poisoned()?;Ok(progress)
+        relay_lifetimes!(self.host.as_ref().unwrap())?;
+        relay_boundary!(FinalLifecycleCheck,self.lifecycle.check_not_poisoned())?;Ok(progress)
     }
     fn completed_pair_control(&mut self,packet:&Packet)->Result<bool>{
         let Packet::CompletedPairServing{data,witness_instance,serve_challenge,service_ceiling_ms}=packet else{return Ok(false)};

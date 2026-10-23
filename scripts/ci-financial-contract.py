@@ -250,11 +250,73 @@ def validate_record(record, expected_profile=PROFILE):
     elif kind == 'NativeFailureBoundary':
         require(expected_profile==SEMANTIC_PROFILE and role=='Coordinator','role')
         validate_native_failure_facts(facts)
+    elif kind == 'HostReapObservation':
+        require(expected_profile==SEMANTIC_PROFILE and role=='Coordinator','role')
+        validate_host_reap_facts(facts)
+    elif kind == 'HostFailureBoundary':
+        require(expected_profile==SEMANTIC_PROFILE and role=='Host','role')
+        validate_host_failure_facts(facts)
     elif kind == 'Failure':
         exact(facts, ('code',)); require(facts['code'] in ERRORS,'record_shape')
     else:
         raise Rejected('record_shape')
     return record
+
+# Two independent authenticated actors: no cross-process ordering or cause claim.
+HOST_REAP_CONTEXTS=frozenset(('FinishPath','DropKillAttempted','RetirementTryReap'))
+HOST_FAILURE_STAGES=frozenset('TerminalSetup OriginalCustody RelaySetup StartupSelection HostOpen CommandsPath CommandsFileRead CommandsDecode CommandsCheck Reviewer1Message Reviewer1EndpointWait LaterWorkflow NormalClose RunnerReturn'.split())
+HOST_FAILURE_CLASSES=frozenset('Platform Terminal Permission Locked Invalid Authentication Storage Quarantined Unsupported Receipt RecoverySemantic RecoveryBackupUnsupported RecoveryFinancialUnsupported CompleteOriginRecoveryUnavailable HistoricalExportIncomplete GenerationArchiveIncomplete IoNotFound IoPermissionDenied IoInterrupted IoWouldBlock IoInvalidInput IoInvalidData IoUnexpectedEof IoTimedOut IoOther'.split())
+HOST_RELAY_STAGES=frozenset('LifecycleCheck DeadlineCheck HostAbsent CoordinatorLifetime Signer1Lifetime Signer2Lifetime CoordinatorReceive NormalControl CompletedPairControl RetirementControl DownstreamValidation TargetSelection Signer1Send Signer2Send RetirementObservation NormalObservation Signer1Receive Signer2Receive Signer1UpstreamValidation Signer2UpstreamValidation CoordinatorSend FinalLifecycleCheck'.split())
+HOST_RELAY_CLASSES=frozenset('IoNotFound IoPermissionDenied IoInterrupted IoWouldBlock IoInvalidInput IoInvalidData IoUnexpectedEof IoTimedOut IoOther'.split())
+def validate_host_relay_facts(facts):
+    exact(facts,('stage','class'))
+    require(type(facts['stage']) is str and facts['stage'] in HOST_RELAY_STAGES,'record_shape')
+    require(type(facts['class']) is str and facts['class'] in HOST_RELAY_CLASSES,'record_shape')
+    return facts
+
+def validate_host_reap_facts(facts):
+    exact(facts,('version','context','exit_code','signal'))
+    require(type(facts['version']) is int and facts['version']==1,'record_shape')
+    require(type(facts['context']) is str and facts['context'] in HOST_REAP_CONTEXTS,'record_shape')
+    code,signal=facts['exit_code'],facts['signal']
+    require((integer(code,0,255) and signal is None) or (code is None and integer(signal,1,64)),'record_shape')
+    return facts
+
+def validate_host_failure_facts(facts):
+    exact(facts,('version','stage','class','relay'))
+    require(type(facts['version']) is int and facts['version']==1,'record_shape')
+    require(type(facts['stage']) is str and facts['stage'] in HOST_FAILURE_STAGES,'record_shape')
+    require(type(facts['class']) is str and facts['class'] in HOST_FAILURE_CLASSES,'record_shape')
+    if facts['relay'] is not None:validate_host_relay_facts(facts['relay'])
+    return facts
+
+def validate_host_exit_cardinality(records):
+    # Record shapes, authenticated lineage and actor sequence are validated by
+    # the enclosing collection/oracle; this imposes independent max-one caps
+    # and consistency only when the existing owned-reap proof is also present.
+    for kind in ('HostReapObservation','HostFailureBoundary'):
+        require(sum(r['kind']==kind for r in records)<=1,'replay')
+    observations=[r['facts'] for r in records if r['kind']=='HostReapObservation']
+    if observations:
+        observation=observations[0]
+        for record in records:
+            if record['kind']=='OwnedReap' and record['role']=='Coordinator' and record['facts']['child']=='Host':
+                require(observation['signal'] is None and observation['exit_code']==record['facts']['exit_code'],'replay')
+
+def unavailable_host_exit_diagnostic():
+    return dict(version=1,reap=dict(availability='Unavailable',context=None,exit_code=None,signal=None),
+                foreground=dict(availability='Unavailable',stage=None,relay=None,**{'class':None}))
+
+def validate_host_exit_diagnostic(value):
+    exact(value,('version','reap','foreground'))
+    require(type(value['version']) is int and value['version']==1,'record_shape')
+    for name,fields,validator in (('reap',('context','exit_code','signal'),validate_host_reap_facts),
+                                  ('foreground',('stage','class','relay'),validate_host_failure_facts)):
+        part=value[name];exact(part,('availability',)+fields)
+        require(part['availability'] in ('Observed','Unavailable'),'record_shape')
+        if part['availability']=='Unavailable':require(all(part[k] is None for k in fields),'record_shape')
+        else:validator(dict(version=1,**{k:part[k] for k in fields}))
+    return value
 
 # CI-only, Coordinator-local failure boundaries. These are neither milestones
 # nor a cross-process ordering/root-cause claim. The native emission gate is

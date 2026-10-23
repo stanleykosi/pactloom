@@ -30,7 +30,10 @@ pub(super) fn run_before_runtime() -> Result<Completion> {
                 let (native, endpoint) = origin.into_financial_workflow()?;
                 let result = crate::financial_source_ui::run(native, endpoint);
                 #[cfg(wholepact_financial_rendered_host_semantic_ci)]
-                wholepact_financial_coordinator_origin::financial_ci_flush_failure_boundaries();
+                {
+                    wholepact_financial_coordinator_origin::financial_ci_flush_failure_boundaries();
+                    wholepact_financial_coordinator_origin::financial_ci_flush_host_diagnostics();
+                }
                 result
             }
             #[cfg(not(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-financial-runtime")))]
@@ -39,7 +42,19 @@ pub(super) fn run_before_runtime() -> Result<Completion> {
         #[cfg(feature = "coordinated-witness-delivery-append")]
         BootstrappedRoleV1::WitnessDelivery(origin) => wholepact_authority::native_witness_owner::coordinated_delivery_append_v1::run_witness_delivery_once_v1(origin),
         #[cfg(feature = "coordinated-financial-runtime")]
-        BootstrappedRoleV1::Host(origin) => wholepact_native_host::run_coordinated_financial_host_v1(origin).map(|()| true),
+        BootstrappedRoleV1::Host(origin) => {
+            let result=wholepact_native_host::run_coordinated_financial_host_v1(origin);
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            {
+                if let Err(error)=&result {
+                    use wholepact_financial_coordinator_origin::financial_ci_host_diagnostics::{latch_failure,Stage,classify_io};
+                    // Only a truthful fallback if the finer native stage did not latch.
+                    latch_failure(Stage::RunnerReturn,classify_io(error.kind()));
+                }
+                wholepact_financial_coordinator_origin::financial_ci_flush_host_diagnostics();
+            }
+            result.map(|()|true)
+        },
         #[cfg(not(feature = "coordinated-financial-runtime"))]
         BootstrappedRoleV1::Host(origin) => origin.run_until_stop(),
         #[cfg(feature = "coordinated-financial-runtime")]

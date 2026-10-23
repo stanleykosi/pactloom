@@ -176,9 +176,24 @@ impl HostOriginV1 {
     }
     #[cfg(feature = "coordinated-signer-continue")]
     pub(super) fn continue_check_lifetimes(&self) -> Result<()> {
-        self.origin.check_parent_alive()?;
-        for child in self.signers.iter().flatten() { child.check_alive()?; }
+        self.continue_check_lifetimes_inner(|_,_|{})
+    }
+    #[cfg(feature = "coordinated-signer-continue")]
+    fn continue_check_lifetimes_inner(&self,mut observe:impl FnMut(Role,&std::io::Error))->Result<()> {
+        self.origin.check_parent_alive().map_err(|error|{observe(Role::Coordinator,&error);error})?;
+        for (index,child) in self.signers.iter().enumerate().filter_map(|(i,c)|c.as_ref().map(|c|(i,c))) {
+            child.check_alive().map_err(|error|{observe(if index==0 {Role::Signer1}else{Role::Signer2},&error);error})?;
+        }
         Ok(())
+    }
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    pub(super) fn continue_check_lifetimes_for_relay(&self)->Result<()> {
+        use crate::financial_ci_host_diagnostics::{latch_relay,RelayStage};
+        self.continue_check_lifetimes_inner(|role,error|latch_relay(match role {
+            Role::Coordinator=>RelayStage::CoordinatorLifetime,
+            Role::Signer1=>RelayStage::Signer1Lifetime,
+            _=>RelayStage::Signer2Lifetime,
+        },error))
     }
     #[cfg(feature = "coordinated-signer-continue")]
     pub(super) fn continue_receive_c(&self) -> Result<Option<crate::signer_continue_channel::Packet>> { self.origin.continue_receive() }

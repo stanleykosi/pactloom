@@ -64,3 +64,6 @@ tokio-rustls = { version = "=0.26.6", default-features = false, features = ["rin
 [target.'cfg(target_os = "linux")'.dependencies]
 wholepact-financial-coordinator-origin = { path = "../wholepact-financial-coordinator-origin", optional = true }
 wholepact-signer-origin = { path = "../wholepact-signer-origin", optional = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wholepact_financial_ci)', 'cfg(wholepact_financial_rendered_host_semantic_ci)'] }

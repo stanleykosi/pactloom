@@ -649,7 +649,7 @@ class RuntimeRecords:
     def __init__(self,mode,expected_profile=None):
         self.expected_profile=P.C.EXTERNAL_PROFILE if expected_profile is None else expected_profile
         require(self.expected_profile in (P.C.EXTERNAL_PROFILE,P.C.SEMANTIC_PROFILE),'projection','result_schema')
-        self.mode,self.first_failure,self.result,self.location,self.fixture_diagnostic=mode,None,None,None,None;self.progress_diagnostic=None;self.host_diagnostic=None;self.native_failure_diagnostic=None;self.observation_timing_diagnostic=None
+        self.mode,self.first_failure,self.result,self.location,self.fixture_diagnostic=mode,None,None,None,None;self.progress_diagnostic=None;self.host_diagnostic=None;self.native_failure_diagnostic=None;self.observation_timing_diagnostic=None;self.host_exit_diagnostic=None
     def __call__(self,line):
         require(type(line) is bytes and 0<len(line)<=8192 and self.result is None,'projection','result_records')
         if line.startswith(b'CI_FINANCIAL_LOCATION '):
@@ -697,13 +697,19 @@ class RuntimeRecords:
             except Exception:raise Failure('projection','result_schema') from None
             # Cached timing is failure context only, never authority or success evidence.
             self.observation_timing_diagnostic=value
+        elif line.startswith(b'CI_FINANCIAL_HOST_EXIT_DIAGNOSTIC '):
+            require(self.expected_profile==P.C.SEMANTIC_PROFILE and self.host_exit_diagnostic is None,'projection','result_schema')
+            value=loads(line[len(b'CI_FINANCIAL_HOST_EXIT_DIAGNOSTIC '):])
+            try:P.C.validate_host_exit_diagnostic(value)
+            except Exception:raise Failure('projection','result_schema') from None
+            self.host_exit_diagnostic=value
         elif line.startswith(b'CI_FINANCIAL_CANDIDATE '):
             value=loads(line[len(b'CI_FINANCIAL_CANDIDATE '):])
             expected=dict(schema=1,profile=self.expected_profile,native_oracle_verified=True,
                           fixture_cleaned=True,display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)
             require(type(value) is dict and value==expected and all(type(value[k]) is type(v) for k,v in expected.items())
                     and self.first_failure is None and self.location is None and self.fixture_diagnostic is None
-                    and self.progress_diagnostic is None and self.host_diagnostic is None and self.native_failure_diagnostic is None and self.observation_timing_diagnostic is None,'projection','result_schema');self.result=value
+                    and self.progress_diagnostic is None and self.host_diagnostic is None and self.native_failure_diagnostic is None and self.observation_timing_diagnostic is None and self.host_exit_diagnostic is None,'projection','result_schema');self.result=value
         elif line.startswith(b'CI_FINANCIAL_RESULT '):
             value=loads(line[len(b'CI_FINANCIAL_RESULT '):])
             require(type(value) is dict and value==P.failure(value.get('code'),self.expected_profile),'projection','result_schema')
@@ -714,6 +720,9 @@ class RuntimeRecords:
             if self.observation_timing_diagnostic is not None:
                 try:emit('OBSERVATION_TIMING_DIAGNOSTIC',self.observation_timing_diagnostic)
                 except Exception:pass  # A best-effort diagnostic cannot replace the original failure.
+            if self.host_exit_diagnostic is not None:
+                try:emit('HOST_EXIT_DIAGNOSTIC',self.host_exit_diagnostic)
+                except Exception:pass
             emit('FAILURE',value)
         else:raise Failure('projection','result_records')
     def finish(self,status):

@@ -277,6 +277,15 @@ def emit_cached_observation_timing_failure(flow):
     except Exception:return # preserve original failure; no late collection
 
 
+def emit_cached_host_exit_failure(flow):
+    if flow is None or flow.expected_profile!=C.SEMANTIC_PROFILE:return
+    try:
+        value=flow.observer.failure_diagnostics()['host_exit']
+        encoded=json.dumps(C.validate_host_exit_diagnostic(value),separators=(',',':'))
+        print('CI_FINANCIAL_HOST_EXIT_DIAGNOSTIC '+encoded,flush=True)
+    except Exception:return # independent cached actors, no late IO or inference
+
+
 def main():
     if sys.argv[1:]==['fixture-child']:fixture_child();return
     C.require(not sys.argv[1:],'contract')
@@ -311,6 +320,7 @@ def main():
         emit_cached_host_failure(flow)
         emit_cached_native_failure(flow)
         emit_cached_observation_timing_failure(flow)
+        emit_cached_host_exit_failure(flow)
         # No raw exception/path/Host output escapes. Outer owner destroys whole
         # isolated namespace on failure; never report rescue cleanup as normal.
         print('CI_FINANCIAL_RESULT '+json.dumps(OUT.failure(code,expected_profile),separators=(',',':')),flush=True)

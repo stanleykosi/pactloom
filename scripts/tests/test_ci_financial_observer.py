@@ -1877,7 +1877,8 @@ class NativeFailureBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root=pathlib.Path(temp);p=root/'100.jsonl'
             snapshot=dict(phase='Finished',subphase='None',owner=None,view_generation=1,focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=[],host_view_id=None,host_observation=dict(revision=1,nonws_end=0,context_valid=False,entry='Closed',editor=None,view=None))
-            rows=[self.birth(),self.record(),self.record(snapshot,sequence=3,kind='UiSnapshot')]
+            rows=[self.birth(),self.record(),self.record(snapshot,sequence=3,kind='UiSnapshot'),
+                  self.record(dict(version=1,context='RetirementTryReap',exit_code=0,signal=None),sequence=4,kind='HostReapObservation')]
             p.write_bytes(b''.join(json.dumps(r).encode()+b'\n' for r in rows));p.chmod(0o600)
             deadline=time.monotonic_ns()+10_000_000_000
             observer=O.ObserverFiles(root,deadline,expected_profile=F.C.SEMANTIC_PROFILE)
@@ -1989,8 +1990,8 @@ class CommandsConsumptionGateTests(unittest.TestCase):
     def test_exact_marker_and_native_source_order_no_normalization(self):
         from unittest import mock
         source=(ROOT.parent/'crates/wholepact-native-host/src/host/financial/retained_foreground_v1.rs').read_text()
-        self.assertIn('terminal.message("'+F.HOST_COMMANDS_INSTRUCTION.replace('\n','\\n')+'")?',source)
-        self.assertLess(source.index('let commands = read_selection'),source.index('Select original reviewer 1 of 2'))
+        self.assertIn('observed!(Reviewer1Message,owner.host.terminal.message("'+F.HOST_COMMANDS_INSTRUCTION.replace('\n','\\n')+'"))?',source)
+        self.assertLess(source.index('let commands = super::durable_financial_commands_v1::read_session_commands_observed'),source.index('Select original reviewer 1 of 2'))
         self.assertLess(source.index('Select original reviewer 1 of 2'),source.index('let endpoint = wait_original_coordinated_pair_endpoint'))
         for marker in (F.HOST_COMMANDS_INSTRUCTION[:-1],F.HOST_COMMANDS_INSTRUCTION.replace('reviewer 1','reviewer 2'),
                        F.HOST_COMMANDS_INSTRUCTION.replace('original reviewer','original\nreviewer'),F.HOST_COMMANDS_INSTRUCTION+'extra'):
@@ -2148,7 +2149,7 @@ class LastValidatedObservationTests(unittest.TestCase):
         stale=list(rows)
         rows.append(self.record('NativeFailureBoundary',NativeFailureBoundaryTests().facts(),4));self.write(rows)
         now=time.monotonic_ns();bound=now+1000
-        with mock.patch.object(O.time,'monotonic_ns',side_effect=[now,now,now]):
+        with mock.patch.object(O.time,'monotonic_ns',side_effect=[now,now,now,bound,bound]):
             with mock.patch.object(O.time,'sleep') as sleep:
                 with self.assertRaises(O.C.Rejected) as e:self.o.next_snapshot(bound)
         self.assertEqual(str(e.exception),'observer_failure');sleep.assert_not_called()
@@ -2196,3 +2197,192 @@ class LastValidatedObservationTests(unittest.TestCase):
     def test_cached_progress_matches_existing_strict_projection(self):
         rows=self.records();self.write(rows);self.o.read()
         self.assertEqual(self.o.failure_diagnostics()['progress'],O.C.cached_progress_diagnostic(rows,O.C.SEMANTIC_PROFILE))
+
+class HostExitDiagnosticTests(unittest.TestCase):
+    setUp=SemanticHostObserverTests.setUp
+    tearDown=SemanticHostObserverTests.tearDown
+    record=SemanticHostObserverTests.record
+    records=SemanticHostObserverTests.records
+    write=SemanticHostObserverTests.write
+    def reap(self,**changes):
+        facts=dict(version=1,context='RetirementTryReap',exit_code=101,signal=None);facts.update(changes);return facts
+    def failure(self,**changes):
+        facts=dict(version=1,stage='CommandsDecode',relay=None,**{'class':'Invalid'});facts.update(changes);return facts
+    def host_file(self,rows):
+        p=self.directory/'101.jsonl';p.write_bytes(b''.join(json.dumps(r).encode()+b'\n' for r in rows));p.chmod(0o600)
+    def host_rows(self):
+        return [self.record('Birth',dict(pid=101,parent_pid=100,parent_role='Coordinator'),1,role='Host'),self.record('HostFailureBoundary',self.failure(),2,role='Host')]
+    def test_exact_native_domains_and_profile_role_rejection(self):
+        for context in O.C.HOST_REAP_CONTEXTS:
+            for status in (dict(exit_code=0,signal=None),dict(exit_code=255,signal=None),dict(exit_code=None,signal=6)):
+                O.C.validate_record(self.record('HostReapObservation',self.reap(context=context,**status),4),O.C.SEMANTIC_PROFILE)
+        for stage in O.C.HOST_FAILURE_STAGES:
+            for cls in O.C.HOST_FAILURE_CLASSES:
+                O.C.validate_record(self.record('HostFailureBoundary',self.failure(stage=stage,**{'class':cls}),2,role='Host'),O.C.SEMANTIC_PROFILE)
+        for kind,facts,role in [('HostReapObservation',self.reap(),'Coordinator'),('HostFailureBoundary',self.failure(),'Host')]:
+            for profile in (O.C.PROFILE,O.C.EXTERNAL_PROFILE):
+                with self.assertRaises(O.C.Rejected):O.C.validate_record(self.record(kind,facts,2,role=role,profile=profile),profile)
+            with self.assertRaises(O.C.Rejected):O.C.validate_record(self.record(kind,facts,2,role='Signer1'),O.C.SEMANTIC_PROFILE)
+    def test_unknown_keys_bounds_and_bool_status_rejected(self):
+        for changes in ({'version':True},{'context':'Panic'},{'exit_code':True},{'exit_code':256},{'signal':6},{'exit_code':None},{'exit_code':None,'signal':65},{'exit_code':None,'signal':0},{'pid':100},{'wait_status':101}):
+            with self.subTest(changes=changes):
+                with self.assertRaises(O.C.Rejected):O.C.validate_host_reap_facts(self.reap(**changes))
+        for changes in ({'version':True},{'stage':'unknown'},{'class':'Panic'},{'path':'private'},{'error':'private'}):
+            with self.assertRaises(O.C.Rejected):O.C.validate_host_failure_facts(self.failure(**changes))
+    def test_actual_host_boundary_commits_then_rejects_without_new_ui(self):
+        from unittest import mock
+        import io,contextlib
+        self.write(self.records());self.o.next_snapshot(self.o.deadline_ns)
+        self.host_file(self.host_rows())
+        now=time.monotonic_ns();bound=now+1000
+        with mock.patch.object(O.time,'monotonic_ns',side_effect=[now,now,now,bound,bound]),mock.patch.object(O.time,'sleep') as sleep:
+            with self.assertRaises(O.C.Rejected) as e:self.o.next_snapshot(bound)
+        self.assertEqual(str(e.exception),'observer_failure');sleep.assert_not_called()
+        value=self.o.failure_diagnostics()['host_exit'];self.assertEqual(value['foreground']['stage'],'CommandsDecode');self.assertEqual(value['reap']['availability'],'Unavailable')
+        flow=mock.Mock(observer=self.o,expected_profile=O.C.SEMANTIC_PROFILE);container=F.load('ci-financial-container');output=io.StringIO()
+        with mock.patch.object(self.o,'read',side_effect=AssertionError('late IO')),mock.patch.object(O.time,'monotonic_ns',side_effect=AssertionError('lateclock')):
+            with contextlib.redirect_stdout(output):container.emit_cached_host_exit_failure(flow)
+        self.assertIn('CI_FINANCIAL_HOST_EXIT_DIAGNOSTIC ',output.getvalue());self.assertNotIn('pid',output.getvalue())
+    def test_reap_is_neutral_and_does_not_imply_foreground_or_panic(self):
+        rows=self.records();rows.insert(2,self.record('HostReapObservation',self.reap(),3));rows[-1]['sequence']=4
+        self.write(rows);snapshot=self.o.next_snapshot(self.o.deadline_ns);self.assertEqual(snapshot['phase'],'Selecting')
+        value=self.o.failure_diagnostics()['host_exit'];self.assertEqual(value['reap']['exit_code'],101);self.assertEqual(value['foreground']['availability'],'Unavailable')
+        self.assertNotIn('panic',json.dumps(value).lower())
+    def test_independent_actor_order_duplicate_and_sequence_guards(self):
+        self.write(self.records());self.host_file(self.host_rows());self.o.read();before=self.o.failure_diagnostics()
+        rows=self.host_rows();rows.append(self.record('HostFailureBoundary',self.failure(),3,role='Host'));self.host_file(rows)
+        with self.assertRaises(O.C.Rejected) as e:self.o.read()
+        self.assertEqual(str(e.exception),'replay');self.assertEqual(self.o.failure_diagnostics(),before)
+        # Independent caches are not combined into a fabricated native root cause.
+        self.assertEqual(before['host_exit']['reap']['availability'],'Unavailable')
+    def test_duplicate_reap_and_out_of_order_actor_reject(self):
+        for kind in ('duplicate','order'):
+            with tempfile.TemporaryDirectory() as d:
+                o=O.ObserverFiles(d,time.monotonic_ns()+10_000_000_000,O.C.SEMANTIC_PROFILE)
+                rows=self.records();rows.append(self.record('HostReapObservation',self.reap(),4))
+                if kind=='duplicate':rows.append(self.record('HostReapObservation',self.reap(),5))
+                else:rows[-1]['sequence']=5
+                p=pathlib.Path(d)/'100.jsonl';p.write_bytes(b''.join(json.dumps(r).encode()+b'\n' for r in rows));p.chmod(0o600)
+                with self.assertRaises(O.C.Rejected):o.read()
+                self.assertEqual(o.failure_diagnostics()['host_exit'],O.C.unavailable_host_exit_diagnostic())
+    def test_strict_projection_unavailable_independence(self):
+        value=O.C.unavailable_host_exit_diagnostic();O.C.validate_host_exit_diagnostic(value)
+        for name in ('reap','foreground'):
+            bad=self.copy(value);bad[name]['availability']='Observed'
+            with self.assertRaises(O.C.Rejected):O.C.validate_host_exit_diagnostic(bad)
+        for bad in (dict(value,version=True),dict(value,extra=0)):
+            with self.assertRaises(O.C.Rejected):O.C.validate_host_exit_diagnostic(bad)
+    def test_normal_oracle_still_requires_proof_neutral_reap_not_failure(self):
+        from test_ci_financial_semantic_routing import semantic_case,O as oracle
+        rows,external=semantic_case();coordinator=[r for r in rows if r['role']=='Coordinator']
+        reap=self.record('HostReapObservation',self.reap(exit_code=0),len(coordinator)+1);reap['elapsed_ns']=coordinator[-1]['elapsed_ns']
+        rows.append(reap);oracle.validate_completed(rows,100,0,external,oracle.C.SEMANTIC_PROFILE)
+        for changes in ({'exit_code':101},{'exit_code':None,'signal':6}):
+            contradictory=self.copy(rows);contradictory[-1]['facts'].update(changes)
+            with self.assertRaises(oracle.C.Rejected) as error:oracle.validate_completed(contradictory,100,0,external,oracle.C.SEMANTIC_PROFILE)
+            self.assertEqual(str(error.exception),'replay')
+        without=[r for r in rows if r['kind']!='NormalFinished']
+        with self.assertRaises(oracle.C.Rejected):oracle.validate_completed(without,100,0,external,oracle.C.SEMANTIC_PROFILE)
+        host=[r for r in rows if r['role']=='Host'];failure=self.record('HostFailureBoundary',self.failure(),len(host)+1,role='Host');failure['elapsed_ns']=host[-1]['elapsed_ns'];rows.append(failure)
+        with self.assertRaises(oracle.C.Rejected) as e:oracle.validate_completed(rows,100,0,external,oracle.C.SEMANTIC_PROFILE)
+        self.assertEqual(str(e.exception),'observer_failure')
+    def test_host_boundary_forbids_close(self):
+        from unittest import mock
+        controller=mock.Mock();fixture=mock.Mock(deadline_ns=time.monotonic_ns()+F.C.ORIGINAL_NS)
+        native=F.S.NativeScenario(controller,fixture,mock.Mock(),expected_profile=F.C.SEMANTIC_PROFILE,host_view=mock.Mock())
+        with self.assertRaises(F.S.C.Rejected):native.close_after_normal_proof(self.host_rows(),None,F.C.SEMANTIC_PROFILE)
+        controller.terminal_click.assert_not_called();native.next_snapshot.assert_not_called()
+    def test_supervisor_failure_only_and_duplicate_profile_guards(self):
+        import io,contextlib
+        S=F.load('ci-financial-supervisor');value=O.C.unavailable_host_exit_diagnostic();line=b'CI_FINANCIAL_HOST_EXIT_DIAGNOSTIC '+json.dumps(value).encode()
+        for profile in (O.C.PROFILE,O.C.EXTERNAL_PROFILE):
+            with self.assertRaises(S.Failure):S.RuntimeRecords('external',profile)(line)
+        runtime=S.RuntimeRecords('external',O.C.SEMANTIC_PROFILE);output=io.StringIO()
+        with contextlib.redirect_stdout(output):runtime(line)
+        self.assertEqual(output.getvalue(),'')
+        with self.assertRaises(S.Failure):runtime(line)
+        candidate=dict(schema=1,profile=O.C.SEMANTIC_PROFILE,native_oracle_verified=True,fixture_cleaned=True,display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)
+        with self.assertRaises(S.Failure):runtime(b'CI_FINANCIAL_CANDIDATE '+json.dumps(candidate).encode())
+        with contextlib.redirect_stdout(output):runtime(b'CI_FINANCIAL_RESULT '+json.dumps(S.P.failure('observer_failure',O.C.SEMANTIC_PROFILE)).encode())
+        self.assertIn('HOST_EXIT_DIAGNOSTIC',output.getvalue());self.assertEqual(runtime.finish(1)['code'],'observer_failure')
+
+    def test_exact_native_enum_parity(self):
+        import re
+        source=(ROOT.parent/'crates/wholepact-financial-coordinator-origin/src/financial_ci_host_diagnostics.rs').read_text()
+        for name,expected in [('Stage',O.C.HOST_FAILURE_STAGES),('Class',O.C.HOST_FAILURE_CLASSES),('ReapContext',O.C.HOST_REAP_CONTEXTS),('RelayStage',O.C.HOST_RELAY_STAGES)]:
+            match=re.search(r'codes!\('+name+r'\s*\{([^}]+)\}\);',source)
+            self.assertIsNotNone(match);self.assertEqual(frozenset(x.strip() for x in match.group(1).split(',')),expected)
+        io_source=source.split('pub fn classify_io',1)[1].split('#[derive',1)[0]
+        self.assertEqual(frozenset(re.findall(r'Class::(Io[A-Za-z]+)',io_source)),O.C.HOST_RELAY_CLASSES)
+
+    def test_independent_relay_nullable_strict_io_only(self):
+        for stage in O.C.HOST_RELAY_STAGES:
+            for cls in O.C.HOST_RELAY_CLASSES:
+                O.C.validate_host_failure_facts(self.failure(relay={'stage':stage,'class':cls}))
+        for relay in ({'stage':'Signer1Receive','class':'Panic'},{'stage':'RunnerReturn','class':'IoOther'},{'stage':'Signer1Receive','class':'IoOther','raw':'private'},False):
+            with self.assertRaises(O.C.Rejected):O.C.validate_host_failure_facts(self.failure(relay=relay))
+        bad=self.failure();del bad['relay']
+        with self.assertRaises(O.C.Rejected):O.C.validate_host_failure_facts(bad)
+        rows=self.host_rows();rows[-1]['facts']=self.failure(stage='Reviewer1EndpointWait',relay={'stage':'Signer1Receive','class':'IoUnexpectedEof'})
+        self.write(self.records());self.host_file(rows);returned=self.o.read()
+        next(r for r in returned if r['kind']=='HostFailureBoundary')['facts']['relay']['class']='IoOther'
+        value=self.o.failure_diagnostics()['host_exit'];O.C.validate_host_exit_diagnostic(value)
+        self.assertEqual(value['foreground']['stage'],'Reviewer1EndpointWait')
+        self.assertEqual(value['foreground']['relay'],{'stage':'Signer1Receive','class':'IoUnexpectedEof'})
+        value['foreground']['relay']['class']='IoOther'
+        self.assertEqual(self.o.failure_diagnostics()['host_exit']['foreground']['relay']['class'],'IoUnexpectedEof')
+
+    def test_drain_later_reap_and_host_flush_full_scan_before_original_failure(self):
+        from unittest import mock
+        rows=self.records();self.write(rows);self.o.next_snapshot(self.o.deadline_ns)
+        rows.append(self.record('NativeFailureBoundary',NativeFailureBoundaryTests().facts(),4));self.write(rows)
+        now=time.monotonic_ns();clock=[now];opened=[];original_open=O.os.open
+        def open_record(path,*args,**kwargs):opened.append(pathlib.Path(path).name);return original_open(path,*args,**kwargs)
+        def sleep(delay):
+            clock[0]+=int(delay*1_000_000_000)
+            self.host_file(self.host_rows())
+            if len(rows)==4:rows.append(self.record('HostReapObservation',self.reap(exit_code=1),5));self.write(rows)
+        with mock.patch.object(O.time,'monotonic_ns',side_effect=lambda:clock[0]),mock.patch.object(O.time,'sleep',side_effect=sleep) as paused,mock.patch.object(O.os,'open',side_effect=open_record):
+            with self.assertRaises(O.C.Rejected) as e:self.o.next_snapshot(self.o.deadline_ns)
+        self.assertEqual(str(e.exception),'observer_failure');self.assertEqual(paused.call_count,1)
+        self.assertEqual(self.o._failure_drain_deadline,now+O.FAILURE_DRAIN_NS)
+        value=self.o.failure_diagnostics()['host_exit'];self.assertEqual(value['reap']['exit_code'],1);self.assertEqual(value['foreground']['stage'],'CommandsDecode')
+        self.assertEqual(opened[-2:],['100.jsonl','101.jsonl'])
+        self.assertEqual(self.o._snapshot_generation,1)
+        with mock.patch.object(self.o,'read',side_effect=AssertionError('failure retry')),mock.patch.object(O.time,'monotonic_ns',side_effect=AssertionError('clock renewal')):
+            with self.assertRaises(O.C.Rejected) as e:self.o.next_snapshot(self.o.deadline_ns)
+        self.assertEqual(str(e.exception),'observer_failure')
+    def test_drain_fixed_five_seconds_and_earlier_caller_bound(self):
+        from unittest import mock
+        for duration in (O.FAILURE_DRAIN_NS*2,20_000_000):
+            with self.subTest(duration=duration):
+                o=O.ObserverFiles(self.directory,self.o.deadline_ns,O.C.SEMANTIC_PROFILE)
+                rows=self.records()+[self.record('NativeFailureBoundary',NativeFailureBoundaryTests().facts(),4)];self.write(rows)
+                now=time.monotonic_ns();clock=[now];bound=min(o.deadline_ns,now+duration)
+                def sleep(delay):clock[0]+=max(1,int(delay*1_000_000_000))
+                with mock.patch.object(O.time,'monotonic_ns',side_effect=lambda:clock[0]),mock.patch.object(O.time,'sleep',side_effect=sleep):
+                    with self.assertRaises(O.C.Rejected) as e:o.next_snapshot(bound)
+                self.assertEqual(str(e.exception),'observer_failure');self.assertEqual(o._failure_drain_deadline,min(bound,now+O.FAILURE_DRAIN_NS))
+                self.assertGreaterEqual(clock[0],o._failure_drain_deadline)
+                self.assertEqual(o.failure_diagnostics()['native']['availability'],'Observed')
+                self.assertEqual(o.failure_diagnostics()['host_exit'],O.C.unavailable_host_exit_diagnostic())
+    def test_drain_malformed_append_preserves_last_valid_cache_and_failure(self):
+        from unittest import mock
+        rows=self.records()+[self.record('NativeFailureBoundary',NativeFailureBoundaryTests().facts(),4)];self.write(rows)
+        now=time.monotonic_ns();clock=[now]
+        def sleep(delay):
+            clock[0]+=int(delay*1_000_000_000);p=self.directory/'100.jsonl';p.write_bytes(p.read_bytes()+b'{}\n')
+        with mock.patch.object(O.time,'monotonic_ns',side_effect=lambda:clock[0]),mock.patch.object(O.time,'sleep',side_effect=sleep):
+            with self.assertRaises(O.C.Rejected) as e:self.o.next_snapshot(self.o.deadline_ns)
+        self.assertEqual(str(e.exception),'observer_failure')
+        self.assertEqual(self.o.failure_diagnostics()['native']['ui'],'FocusLost')
+        self.assertEqual(self.o.failure_diagnostics()['host_exit'],O.C.unavailable_host_exit_diagnostic())
+    def test_legacy_failure_remains_immediate_without_drain(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            o=O.ObserverFiles(d,time.monotonic_ns()+O.C.ORIGINAL_NS,O.C.EXTERNAL_PROFILE)
+            rows=[self.record('Birth',dict(pid=100,parent_pid=99,parent_role=None),1,profile=O.C.EXTERNAL_PROFILE),self.record('Failure',dict(code='observer_failure'),2,profile=O.C.EXTERNAL_PROFILE)]
+            p=pathlib.Path(d)/'100.jsonl';p.write_bytes(b''.join(json.dumps(r).encode()+b'\n' for r in rows));p.chmod(0o600)
+            with mock.patch.object(O.time,'sleep') as sleep:
+                with self.assertRaises(O.C.Rejected) as e:o.next_snapshot(o.deadline_ns)
+            self.assertEqual(str(e.exception),'observer_failure');sleep.assert_not_called();self.assertIsNone(o._failure_drain_deadline)

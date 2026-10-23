@@ -95,6 +95,14 @@ pub(super) fn read_selection<T: DeserializeOwned>(host: &Host, prompt: &str) -> 
     let bytes = Zeroizing::new(files::read_artifact(&path, MAX_SELECTION_BYTES)?);
     parse_selection(&bytes)
 }
+// Qualification-only wrapper; no additional read or check, and no authority.
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+pub(super) fn read_session_commands_observed(host:&Host,prompt:&str)->Result<SessionCommandsV1> {
+    use crate::financial_ci_host_failure::{self as diagnostic,Stage};
+    let path=host.path(prompt).map_err(|e|{diagnostic::native(Stage::CommandsPath,&e);e})?;
+    let bytes=Zeroizing::new(files::read_commands_artifact(&path,MAX_SELECTION_BYTES)?);
+    parse_selection(&bytes).map_err(|e|{diagnostic::native(Stage::CommandsDecode,&e);e})
+}
 pub(super) fn continuation_record(
     selection: &ContinuationSelectionV1,
 ) -> Result<&FinancialContinuationRecordV1> {

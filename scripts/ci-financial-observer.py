@@ -14,6 +14,7 @@ spec=importlib.util.spec_from_file_location('financial_observer_contract',ROOT/'
 C=importlib.util.module_from_spec(spec);sys.modules[spec.name]=C;spec.loader.exec_module(C)
 MAX_FILE_BYTES=32*1024*1024
 MAX_TOTAL_BYTES=64*1024*1024
+FAILURE_DRAIN_NS=5_000_000_000
 
 class ObserverFiles:
     def __init__(self,directory,deadline_ns,expected_profile=C.PROFILE):
@@ -22,6 +23,7 @@ class ObserverFiles:
         self._files={};self._roles={};self._snapshot_generation=0
         self._semantic_active=None
         self._diagnostics=None
+        self._failure_latched=False;self._failure_drain_deadline=None
         try:meta=self.directory.stat(follow_symlinks=False)
         except OSError:raise C.Rejected('observer_missing') from None
         C.require(stat.S_ISDIR(meta.st_mode) and meta.st_uid==os.getuid() and
@@ -52,7 +54,9 @@ class ObserverFiles:
     def _read(self,final):
         meta=self.directory.stat(follow_symlinks=False)
         C.require((meta.st_dev,meta.st_ino)==self._directory_identity,'observer_failure')
-        names=sorted(p.name for p in self.directory.iterdir())
+        # Priority comes only from previously authenticated actor records.
+        priority={self._roles.get('Coordinator'):0,self._roles.get('Host'):1}
+        names=sorted((p.name for p in self.directory.iterdir()),key=lambda name:(priority.get(name,2),name))
         C.require(len(names)<=17 and set(self._files)<=set(names),'record_limit')
         records=[];total=0
         for name in names:
@@ -83,6 +87,7 @@ class ObserverFiles:
             self._files[name]=(identity,complete);records.extend(entries)
         C.require(not final or len(self._roles)==17,'observer_missing')
         C.native_failure_sequence(records,self.expected_profile)
+        C.validate_host_exit_cardinality(records)
         if self.expected_profile==C.SEMANTIC_PROFILE:self._join_host_views(records)
         return records
     @staticmethod
@@ -93,7 +98,7 @@ class ObserverFiles:
         """Bounded last-success copies only: no IO, clock reads, or proof use."""
         if self._diagnostics is None:
             return dict(progress=None,native=dict(version=1,availability='Unavailable',
-                **{name:'Unobserved' for name in C.NATIVE_FAILURE_COMPONENTS}),timing=self._unavailable_timing())
+                **{name:'Unobserved' for name in C.NATIVE_FAILURE_COMPONENTS}),timing=self._unavailable_timing(),host_exit=C.unavailable_host_exit_diagnostic())
         return copy.deepcopy(self._diagnostics)
     def _project_diagnostics(self,records):
         # Called only after the entire collection and semantic join validate.
@@ -104,6 +109,7 @@ class ObserverFiles:
         native=dict(version=1,availability='Unavailable',**{name:'Unobserved' for name in C.NATIVE_FAILURE_COMPONENTS})
         timing=dict(version=1,availability='Observed',observer_remaining_ns=None,
                     coordinator_last_elapsed_ns=None,last_phase=None)
+        host_exit=C.unavailable_host_exit_diagnostic()
         prior_elapsed=None;ordered=True
         for record in records:
             kind=record['kind'];facts=record['facts'];row=None
@@ -113,6 +119,9 @@ class ObserverFiles:
             elif kind=='UiSnapshot':row=progress['phase_counts'];index=C.DIAGNOSTIC_PHASES.index(facts['phase'])
             elif kind in C.NORMAL_DIAGNOSTIC_STEPS:row=progress['normal_counts'];index=C.NORMAL_DIAGNOSTIC_STEPS.index(kind)
             if row is not None:row[index]=min(2,row[index]+1)
+            if kind in ('HostReapObservation','HostFailureBoundary'):
+                part=host_exit['reap' if kind=='HostReapObservation' else 'foreground']
+                part.update(copy.deepcopy({k:v for k,v in facts.items() if k!='version'}),availability='Observed')
             if record['role']!='Coordinator':continue
             elapsed=record['elapsed_ns'];timing['coordinator_last_elapsed_ns']=elapsed
             if prior_elapsed is not None and elapsed<prior_elapsed:ordered=False
@@ -125,7 +134,7 @@ class ObserverFiles:
                     timing['last_phase']=phase
                 phase['last_elapsed_ns']=elapsed;phase['snapshot_count']+=1
         if not ordered:timing=self._unavailable_timing()
-        return dict(progress=progress,native=native,timing=timing)
+        return dict(progress=progress,native=native,timing=timing,host_exit=host_exit)
     def _clear_host_view(self):
         if self._semantic_active is not None:
             self._semantic_active['text'][:]=b'\0'*len(self._semantic_active['text'])
@@ -141,12 +150,32 @@ class ObserverFiles:
         view=self._semantic_active.copy();view['text']=bytes(view['text']).decode('ascii')
         C.match_host_view(snapshot,view)
         return view['text']
+    def _drain_failure(self,deadline_ns,records):
+        # Failure is already latched. This bounded observer-only exception never
+        # returns to phase/input dispatch, probes a process, or renews a clock.
+        now=time.monotonic_ns()
+        self._failure_drain_deadline=min(deadline_ns,self.deadline_ns,now+FAILURE_DRAIN_NS)
+        bound=self._failure_drain_deadline
+        try:
+            while time.monotonic_ns()<bound:
+                if any(r['kind']=='HostReapObservation' for r in records):return
+                records=self.read(deadline_ns=bound)
+                if any(r['kind']=='HostReapObservation' for r in records):return
+                remaining=bound-time.monotonic_ns()
+                if remaining<=0:return
+                time.sleep(min(.01,remaining/1_000_000_000))
+        except (C.Rejected,OSError):return # preserve original failure and last valid cache
+
     def next_snapshot(self,deadline_ns):
+        C.require(not self._failure_latched,'observer_failure')
         C.require(type(deadline_ns) is int and deadline_ns<=self.deadline_ns,'deadline')
         while time.monotonic_ns()<deadline_ns:
             records=self.read(deadline_ns=deadline_ns)
-            # Cache is committed before surfacing authenticated terminal failure.
-            C.require(not any(r['kind'] in ('Failure','NativeFailureBoundary') for r in records),'observer_failure')
+            # Cache commits first; failure never returns to ordinary dispatch.
+            if any(r['kind'] in ('Failure','NativeFailureBoundary','HostFailureBoundary') for r in records):
+                self._failure_latched=True
+                if self.expected_profile==C.SEMANTIC_PROFILE:self._drain_failure(deadline_ns,records)
+                raise C.Rejected('observer_failure')
             candidates=[r['facts'] for r in records if r['kind']=='UiSnapshot' and
                         r['facts']['view_generation']>self._snapshot_generation]
             if candidates:

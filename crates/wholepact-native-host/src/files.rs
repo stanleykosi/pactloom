@@ -472,13 +472,14 @@ pub(crate) fn validate_absolute(p: &Path) -> Result<()> {
         Ok(())
     }
 }
-fn open_read(p: &Path) -> Result<File> {
+fn open_read_io(p: &Path) -> std::io::Result<File> {
     let mut o = OpenOptions::new();
     o.read(true);
     #[cfg(target_os = "linux")]
     o.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
-    Ok(o.open(p)?)
+    o.open(p)
 }
+fn open_read(p: &Path) -> Result<File> { Ok(open_read_io(p)?) }
 fn validate_file(f: &File, max: u64) -> Result<()> {
     let m = f.metadata()?;
     if !m.is_file() || m.len() > max {
@@ -505,18 +506,30 @@ pub(crate) fn read_private(p: &Path, max: usize) -> Result<Vec<u8>> {
 /// Public encrypted transport artifacts need not be private, but must be regular,
 /// bounded, explicitly selected local files. No symlinks, URLs, FIFO or devices.
 pub(crate) fn read_artifact(p: &Path, max: usize) -> Result<Vec<u8>> {
+    read_artifact_inner(p,max, |_| {})
+}
+// Same selected-file operations and predicates. The callback may only observe
+// an actual IO failure before the existing Error::from erases its kind.
+fn read_artifact_inner(p:&Path,max:usize,mut observe:impl FnMut(&std::io::Error))->Result<Vec<u8>> {
     validate_absolute(p)?;
-    let f = open_read(p)?;
-    let m = f.metadata()?;
+    let f = open_read_io(p).map_err(|e| {observe(&e);Error::from(e)})?;
+    let m = f.metadata().map_err(|e| {observe(&e);Error::from(e)})?;
     if !m.is_file() || m.len() > max as u64 {
         return Err(Error::Invalid);
     }
     let mut v = Vec::new();
-    f.take(max as u64 + 1).read_to_end(&mut v)?;
+    f.take(max as u64 + 1).read_to_end(&mut v).map_err(|e| {observe(&e);Error::from(e)})?;
     if v.len() > max {
         return Err(Error::Invalid);
     }
     Ok(v)
+}
+#[cfg(all(wholepact_financial_rendered_host_semantic_ci, feature="coordinated-financial-workflow-v1", target_os="linux"))]
+pub(crate) fn read_commands_artifact(p:&Path,max:usize)->Result<Vec<u8>> {
+    use crate::financial_ci_host_failure::{self as diagnostic,Stage};
+    let result=read_artifact_inner(p,max,|e|diagnostic::io(Stage::CommandsFileRead,e));
+    if let Err(e)=&result {diagnostic::native(Stage::CommandsFileRead,e);}
+    result
 }
 pub(crate) fn write_new(p: &Path, b: &[u8]) -> Result<()> {
     validate_absolute(p)?;
