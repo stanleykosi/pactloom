@@ -5,6 +5,7 @@ import math
 
 PROFILE = 'coordinated-financial-full-native-v1'
 EXTERNAL_PROFILE = 'coordinated-financial-external-pre-v3-witness-v1'
+SEMANTIC_PROFILE = 'coordinated-financial-rendered-host-semantic-v1'
 SCHEMA = 1
 ORIGINAL_NS = 1_800_000_000_000
 ACTION_NS = 120_000_000_000
@@ -103,9 +104,39 @@ def loads(raw, limit=MAX_RECORD_BYTES):
     except (ValueError, UnicodeError, TypeError):
         raise Rejected('record_shape') from None
 
-def validate_snapshot(facts):
+def validate_host_observation(h, facts):
+    exact(h, ('revision','nonws_end','context_valid','entry','editor','view'), 'snapshot')
+    require(integer(h['revision'],0,262144) and integer(h['nonws_end'],0,1048576),'snapshot')
+    require(type(h['context_valid']) is bool and h['entry'] in ('Idle','Editing','Writing','Closed'),'snapshot')
+    editor=h['editor']
+    if h['entry']=='Editing':
+        exact(editor,('ordinal','revision'),'snapshot')
+        require(integer(editor['ordinal'],1,128) and integer(editor['revision'],0,262144)
+                and editor['revision']==h['revision'] and facts['host_input'],'snapshot')
+    else: require(editor is None,'snapshot')
+    if h['entry']=='Writing': require(facts['host_input'],'snapshot')
+    view=h['view']
+    if view is not None:
+        exact(view,('rect','nonws','rows'),'snapshot')
+        require(h['context_valid'] and h['entry']=='Idle' and not facts['host_input'] and not facts['secret_input'],'snapshot')
+        require(integer(view['nonws'],1,8192) and view['nonws']<=h['nonws_end'] and integer(view['rows'],1,32),'snapshot')
+        outputs=[w for w in facts['widgets'] if w['tag']=='HostOutput' and w['owner'] is None]
+        require(len(outputs)==1 and outputs[0]['enabled'],'snapshot')
+        r=view['rect']; outer=outputs[0]['rect']
+        require(type(r) is list and len(r)==4 and all(type(x) in (int,float) and math.isfinite(x) for x in r),'snapshot')
+        require(outer[0]<=r[0]<r[2]<=outer[2] and outer[1]<=r[1]<r[3]<=outer[3],'snapshot')
+    return h
+
+def validate_snapshot(facts, expected_profile=PROFILE):
+    require(expected_profile in (PROFILE,EXTERNAL_PROFILE,SEMANTIC_PROFILE))
+    original=facts
+    if expected_profile==SEMANTIC_PROFILE:
+        require(type(facts) is dict and 'host_view_id' in facts,'snapshot')
+        reference=facts['host_view_id']
+        require(reference is None or integer(reference,1,512),'snapshot')
+        facts={k:v for k,v in facts.items() if k!='host_view_id'}
     exact(facts, ('phase','subphase','owner','view_generation','focused','secret_input','host_input',
-                  'pixels_per_point','viewport','widgets'))
+                  'pixels_per_point','viewport','widgets','host_observation'))
     require(facts['phase'] in PHASES and facts['subphase'] in SUBPHASES, 'snapshot')
     require(facts['owner'] in (None, 'Signer1', 'Signer2'), 'snapshot')
     require(integer(facts['view_generation'], 1), 'snapshot')
@@ -125,10 +156,67 @@ def validate_snapshot(facts):
                 all(type(x) in (int,float) and math.isfinite(x) for x in rect), 'snapshot')
         x0,y0,x1,y1 = rect
         require(0 <= x0 < x1 <= 1280/scale and 0 <= y0 < y1 <= 800/scale, 'snapshot')
+    validate_host_observation(facts['host_observation'],facts)
+    if expected_profile==SEMANTIC_PROFILE and original['host_view_id'] is not None:
+        h=facts['host_observation']
+        require(facts['focused'] and not facts['host_input'] and not facts['secret_input']
+                and h['context_valid'] and h['entry']=='Idle' and h['view'] is not None,'snapshot')
+    return original
+
+def validate_host_rendered_view(facts):
+    exact(facts,('id','view_generation','revision','nonws_end','view','text'))
+    require(integer(facts['id'],1,512) and integer(facts['view_generation'],1)
+            and integer(facts['revision'],0,262144) and integer(facts['nonws_end'],0,1048576),'snapshot')
+    v=facts['view'];exact(v,('rect','nonws','rows'),'snapshot')
+    require(integer(v['nonws'],1,8192) and v['nonws']<=facts['nonws_end'] and integer(v['rows'],1,32),'snapshot')
+    r=v['rect'];require(type(r) is list and len(r)==4 and all(type(x) in (int,float) and math.isfinite(x) for x in r),'snapshot')
+    require(0<=r[0]<r[2]<=2560 and 0<=r[1]<r[3]<=1600,'snapshot')
+    text=facts['text']
+    require(type(text) is str and 0<len(text)<=8192 and all(c=='\n' or ' '<=c<='~' for c in text),'snapshot')
+    require(text.count('\n')<v['rows'],'snapshot')
+    require(sum(c not in ' \t\r\n\f\v' for c in text)==v['nonws'],'snapshot')
     return facts
 
+def match_host_view(snapshot, view):
+    validate_snapshot(snapshot,SEMANTIC_PROFILE);validate_host_rendered_view(view)
+    h=snapshot['host_observation']
+    require(snapshot['host_view_id']==view['id'] and view['view_generation']<=snapshot['view_generation']
+            and view['revision']==h['revision'] and view['nonws_end']==h['nonws_end']
+            and view['view']==h['view'],'snapshot')
+    return view
+
+def join_host_views(records, *, final=False):
+    """Pure strict linkage over validated private records; never an input grant.
+
+    Identical fresh IDs can follow an unobserved discarded/hidden pass. Only
+    source occurrence positions, not view IDs, decide whether input is new.
+    """
+    active=None;pending=None;last_id=0;paired=0;sequence=0;generation=0
+    for record in records:
+        validate_record(record,SEMANTIC_PROFILE)
+        if record['role']!='Coordinator':continue
+        require(record['sequence']==sequence+1,'order');sequence=record['sequence']
+        kind=record['kind'];facts=record['facts']
+        if kind=='HostRenderedView':
+            require(pending is None and facts['id']==last_id+1,'replay')
+            require(facts['view_generation']>generation,'snapshot')
+            pending=facts;last_id=facts['id']
+        elif kind=='UiSnapshot':
+            require(facts['view_generation']>generation,'replay');generation=facts['view_generation']
+            reference=facts['host_view_id']
+            if reference is None:
+                require(pending is None,'snapshot');active=None
+            else:
+                selected=pending if pending is not None else active
+                require(selected is not None,'snapshot');match_host_view(facts,selected)
+                if pending is not None:
+                    require(selected['view_generation']==generation,'snapshot');paired+=1
+                active=selected;pending=None
+    if final:require(pending is None and paired>0,'missing_evidence')
+    return active
+
 def validate_record(record, expected_profile=PROFILE):
-    require(expected_profile in (PROFILE,EXTERNAL_PROFILE))
+    require(expected_profile in (PROFILE,EXTERNAL_PROFILE,SEMANTIC_PROFILE))
     exact(record, ('schema','profile','role','sequence','elapsed_ns','kind','facts'))
     require(type(record['schema']) is int and record['schema'] == SCHEMA and record['profile'] == expected_profile, 'record_shape')
     require(record['role'] in ROLES and integer(record['sequence'],1,MAX_RECORDS) and
@@ -147,7 +235,7 @@ def validate_record(record, expected_profile=PROFILE):
     elif kind in ('PurposeServing','PurposeDisposed','PurposeClosed'):
         exact(facts, ()); require(role in WITNESSES,'role')
     elif kind == 'InertStopped':
-        exact(facts, ()); require(expected_profile==EXTERNAL_PROFILE and role in INERT_WITNESSES,'role')
+        exact(facts, ()); require(expected_profile in (EXTERNAL_PROFILE,SEMANTIC_PROFILE) and role in INERT_WITNESSES,'role')
     elif kind == 'OwnedReap':
         exact(facts, ('child','pid','exit_code'))
         require(facts['child'] in PARENTS and PARENTS[facts['child']] == role and
@@ -155,9 +243,225 @@ def validate_record(record, expected_profile=PROFILE):
     elif kind in ('NormalFinishAdmitted','NormalFinished','PtyHeld','PtyReleased'):
         exact(facts, ()); require(role == 'Coordinator','role')
     elif kind == 'UiSnapshot':
-        require(role == 'Coordinator','role'); validate_snapshot(facts)
+        require(role == 'Coordinator','role'); validate_snapshot(facts,expected_profile)
+    elif kind == 'HostRenderedView':
+        require(expected_profile==SEMANTIC_PROFILE and role=='Coordinator','role')
+        validate_host_rendered_view(facts)
+    elif kind == 'NativeFailureBoundary':
+        require(expected_profile==SEMANTIC_PROFILE and role=='Coordinator','role')
+        validate_native_failure_facts(facts)
+    elif kind == 'HostReapObservation':
+        require(expected_profile==SEMANTIC_PROFILE and role=='Coordinator','role')
+        validate_host_reap_facts(facts)
+    elif kind == 'HostFailureBoundary':
+        require(expected_profile==SEMANTIC_PROFILE and role=='Host','role')
+        validate_host_failure_facts(facts)
     elif kind == 'Failure':
         exact(facts, ('code',)); require(facts['code'] in ERRORS,'record_shape')
     else:
         raise Rejected('record_shape')
     return record
+
+# Two independent authenticated actors: no cross-process ordering or cause claim.
+HOST_REAP_CONTEXTS=frozenset(('FinishPath','DropKillAttempted','RetirementTryReap'))
+HOST_FAILURE_STAGES=frozenset('TerminalSetup OriginalCustody RelaySetup StartupSelection HostOpen CommandsPath CommandsFileRead CommandsDecode CommandsCheck Reviewer1Message Reviewer1EndpointWait LaterWorkflow NormalClose RunnerReturn'.split())
+HOST_FAILURE_CLASSES=frozenset('Platform Terminal Permission Locked Invalid Authentication Storage Quarantined Unsupported Receipt RecoverySemantic RecoveryBackupUnsupported RecoveryFinancialUnsupported CompleteOriginRecoveryUnavailable HistoricalExportIncomplete GenerationArchiveIncomplete IoNotFound IoPermissionDenied IoInterrupted IoWouldBlock IoInvalidInput IoInvalidData IoUnexpectedEof IoTimedOut IoOther'.split())
+HOST_RELAY_STAGES=frozenset('LifecycleCheck DeadlineCheck HostAbsent CoordinatorLifetime Signer1Lifetime Signer2Lifetime CoordinatorReceive NormalControl CompletedPairControl RetirementControl DownstreamValidation TargetSelection Signer1Send Signer2Send RetirementObservation NormalObservation Signer1Receive Signer2Receive Signer1UpstreamValidation Signer2UpstreamValidation CoordinatorSend FinalLifecycleCheck'.split())
+HOST_RELAY_CLASSES=frozenset('IoNotFound IoPermissionDenied IoInterrupted IoWouldBlock IoInvalidInput IoInvalidData IoUnexpectedEof IoTimedOut IoOther'.split())
+def validate_host_relay_facts(facts):
+    exact(facts,('stage','class'))
+    require(type(facts['stage']) is str and facts['stage'] in HOST_RELAY_STAGES,'record_shape')
+    require(type(facts['class']) is str and facts['class'] in HOST_RELAY_CLASSES,'record_shape')
+    return facts
+
+def validate_host_reap_facts(facts):
+    exact(facts,('version','context','exit_code','signal'))
+    require(type(facts['version']) is int and facts['version']==1,'record_shape')
+    require(type(facts['context']) is str and facts['context'] in HOST_REAP_CONTEXTS,'record_shape')
+    code,signal=facts['exit_code'],facts['signal']
+    require((integer(code,0,255) and signal is None) or (code is None and integer(signal,1,64)),'record_shape')
+    return facts
+
+def validate_host_failure_facts(facts):
+    exact(facts,('version','stage','class','relay'))
+    require(type(facts['version']) is int and facts['version']==1,'record_shape')
+    require(type(facts['stage']) is str and facts['stage'] in HOST_FAILURE_STAGES,'record_shape')
+    require(type(facts['class']) is str and facts['class'] in HOST_FAILURE_CLASSES,'record_shape')
+    if facts['relay'] is not None:validate_host_relay_facts(facts['relay'])
+    return facts
+
+def validate_host_exit_cardinality(records):
+    # Record shapes, authenticated lineage and actor sequence are validated by
+    # the enclosing collection/oracle; this imposes independent max-one caps
+    # and consistency only when the existing owned-reap proof is also present.
+    for kind in ('HostReapObservation','HostFailureBoundary'):
+        require(sum(r['kind']==kind for r in records)<=1,'replay')
+    observations=[r['facts'] for r in records if r['kind']=='HostReapObservation']
+    if observations:
+        observation=observations[0]
+        for record in records:
+            if record['kind']=='OwnedReap' and record['role']=='Coordinator' and record['facts']['child']=='Host':
+                require(observation['signal'] is None and observation['exit_code']==record['facts']['exit_code'],'replay')
+
+def unavailable_host_exit_diagnostic():
+    return dict(version=1,reap=dict(availability='Unavailable',context=None,exit_code=None,signal=None),
+                foreground=dict(availability='Unavailable',stage=None,relay=None,**{'class':None}))
+
+def validate_host_exit_diagnostic(value):
+    exact(value,('version','reap','foreground'))
+    require(type(value['version']) is int and value['version']==1,'record_shape')
+    for name,fields,validator in (('reap',('context','exit_code','signal'),validate_host_reap_facts),
+                                  ('foreground',('stage','class','relay'),validate_host_failure_facts)):
+        part=value[name];exact(part,('availability',)+fields)
+        require(part['availability'] in ('Observed','Unavailable'),'record_shape')
+        if part['availability']=='Unavailable':require(all(part[k] is None for k in fields),'record_shape')
+        else:validator(dict(version=1,**{k:part[k] for k in fields}))
+    return value
+
+# CI-only, Coordinator-local failure boundaries. These are neither milestones
+# nor a cross-process ordering/root-cause claim. The native emission gate is
+# an actual Ui/Driver failure; Core/Transport observations alone cannot emit.
+NATIVE_FAILURE_COMPONENTS=('ui','driver','transport','core')
+NATIVE_FAILURE_CODES={
+    'ui':frozenset(('Unobserved', 'ViewportMissing', 'FocusLost', 'Blur', 'Escape', 'CloseRequested', 'InputGuardRejected', 'ObserverRejected', 'DriverRestrictionObserved', 'NativeCheckRejected', 'FinishedObserved', 'HostTransportRejected', 'HostOutputRejected', 'HostContextChanged', 'PublicInputRejected', 'NormalProofRejected', 'OtherUiRestriction')),
+    'driver':frozenset(('Unobserved', 'OriginalTreeCheckError', 'SessionExpired', 'EndpointRestrictionObserved', 'CommandChannelDisconnected', 'CommandOperationError', 'CancelSendError', 'SourceReceiveError', 'HistoryReceiveError', 'SigningReceiveError', 'PairReceiveError', 'OutcomeChannelFull', 'OutcomeChannelDisconnected', 'WorkErrorUnclassified')),
+    'transport':frozenset(('Unobserved', 'RestrictedObserved', 'InputChannelDisconnected', 'QueueInputRejected', 'StatusFull', 'StatusDisconnected', 'OutputChannelDisconnected', 'CoreCheckRejected', 'PtyOutputEof', 'PtyReadError', 'PtyWriteError', 'PtyOwnerMismatch', 'PtyHostLifetimeLost', 'PtyModeRejected')),
+    'core':frozenset(('Unobserved', 'CustodyMismatch', 'AlreadyClosedObserved', 'PeerProcessExit', 'PeerProcessPollError', 'PeerEdgeClosed', 'PeerEdgePollError', 'RootProcessExit', 'RootProcessPollError', 'SessionExpired')),
+}
+
+def validate_native_failure_facts(facts):
+    exact(facts,('version',)+NATIVE_FAILURE_COMPONENTS)
+    require(type(facts['version']) is int and facts['version']==1,'record_shape')
+    for name in NATIVE_FAILURE_COMPONENTS:
+        require(type(facts[name]) is str and facts[name] in NATIVE_FAILURE_CODES[name],'record_shape')
+    require(facts['ui']!='Unobserved' or facts['driver']!='Unobserved','record_shape')
+    return facts
+
+def native_failure_sequence(records,expected_profile):
+    """Validate cached per-process aggregates; return latest or None, never IO."""
+    require(expected_profile in (PROFILE,EXTERNAL_PROFILE,SEMANTIC_PROFILE),'record_shape')
+    require(type(records) is list and len(records)<=MAX_RECORDS,'record_limit')
+    for record in records:validate_record(record,expected_profile)
+    rows=[r for r in records if r['role']=='Coordinator']
+    boundaries=[r for r in rows if r['kind']=='NativeFailureBoundary']
+    if not boundaries:return None
+    require(len(boundaries)<=4,'record_limit')
+    rows.sort(key=lambda r:r['sequence'])
+    require([r['sequence'] for r in rows]==list(range(1,len(rows)+1)),'order')
+    require(rows[0]['kind']=='Birth' and sum(r['kind']=='Birth' for r in rows)==1,'lineage')
+    require(all(a['elapsed_ns']<=b['elapsed_ns'] for a,b in zip(rows,rows[1:])),'order')
+    prior={name:'Unobserved' for name in NATIVE_FAILURE_COMPONENTS};latest=None
+    for record in rows:
+        if record['kind']!='NativeFailureBoundary':continue
+        facts=record['facts']
+        require(any(facts[name]!=prior[name] for name in NATIVE_FAILURE_COMPONENTS),'replay')
+        require(all(prior[name]=='Unobserved' or facts[name]==prior[name] for name in NATIVE_FAILURE_COMPONENTS),'replay')
+        prior={name:facts[name] for name in NATIVE_FAILURE_COMPONENTS};latest=dict(facts)
+    return latest
+
+def validate_native_failure_diagnostic(value):
+    exact(value,('version','availability')+NATIVE_FAILURE_COMPONENTS)
+    require(type(value['version']) is int and value['version']==1,'record_shape')
+    require(value['availability'] in ('Observed','Unavailable'),'record_shape')
+    for name in NATIVE_FAILURE_COMPONENTS:
+        require(type(value[name]) is str and value[name] in NATIVE_FAILURE_CODES[name],'record_shape')
+    if value['availability']=='Observed':
+        validate_native_failure_facts({k:v for k,v in value.items() if k!='availability'})
+    else:require(all(value[name]=='Unobserved' for name in NATIVE_FAILURE_COMPONENTS),'record_shape')
+    return value
+
+def cached_native_failure_diagnostic(records,expected_profile):
+    require(expected_profile==SEMANTIC_PROFILE,'record_shape')
+    facts=native_failure_sequence(records,expected_profile)
+    value=dict(version=1,availability='Unavailable',**{name:'Unobserved' for name in NATIVE_FAILURE_COMPONENTS})
+    if facts is not None:value.update(facts,availability='Observed')
+    return validate_native_failure_diagnostic(value)
+
+# Failure-only diagnostic, not oracle evidence. Array order is fixed by these
+# tuples; 2 means at least two observations, never two successful operations.
+# Missing counts describe the last cached observation only, not nonexecution.
+# Phase counts are frame observations only: no order, duration or cause.
+DIAGNOSTIC_PHASES=tuple(sorted(PHASES))
+NORMAL_DIAGNOSTIC_STEPS=('NormalFinishAdmitted','PtyHeld','PtyReleased','NormalFinished')
+
+def validate_progress_diagnostic(value):
+    exact(value,('version','signer_counts','host_counts','normal_counts','phase_counts'))
+    require(type(value['version']) is int and value['version']==1,'record_shape')
+    rows=value['signer_counts']
+    require(type(rows) is list and len(rows)==2,'record_shape')
+    for row,size in [(rows[0],len(SIGNER_STEPS)),(rows[1],len(SIGNER_STEPS)),
+                     (value['host_counts'],len(HOST_STEPS)),
+                     (value['normal_counts'],len(NORMAL_DIAGNOSTIC_STEPS)),
+                     (value['phase_counts'],len(DIAGNOSTIC_PHASES))]:
+        require(type(row) is list and len(row)==size and
+                all(type(count) is int and 0<=count<=2 for count in row),'record_shape')
+    return value
+
+def cached_progress_diagnostic(records,expected_profile):
+    """Project only validated cached records; no reads, waits or clock changes."""
+    require(expected_profile in (PROFILE,EXTERNAL_PROFILE,SEMANTIC_PROFILE),'record_shape')
+    require(type(records) is list and len(records)<=MAX_RECORDS,'record_limit')
+    value={'version':1,'signer_counts':[[0]*len(SIGNER_STEPS) for _ in range(2)],
+           'host_counts':[0]*len(HOST_STEPS),'normal_counts':[0]*len(NORMAL_DIAGNOSTIC_STEPS),
+           'phase_counts':[0]*len(DIAGNOSTIC_PHASES)}
+    for record in records:
+        validate_record(record,expected_profile)
+        kind,facts=record['kind'],record['facts']
+        if kind=='SignerMilestone':
+            row=value['signer_counts'][('Signer1','Signer2').index(facts['owner'])]
+            index=SIGNER_STEPS.index(facts['step'])
+        elif kind=='HostMilestone':
+            row=value['host_counts'];index=HOST_STEPS.index(facts['step'])
+        elif kind=='UiSnapshot':
+            row=value['phase_counts'];index=DIAGNOSTIC_PHASES.index(facts['phase'])
+        elif kind in NORMAL_DIAGNOSTIC_STEPS:
+            row=value['normal_counts'];index=NORMAL_DIAGNOSTIC_STEPS.index(kind)
+        else:continue
+        row[index]=min(2,row[index]+1)
+    return validate_progress_diagnostic(value)
+
+# Cached actor-local observation timing, never current time or authority evidence.
+def validate_observation_timing_diagnostic(value):
+    exact(value,('version','availability','observer_remaining_ns','coordinator_last_elapsed_ns','last_phase'))
+    require(type(value['version']) is int and value['version']==1,'record_shape')
+    require(value['availability'] in ('Observed','Unavailable'),'record_shape')
+    remaining=value['observer_remaining_ns'];last=value['coordinator_last_elapsed_ns'];phase=value['last_phase']
+    if value['availability']=='Unavailable':
+        require(remaining is None and last is None and phase is None,'record_shape');return value
+    require(integer(remaining,1,ORIGINAL_NS),'record_shape')
+    require(last is None or integer(last,0,ORIGINAL_NS),'record_shape')
+    if phase is not None:
+        exact(phase,('phase','subphase','owner','first_elapsed_ns','last_elapsed_ns','snapshot_count'))
+        require(type(phase['phase']) is str and phase['phase'] in PHASES and type(phase['subphase']) is str and phase['subphase'] in SUBPHASES and phase['owner'] in (None,'Signer1','Signer2'),'record_shape')
+        require(last is not None and integer(phase['first_elapsed_ns'],0,last) and
+                integer(phase['last_elapsed_ns'],phase['first_elapsed_ns'],last) and
+                integer(phase['snapshot_count'],1,MAX_RECORDS),'record_shape')
+    return value
+
+# Failure-only harness observations, never native milestones or success evidence.
+HOST_DIAGNOSTIC_CATEGORIES=frozenset(('none','tail_not_visible','capture_guard','host_context','host_capture_changed','host_capture_count','host_capture_grammar','host_occurrence_replay','host_entry_changed','host_capture_limit'))
+HOST_DIAGNOSTIC_STAGES=frozenset(('Unobserved','Profile','Workspace','Storage','Financial','Enrollment','Commands','Operational','Approval'))
+HOST_DIAGNOSTIC_ACTIONS=frozenset(('Unobserved','NoPending','BeginRequested','BeginReturned','TypingRequested','TypingReturned','SubmitRequested','SubmitReturned'))
+HOST_DIAGNOSTIC_ENTRIES=frozenset(('Unobserved','Idle','Editing','Writing','Closed'))
+HOST_DIAGNOSTIC_COVERAGE=frozenset(('Unobserved','Unavailable','TailSuffix','WholeRetained'))
+def validate_host_diagnostic(value):
+    require(type(value) is dict and type(value.get('version')) is int and value['version'] in (1,2))
+    keys=('version','category','startup_stage','attempted_lines')
+    exact(value,keys if value['version']==1 else (*keys,'boundary','observation'))
+    require(type(value['category']) is str and value['category'] in HOST_DIAGNOSTIC_CATEGORIES)
+    require(type(value['startup_stage']) is str and value['startup_stage'] in HOST_DIAGNOSTIC_STAGES)
+    require(integer(value['attempted_lines'],0,128))
+    if value['version']==2:
+        b=value['boundary'];o=value['observation']
+        exact(b,('action','startup_index','issued_index','pending_index','pending_host','input_attempted','waiting'))
+        exact(o,('entry','context_valid','pending_context','coverage','capture_outcome','capture_context'))
+        require(type(b['action']) is str and b['action'] in HOST_DIAGNOSTIC_ACTIONS)
+        require(integer(b['startup_index'],0,13) and integer(b['issued_index'],-1,12) and integer(b['pending_index'],-1,12))
+        require(all(type(b[k]) is bool for k in ('pending_host','input_attempted','waiting')))
+        require(type(o['entry']) is str and o['entry'] in HOST_DIAGNOSTIC_ENTRIES)
+        require(o['context_valid'] is None if o['entry']=='Unobserved' else type(o['context_valid']) is bool)
+        require(type(o['pending_context']) is str and o['pending_context'] in ('Unobserved','NoPending','Same','Changed'))
+        require(type(o['coverage']) is str and o['coverage'] in HOST_DIAGNOSTIC_COVERAGE)
+        require(type(o['capture_outcome']) is str and o['capture_outcome'] in (HOST_DIAGNOSTIC_CATEGORIES|{'Unobserved','Accepted'}))
+        require(type(o['capture_context']) is str and o['capture_context'] in ('Unobserved','Same','Changed'))
+    return value

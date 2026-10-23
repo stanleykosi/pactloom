@@ -1,5 +1,6 @@
 """Pure cfg/provenance regressions: no Cargo, network, native fixture or sockets."""
 import copy
+import hashlib
 import importlib.util
 import itertools
 import json
@@ -13,7 +14,9 @@ def load(name,path):
     spec=importlib.util.spec_from_file_location(name,path)
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
 S=load('cfg_supervisor',ROOT/'ci-financial-supervisor.py');A=S.A
-LEGACY=load('cfg_legacy_artifacts',ROOT/'financial-runtime-reuse/producer_artifacts.py')
+LEGACY_PATH=ROOT/'financial-runtime-reuse/legacy_v1_artifacts_test_fixture.py'
+assert hashlib.sha256(LEGACY_PATH.read_bytes()).hexdigest()=='d24433f973c77d34e6d1f5c299cc1c7d00a7d024584bbfcb3d45e077c0e92f5d'
+LEGACY=load('cfg_legacy_artifacts',LEGACY_PATH)
 
 
 class BuildCfgTests(unittest.TestCase):
