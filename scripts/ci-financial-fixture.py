@@ -145,7 +145,7 @@ class Fixture:
         finally:
             for i in range(len(raw)):raw[i]=0
     def validate_host_startup(self):
-        """Closed synthetic read-only enrollment contract, never a native grant."""
+        """Closed synthetic PREPARE enrollment selection, never a native grant."""
         self.check()
         try:
             C.require(self._data['purpose'] in (PURPOSE,'genuine-coordinated-financial-live-pre-v3-v1'),'fixture')
@@ -313,8 +313,10 @@ class Fixture:
         self.validate_host_startup()
         if name in ('profile','workspace','session_commands_file'):return self.top_path(name)
         if name=='credential':return self.host_credential_destination()
+        # Native export requires Read+Coordinate+Disclose. The existing PREPARE
+        # choice also includes Propose+Intent; genuine session approval remains required.
         values={'principal':'synthetic-roster-host','scope':'OWNED','shared':'',
-                'mode':'READ','origin':''}
+                'mode':'PREPARE','origin':''}
         C.require(name in values,'fixture')
         return values[name]
 
