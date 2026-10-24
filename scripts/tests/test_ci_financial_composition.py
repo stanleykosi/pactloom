@@ -50,15 +50,16 @@ class ComposedStartupTests(unittest.TestCase):
                 self.assertEqual(flow.actions,0);self.assertEqual(flow.scrolls,{})
     def test_source_password_branch_remains_separate_and_preserved(self):
         flow=self.startup.flow();flow.startup_index=len(F.HOST_STARTUP)
-        flow.fixture=mock.Mock();secret=object();flow.fixture.secret.return_value=secret
+        flow.fixture=mock.Mock();secret=mock.Mock();flow.fixture.secret.return_value=secret
         snapshot=O.observed_snapshot(phase='V3Password',subphase='None',owner='Signer1',focused=True,
                       secret_input=True,host_input=False,widgets=[])
         flow.snapshot=mock.Mock(side_effect=[snapshot,snapshot,snapshot|{'phase':'Revoked'}])
-        flow.native.protected_input=mock.Mock();flow.press=mock.Mock()
+        flow.native.protected_input=mock.Mock();flow.press=mock.Mock();flow.password_seek=mock.Mock(side_effect=lambda value,tag:value)
         with self.assertRaises(F.C.Rejected) as error:flow.run()
         self.assertEqual(error.exception.code,'source_failure')
         flow.fixture.secret.assert_called_once_with('source')
-        flow.native.protected_input.assert_called_once_with('V3Password','Signer1','SourcePassword',secret)
+        flow.native.protected_input.assert_called_once_with('V3Password','Signer1','SourcePassword',secret,source_context=(0,0))
+        secret.wipe.assert_called_once_with()
         flow.press.assert_called_once_with(snapshot,'PasswordSubmit','Signer1')
         flow.controller.wait_render_progress.assert_not_called()
     def test_unexpected_source_secret_flag_rejects_before_any_host_or_source_effect(self):
@@ -92,13 +93,14 @@ class ComposedStartupTests(unittest.TestCase):
                     flow.done.add(flow.key(snapshot,action,owner)+(None,))
                     entered=snapshot|{'phase':next_phase}
                     flow.snapshot=mock.Mock(side_effect=[snapshot,entered,entered,entered|{'phase':'Revoked'}])
-                    flow.fixture=mock.Mock();secret=object();flow.fixture.secret.return_value=secret
-                    flow.native.protected_input=mock.Mock();flow.press=mock.Mock()
+                    flow.fixture=mock.Mock();secret=mock.Mock();flow.fixture.secret.return_value=secret
+                    flow.native.protected_input=mock.Mock();flow.press=mock.Mock();flow.password_seek=mock.Mock(side_effect=lambda value,tag:value)
                     flow.pump_host=mock.Mock();flow.idle_scan=mock.Mock()
                     with self.assertRaises(F.C.Rejected) as error:flow.run()
                     self.assertEqual(error.exception.code,'source_failure')
                     flow.controller.wait_render_progress.assert_called_once_with()
-                    flow.native.protected_input.assert_called_once_with(next_phase,owner,'SourcePassword',secret)
+                    flow.native.protected_input.assert_called_once_with(next_phase,owner,'SourcePassword',secret,source_context=(0,0))
+                    secret.wipe.assert_called_once_with()
                     flow.press.assert_called_once_with(entered,'PasswordSubmit',owner)
                     flow.pump_host.assert_not_called();flow.idle_scan.assert_not_called()
     def test_unowned_or_mismatched_source_entry_protected_frame_fails_without_effects(self):

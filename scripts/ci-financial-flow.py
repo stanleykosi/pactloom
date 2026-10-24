@@ -83,6 +83,7 @@ class FullFlow:
             self.native=S.NativeScenario(controller,fixture,observer.next_snapshot)
         self.done=set();self.filled=set();self.scrolls={};self.actions=0;self.host_lines=0
         self._review_observed=None
+        self.password_attempted=set();self.password_typed=set();self.password_pending=None
         self.last_ocr=0;self.ocr_delay=1_000_000_000;self.last_capture=None;self.challenges=set();self.host_paths=set()
         self.reviewer_index=0;self.continue_index=0;self.result_index=0
         self.records=[];self.pending_host=None;self.location=None;self.pending_selection=None
@@ -194,8 +195,14 @@ class FullFlow:
         # an attempted effect is latched BEFORE send and never retried.
         latest=self.native.stable(s['phase'],s['owner'],protected=s['secret_input'] or s['host_input'])
         self.note_review_observation(latest)
+        if tag=='PasswordSubmit' and s['phase'] in ('V3Password','Password'):
+            self.password_guard(latest,s)
+            C.require((s['phase'],owner) in self.password_typed,'replay')
         C.require(latest['subphase']==s['subphase'],'input_phase')
         w=self.find(latest,tag,owner);C.require(w is not None and w['enabled'],'input_disabled')
+        if tag=='PasswordSubmit' and s['phase'] in ('V3Password','Password'):
+            x,y=self.native.point(latest,tag,owner);a,b,c,d=w['rect'];scale=latest['pixels_per_point']
+            C.require(a<x/scale<c and b<y/scale<d,'input_widget')
         self.done.add(key);self.actions+=1
         self.note_review_observation(latest)
         C.input_budget(self.actions<=512,'actions',self.actions)
@@ -237,6 +244,76 @@ class FullFlow:
         action(*point);self.controller.wait_render_progress()
         self.note_review_observation(s,operation=operation,boundary='Returned',anchor=anchor,point=point)
         return True
+    def password_guard(self,latest,original):
+        # Protected metadata only: no capture, Host input, or deadline renewal.
+        C.require(latest['phase'] in ('V3Password','Password')
+                  and latest['phase']==original['phase'] and latest['subphase']==original['subphase']=='None'
+                  and latest['owner']==original['owner'] and latest['owner'] in ('Signer1','Signer2')
+                  and latest['focused'] and latest['secret_input'] and not latest['host_input'],'input_phase')
+        h=latest['host_observation'];old=original['host_observation']
+        if self.password_pending is not None:
+            C.require((latest['phase'],latest['owner'],h['revision'],h['nonws_end'])==self.password_pending,'input_phase')
+        C.require(h['context_valid'] and h['entry']=='Idle' and h['view'] is None
+                  and (h['revision'],h['nonws_end'])==(old['revision'],old['nonws_end'])
+                  and self.pending_host is None and self.host_prepared is None,'input_phase')
+    def password_seek(self,s,tag):
+        C.require(tag in ('SourcePassword','PasswordSubmit'),'input_widget')
+        self.password_guard(s,s)
+        latest=self.native.stable(s['phase'],s['owner'],protected=True)
+        self.password_guard(latest,s);owner=latest['owner']
+        w=self.find(latest,tag,owner)
+        if w is not None:
+            C.require(w['enabled'],'input_disabled')
+            x,y=self.native.point(latest,tag,owner);a,b,c,d=w['rect'];scale=latest['pixels_per_point']
+            C.require(a<x/scale<c and b<y/scale<d,'input_widget')
+            return latest
+        key=(s['phase'],'None','seek',tag,owner);count=self.scrolls.get(key,0)
+        self.scrolls[key]=count+1;C.require(count<64,'input_widget')
+        order=('ReviewBody','SourcePassword','PasswordSubmit')
+        anchors=[order.index(w['tag']) for w in latest['widgets'] if w['owner']==owner and w['tag'] in order]
+        direction='up' if count<24 else 'down'
+        if anchors:
+            if order.index(tag)<min(anchors):direction='up'
+            elif order.index(tag)>max(anchors):direction='down'
+        outer=self.find(latest,'ScrollRegion',None)
+        C.require(outer is not None and outer['enabled'],'input_widget')
+        x0,y0,x1,y1=outer['rect'];scale=latest['pixels_per_point']
+        excluded=[w['rect'] for w in latest['widgets'] if w['tag'] in
+                  ('ReviewBody','SignerReviewBody','WitnessReviewBody','HostOutput','SourcePassword','PasswordSubmit')]
+        point=None
+        for y in (y0+5+(y1-y0-10)*i/8 for i in range(9)):
+            px,py=int((x1-3)*scale),int(y*scale);x,y=px/scale,py/scale
+            if x0<x<x1 and y0<y<y1 and not any(a<=x<=c and b<=y<=d for a,b,c,d in excluded):
+                point=(px,py);break
+        C.require(point is not None,'input_widget')
+        key=(s['phase'],'None','ScrollRegion',None,direction);count=self.scrolls.get(key,0)
+        C.input_budget(count<128,'scroll',count);self.scrolls[key]=count+1
+        action=self.controller.scroll_up if direction=='up' else self.controller.scroll_down
+        action(*point);self.controller.wait_render_progress()
+        return None
+    def password_step(self,s):
+        self.password_guard(s,s)
+        key=(s['phase'],s['owner'])
+        if self.used(s,'PasswordSubmit',s['owner']):return
+        if key not in self.password_typed:
+            C.require(key not in self.password_attempted,'replay')
+            field=self.password_seek(s,'SourcePassword')
+            if field is None:return
+            # Attempt is latched before acquiring or consuming even a synthetic secret.
+            self.password_attempted.add(key)
+            h=field['host_observation']
+            self.password_pending=(field['phase'],field['owner'],h['revision'],h['nonws_end'])
+            secret=self.fixture.secret('source')
+            try:
+                self.native.protected_input(s['phase'],s['owner'],'SourcePassword',secret,
+                                            source_context=(h['revision'],h['nonws_end']))
+            finally:secret.wipe()
+            self.password_typed.add(key)
+            s=self.snapshot();self.password_guard(s,field)
+        submit=self.password_seek(s,'PasswordSubmit')
+        if submit is not None:
+            self.press(submit,'PasswordSubmit',submit['owner'])
+            self.password_pending=None
     def review_seek(self,s,tag,owner,action,ack,body):
         order=C.REVIEW_ROUTES.get(s['phase'])
         if s['subphase']=='None' and order==(body,ack,action):
@@ -753,6 +830,7 @@ class FullFlow:
     def run(self):
         while True:
             s=self.snapshot();phase=s['phase'];owner=s['owner'];target=self.current_owner()
+            if self.password_pending is not None:self.password_guard(s,s)
             self.cache_input_checkpoint(s,target)
             # Failure LOCATION is the last validated main-loop nonterminal checkpoint,
             # not the current terminal state or an attribution of its cause.
@@ -780,9 +858,7 @@ class FullFlow:
             if not self.host_startup_complete:
                 C.require(phase=='Selecting' and owner is None and s['subphase']=='None','input_phase')
             if phase in ('V3Password','Password'):
-                if not self.used(s,'PasswordSubmit',owner):
-                    self.native.protected_input(phase,owner,'SourcePassword',self.fixture.secret('source'))
-                    fresh=self.snapshot();self.press(fresh,'PasswordSubmit',owner)
+                self.password_step(s)
                 continue
             if s['secret_input']:
                 # CI conservatively marks the entry-intent frame protected

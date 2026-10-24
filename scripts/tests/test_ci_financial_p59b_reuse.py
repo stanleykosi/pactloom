@@ -97,7 +97,7 @@ class CheckoutBoundaryTests(unittest.TestCase):
 
 
 class FixedPolicyTests(unittest.TestCase):
-    def test_only_six_exact_reviewed_harness_deltas_are_accepted(self):
+    def test_only_eight_exact_reviewed_harness_deltas_are_accepted(self):
         producer = {name: 'a' * 64 for name in R.H_CHANGES}
         producer.update({'Cargo.lock': 'b' * 64, 'crates/native/src/lib.rs': 'c' * 64,
                          **{name: 'd' * 64 for name in R.A.BUILD_SCRIPTS}})
@@ -141,7 +141,8 @@ class FixedPolicyTests(unittest.TestCase):
         self.assertEqual(set(R.H_CHANGES), {
             'scripts/ci-financial-container.py', 'scripts/ci-financial-contract.py',
             'scripts/ci-financial-flow.py', 'scripts/ci-financial-observer.py',
-            'scripts/ci-financial-supervisor.py', 'scripts/tests/test_ci_financial_observer.py'})
+            'scripts/ci-financial-supervisor.py', 'scripts/ci-financial-scenario.py',
+            'scripts/tests/test_ci_financial_composition.py', 'scripts/tests/test_ci_financial_observer.py'})
         source = (HERE / 'ci-financial-p59b-reuse.py').read_text()
         self.assertNotIn('S.build_inputs(', source)
         self.assertNotIn('S.same_job_inputs(', source)

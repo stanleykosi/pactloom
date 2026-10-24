@@ -3662,3 +3662,147 @@ class SingleReviewSourceBindingTests(unittest.TestCase):
   normal=source.split('Phase::NormalFinishReview => {',1)[1].split('Phase::NormalClosing =>',1)[0]
   self.assertIn('"NormalFinish", self.active)',normal);self.assertIn('"ReviewAcknowledgement", self.active)',normal)
   for excluded in ('AdmissionReview','WriterFlow','CompletedPairFlow'):self.assertNotIn(excluded,routes)
+
+class PasswordSubmitted(Exception):pass
+
+def protected_password_model(phase='Password',separate=True):
+ state=dict(outer=0 if separate else 1,generation=0,events=[],secret_requests=0,secret=None,mutate=None)
+ class Observer:
+  expected_profile=F.C.SEMANTIC_PROFILE
+  host_view=mock.Mock()
+  def read(self):return []
+  def next_snapshot(self,deadline):
+   if state.get('submitted'):raise PasswordSubmitted()
+   state['generation']+=1;outer=state['outer']
+   ws=[dict(tag='ScrollRegion',owner=None,enabled=True,rect=[0,0,1280,800])]
+   if outer==0:ws.append(dict(tag='ReviewBody',owner='Signer1',enabled=True,rect=[20,300,1200,690]))
+   if outer==1:ws.append(dict(tag='SourcePassword',owner='Signer1',enabled=True,rect=[20,700,900,730]))
+   if outer==2 or not separate:ws.append(dict(tag='PasswordSubmit',owner='Signer1',enabled=True,rect=[20,750,400,780]))
+   value=dict(phase=phase,subphase='None',owner='Signer1',view_generation=state['generation'],focused=True,secret_input=True,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=ws,host_view_id=None,host_observation=dict(revision=1,nonws_end=0,context_valid=True,entry='Idle',editor=None,view=None))
+   if state['mutate']:state['mutate'](value)
+   return value
+ fixture=mock.Mock(deadline_ns=time.monotonic_ns()+120_000_000_000)
+ def secret(purpose):
+  state['secret_requests']+=1
+  state['secret']=F.S.F.SyntheticSecret(F.S.F._TOKEN,F.S.F._SYNTHETIC_PASSWORDS['source'])
+  return state['secret']
+ fixture.secret.side_effect=secret
+ c=mock.Mock();c._preflight_ascii_batches.return_value=[[(1,True),(1,False)]]
+ c._command.side_effect=lambda *args:state['events'].append('key')
+ def wheel(direction,x,y):
+  assert 1200<x<1280 and 0<y<800
+  state['outer']+=direction;state['events'].append('down' if direction==1 else 'up')
+ c.scroll_down.side_effect=lambda x,y:wheel(1,x,y);c.scroll_up.side_effect=lambda x,y:wheel(-1,x,y)
+ def click(x,y):
+  if y==715:state['events'].append('field')
+  elif y==765:
+   state['events'].append('submit')
+   if state.get('return_submit'):state['submitted']=True;return
+   raise PasswordSubmitted()
+  else:raise AssertionError('unexpected input point')
+ c.click.side_effect=click
+ f=F.FullFlow(c,fixture,Observer(),None);f.startup_index=13;f.startup_focus_seen=True;f.commands_instruction_observed=True;f._startup_ceiling=None
+ return f,c,state
+
+class ProtectedPasswordNavigationTests(unittest.TestCase):
+ def test_actual_controller_seeks_field_then_submit_without_retyping_or_capture(self):
+  for phase,normal_return in (('Password',False),('V3Password',False),('Password',True),('V3Password',True)):
+   f,c,st=protected_password_model(phase);st['return_submit']=normal_return
+   with self.assertRaises(PasswordSubmitted):f.run()
+   self.assertEqual(st['events'],['down','field','key','key','down','submit'])
+   self.assertEqual(st['secret_requests'],1);self.assertEqual(f.password_attempted,{(phase,'Signer1')});self.assertEqual(f.password_typed,f.password_attempted)
+   self.assertTrue(f.used(dict(phase=phase,subphase='None'),'PasswordSubmit','Signer1'))
+   self.assertTrue(st['secret']._used);self.assertFalse(any(st['secret']._bytes))
+   if normal_return:self.assertIsNone(f.password_pending)
+   c.capture.assert_not_called();c.type_ascii.assert_not_called();self.assertEqual(f.actions,1)
+ def test_fresh_protected_guards_prevent_navigation_and_secret_acquisition(self):
+  changes=[dict(phase='Waiting'),dict(subphase='SetupNeeded'),dict(owner='Signer2'),dict(focused=False),dict(secret_input=False),dict(host_input=True),dict(host_observation=dict(revision=2,nonws_end=0,context_valid=True,entry='Idle',editor=None,view=None)),dict(host_observation=dict(revision=1,nonws_end=0,context_valid=False,entry='Idle',editor=None,view=None))]
+  for change in changes:
+   f,c,st=protected_password_model();s=f.native.snapshot();st['mutate']=lambda v:v.update(change)
+   with self.assertRaises(F.C.Rejected):f.password_step(s)
+   self.assertEqual(st['secret_requests'],0);self.assertEqual(st['events'],[])
+  for attr in ('pending_host','host_prepared'):
+   f,c,st=protected_password_model();s=f.native.snapshot();setattr(f,attr,('pending',))
+   with self.assertRaises(F.C.Rejected):f.password_step(s)
+   self.assertEqual(st['events'],[])
+ def test_last_typing_frame_context_change_wipes_without_consume_and_cannot_retry(self):
+  f,c,st=protected_password_model(separate=False);s=f.native.snapshot()
+  def mutate(v):
+   if st['generation']>=4:v['host_observation']['revision']=2
+  st['mutate']=mutate
+  with self.assertRaises(F.C.Rejected):f.password_step(s)
+  self.assertEqual(st['events'],[]);self.assertEqual(st['secret_requests'],1)
+  self.assertTrue(st['secret']._used);self.assertFalse(any(st['secret']._bytes));self.assertFalse(f.password_typed)
+  st['mutate']=None
+  with self.assertRaises(F.C.Rejected):f.password_step(f.native.snapshot())
+  self.assertEqual(st['secret_requests'],1)
+ def test_first_typing_effect_failure_is_latched_wiped_and_never_retyped(self):
+  for effect in ('click','key'):
+   f,c,st=protected_password_model(separate=False);error=RuntimeError('synthetic failure')
+   if effect=='click':c.click.side_effect=error
+   else:c._command.side_effect=error
+   with self.assertRaises(RuntimeError) as got:f.password_step(f.native.snapshot())
+   self.assertIs(got.exception,error);self.assertTrue(st['secret']._used);self.assertFalse(any(st['secret']._bytes));self.assertFalse(f.password_typed)
+   with self.assertRaises(F.C.Rejected):f.password_step(f.native.snapshot())
+   self.assertEqual(c.click.call_count,1);self.assertEqual(st['secret_requests'],1)
+   self.assertEqual(c._command.call_count,1 if effect=='key' else 0)
+ def test_last_submit_frame_context_change_never_clicks_or_retypes(self):
+  f,c,st=protected_password_model(separate=False);s=f.native.snapshot();f.password_attempted.add(('Password','Signer1'));f.password_typed.add(('Password','Signer1'));f.password_pending=('Password','Signer1',1,0)
+  def mutate(v):
+   if st['generation']>=4:v['host_observation']['revision']=2
+  st['mutate']=mutate
+  with self.assertRaises(F.C.Rejected):f.password_step(s)
+  self.assertEqual(st['events'],[]);self.assertEqual(st['secret_requests'],0);self.assertFalse(f.done)
+ def test_original_budgets_and_no_safe_outer_pixel_fail_without_effects(self):
+  for kind in ('seek','scroll','deadline','tiny','covered','disabled'):
+   f,c,st=protected_password_model();s=f.native.snapshot()
+   if kind=='seek':f.scrolls[('Password','None','seek','SourcePassword','Signer1')]=64
+   if kind=='scroll':f.scrolls[('Password','None','ScrollRegion',None,'down')]=128
+   if kind=='deadline':f.fixture.deadline_ns=time.monotonic_ns()-1
+   if kind in ('tiny','covered','disabled'):
+    def mutate(v):
+     if kind=='tiny':v['widgets'][0]['rect']=[20.1,20.1,20.2,20.2]
+     if kind=='disabled':v['widgets'][0]['enabled']=False
+     if kind=='covered':v['widgets'][1]['rect']=[0,0,1280,800]
+    st['mutate']=mutate
+   with self.assertRaises(F.C.Rejected):f.password_step(s)
+   self.assertEqual(st['events'],[]);self.assertEqual(st['secret_requests'],0)
+ def test_native_password_order_clipping_and_event_filter_are_source_bound(self):
+  import hashlib
+  ui=(ROOT.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
+  part=ui.split('Phase::EntryReview | Phase::EntryConfirm | Phase::Password => {',1)[1].split('Phase::HistorySetupNeeded =>',1)[0]
+  self.assertLess(part.index('review_display(ui,'),part.index('input.show(ui, binding)'))
+  secret=(ROOT.parent/'crates/wholepact-financial-coordinator/src/secret_input.rs').read_text()
+  self.assertLess(secret.index('"SourcePassword"'),secret.index('"PasswordSubmit"'))
+  observer=(ROOT.parent/'crates/wholepact-financial-coordinator/src/financial_ci.rs').read_text()
+  self.assertIn('actual.intersect(ui.clip_rect()).intersect(bounds)',observer)
+  self.assertIn('if !r.is_positive() { return; }',observer)
+  self.assertEqual(hashlib.sha256(secret.encode()).hexdigest(),'0381b007d43c9866ea85af871eb689769d9e7384d7d08cfb8f7f0a4c46e5756c')
+ def test_post_typing_and_later_submit_search_keep_original_context_without_new_effect(self):
+  for later in (False,True):
+   for change in ('phase','owner','revision'):
+    f,c,st=protected_password_model(separate=True);st['outer']=1;s=f.native.snapshot()
+    def mutate(v):
+     if st['generation']>=6:
+      if change=='phase':v['phase']='V3Password'
+      elif change=='owner':v['owner']='Signer2'
+      else:v['host_observation']['revision']=2
+    if not later:st['mutate']=mutate
+    if later:
+     f.password_step(s);self.assertEqual(st['events'],['field','key','key','down'])
+     st['mutate']=mutate;s=f.native.snapshot()
+    before=list(st['events']) if later else ['field','key','key']
+    with self.assertRaises(F.C.Rejected):f.password_step(s)
+    self.assertEqual(st['events'],before);self.assertEqual(st['secret_requests'],1)
+    self.assertEqual(f.password_pending,('Password','Signer1',1,0))
+ def test_clipped_protected_targets_have_no_invented_interior_point(self):
+  for tag in ('SourcePassword','PasswordSubmit'):
+   f,c,st=protected_password_model(separate=False)
+   if tag=='PasswordSubmit':
+    f.password_attempted.add(('Password','Signer1'));f.password_typed.add(('Password','Signer1'));f.password_pending=('Password','Signer1',1,0)
+   def mutate(v):
+    for w in v['widgets']:
+     if w['tag']==tag:w['rect']=[20.1,20.1,20.2,20.2]
+   st['mutate']=mutate
+   with self.assertRaises(F.C.Rejected):f.password_step(f.native.snapshot())
+   self.assertEqual(st['events'],[]);self.assertEqual(st['secret_requests'],0)
