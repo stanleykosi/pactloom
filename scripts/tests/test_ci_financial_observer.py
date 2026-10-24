@@ -2886,6 +2886,206 @@ class SelectionHandoffTests(unittest.TestCase):
             arm=re.split(r'Intent::'+action+r'\b',tail,maxsplit=1)[1].split('\n            Intent::',1)[0]
             self.assertEqual(re.findall(r'self.transition\(Phase::(\w+), frame\)',arm),[phase],action)
 
+class FinancialHostReadinessTests(unittest.TestCase):
+    """Actual FullFlow/NativeScenario with inert observed frames and input sink.
+
+    No native Final, original authority, or successful retirement is fabricated.
+    The fake Host producer emits its validated observation only after Submit.
+    """
+    PROMPT='Type APPROVE 0123456789abcdef to approve this exact operation, or anything else to reject: '
+    def harness(self,*,owner='Signer1',action='ConfigureFinancialSetup',proof='after_submit',
+                parked=True,direct=False,deadline=300_000_000_000,hold_after_click=0,prompt_after=80,
+                controls_after=0,restriction=None,profile=F.C.SEMANTIC_PROFILE):
+        from unittest import mock
+        class Selected(Exception):pass
+        state=dict(generation=0,clock=1_000_000_000,phase='FinancialSetupSelected' if direct else 'V3Audited',
+                   begun=False,submitted=False,verified=False,selected=None,effects=[],deadlines=[],capture=0,wheels=[])
+        records=[]
+        def record(role,kind,facts):
+            row=dict(schema=1,profile=profile,role=role,sequence=len(records)+1,
+                     elapsed_ns=state['clock'],kind=kind,facts=facts)
+            F.C.validate_record(row,profile);records.append(row)
+        record(owner,'SignerMilestone',dict(owner=owner,step='AdmissionAudited'))
+        if owner=='Signer2' and not direct:
+            record('Signer1','SignerMilestone',dict(owner='Signer1',step='SigningRetired'))
+        if proof in ('other','present'):
+            verified_owner=('Signer2' if owner=='Signer1' else 'Signer1') if proof=='other' else owner
+            record('Host','HostMilestone',dict(step='Owner'+verified_owner[-1]+'AdmissionVerified'))
+        def widget(tag,x,role=None,enabled=True):
+            return dict(tag=tag,owner=role,enabled=enabled,rect=[x,300,x+40,340])
+        prompt=self.PROMPT;test=self
+        class Observer:
+            expected_profile=profile
+            def read(self):return records+[dict(kind='Failure')] if restriction=='failure' and state['phase']=='Selecting' else records
+            def next_snapshot(self,bound):
+                if state['selected'] is not None and state['generation']>=state['selected']+hold_after_click:raise Selected()
+                state['generation']+=1;state['clock']+=1_000_000_000;state['deadlines'].append(bound)
+                F.C.require(state['clock']<bound,'deadline');g=state['generation']
+                if state['submitted'] and proof=='after_submit' and not state['verified']:
+                    record('Host','HostMilestone',dict(step='Owner'+owner[-1]+'AdmissionVerified'))
+                    state['verified']=True;state['effects'].append('HostVerified')
+                phase=state['phase'];active=None if phase=='Selecting' else owner
+                visible_prompt=phase=='Selecting' and g>=prompt_after and proof=='after_submit'
+                editing=state['begun'] and not state['submitted']
+                h=dict(revision=1 if visible_prompt else 0,nonws_end=F.H.count(prompt) if visible_prompt else 0,
+                       context_valid=True,entry='Editing' if editing else 'Idle',editor=None,view=None)
+                widgets=[widget(action,100,owner),widget('ScrollRegion',900)]
+                if phase=='V3Audited':widgets.append(widget('SelectNextV3',300,owner))
+                if phase=='Selecting' and not visible_prompt and g>=controls_after:
+                    widgets.extend((dict(tag='HostOutput',owner=None,enabled=True,rect=[0,0,640,240]),widget('BeginHostLine',400)))
+                if visible_prompt:
+                    if editing:
+                        h['editor']=dict(ordinal=1,revision=1)
+                        widgets.extend((widget('HostEditor',500),widget('HostSubmit',700)))
+                    else:
+                        h['view']=dict(rect=[10,10,600,230],nonws=F.H.count(prompt),rows=4)
+                        widgets.extend((dict(tag='HostOutput',owner=None,enabled=True,rect=[0,0,640,240]),widget('BeginHostLine',400)))
+                snapshot=observed_snapshot(phase=phase,subphase='None',owner=active,view_generation=g,
+                    focused=not(restriction=='focus' and phase=='Selecting'),
+                    secret_input=False,host_input=editing,pixels_per_point=1,viewport=[1280,800],widgets=widgets,
+                    host_observation=h)
+                if profile==F.C.SEMANTIC_PROFILE:snapshot['host_view_id']=1 if h['view'] is not None else None
+                return snapshot
+            def host_view(self,s):
+                state['capture']+=1;h=s['host_observation']
+                F.C.match_host_view(s,dict(id=1,view_generation=s['view_generation'],revision=1,
+                    nonws_end=F.H.count(prompt),view=h['view'],text=prompt))
+                return prompt
+        controller=mock.Mock();fixture=mock.Mock(deadline_ns=deadline)
+        directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
+        fixture.source_path.side_effect=lambda role,kind,**kw:str(pathlib.Path(directory.name)/role/kind)
+        fixture.check.side_effect=lambda:F.C.require(state['clock']<deadline,'deadline')
+        operator=mock.Mock();operator.parked.return_value=parked
+        controller.observe=mock.MagicMock();ocr=mock.Mock()
+        def ocr_read(*args):state['capture']+=1;return prompt
+        ocr.read.side_effect=ocr_read
+        flow=F.FullFlow(controller,fixture,Observer(),ocr,operator)
+        flow.startup_index=len(F.HOST_STARTUP);flow.commands_instruction_observed=True;flow.startup_focus_seen=True
+        def click(x,y):
+            if x==320:state['phase']='Selecting';state['effects'].append('SelectNextV3')
+            elif x==420:
+                test.assertEqual(state['phase'],'Selecting');state['begun']=True;state['effects'].append('HostBegin')
+            elif x==520:state['effects'].append('HostEditor')
+            elif x==720:
+                test.assertTrue(state['begun']);state['submitted']=True;state['effects'].append('HostSubmit')
+            elif x==120:
+                test.assertIsNone(state['selected']);state['selected']=state['generation'];state['effects'].append(action)
+            else:raise AssertionError(('unexpected click',x,y))
+        controller.click.side_effect=click
+        controller.type_ascii.side_effect=lambda text:state['effects'].append(('HostTyped',text))
+        def wheel(*args):state['effects'].append('Wheel');state['wheels'].append(state['generation'])
+        controller.scroll_up.side_effect=wheel
+        controller.scroll_down.side_effect=controller.scroll_up.side_effect
+        return flow,controller,state,Selected
+    @staticmethod
+    def old_run(flow):
+        # Restore only the two H68 selection branches, retaining actual run logic.
+        import inspect,textwrap
+        source=textwrap.dedent(inspect.getsource(F.FullFlow.run))
+        direct="if (not self.used(s,'Configure',owner) and self.financial_selection_ready(owner)\n                    and self.seek(s,'Configure',owner)):self.press(s,'Configure',owner)"
+        select="if action in ('ConfigureFinancialSetup','Configure') and not self.financial_selection_ready(target):continue"
+        assert source.count(direct)==source.count(select)==1
+        source=source.replace(direct,"if self.seek(s,'Configure',owner) and not self.used(s,'Configure',owner):self.press(s,'Configure',owner)")
+        source=source.replace(select,"if self.operator is not None and action in ('ConfigureFinancialSetup','Configure'):\n                            if not self.operator.parked(target):continue\n                            self.operator.financial_gate(target,self.records)")
+        source=source.replace('            if self.waiting_for_host_admission(s,target):continue\n','')
+        scope={};exec(compile(source,'<exact H68 selection branches>','exec'),F.FullFlow.run.__globals__,scope)
+        return scope['run'](flow)
+    def test_old_loop_selects_before_host_approval_new_loop_pumps_and_waits_for_exact_proof(self):
+        from unittest import mock
+        for owner,profile in ((owner,profile) for owner in ('Signer1','Signer2') for profile in (F.C.SEMANTIC_PROFILE,F.C.EXTERNAL_PROFILE)):
+            old,c,state,stop=self.harness(owner=owner,profile=profile)
+            with mock.patch.object(F.time,'monotonic_ns',side_effect=lambda:state['clock']):
+                with self.assertRaises(stop):self.old_run(old)
+            self.assertEqual(state['effects'],['ConfigureFinancialSetup']);self.assertFalse(state['verified'])
+            c.type_ascii.assert_not_called()
+            flow,c,state,stop=self.harness(owner=owner,profile=profile)
+            original=flow.fixture.deadline_ns
+            with mock.patch.object(F.time,'monotonic_ns',side_effect=lambda:state['clock']):
+                with self.assertRaises(stop):flow.run()
+            self.assertEqual(state['effects'],['SelectNextV3','HostBegin','HostEditor',('HostTyped','APPROVE 0123456789abcdef'),
+                                               'HostSubmit','HostVerified','ConfigureFinancialSetup'])
+            self.assertEqual(set(state['deadlines']),{original});self.assertEqual(flow.fixture.deadline_ns,original)
+            self.assertEqual(state['capture'],1);flow.operator.financial_gate.assert_called_once_with(owner,flow.records)
+            c.focus.assert_not_called();c._command.assert_not_called()
+    def test_clipped_host_controls_use_existing_navigation_then_wait_without_more_wheels(self):
+        from unittest import mock
+        flow,c,state,stop=self.harness(controls_after=16)
+        with mock.patch.object(F.time,'monotonic_ns',side_effect=lambda:state['clock']):
+            with self.assertRaises(stop):flow.run()
+        self.assertTrue(state['wheels']);self.assertLess(max(state['wheels']),16)
+        self.assertEqual([e for e in state['effects'] if e!='Wheel'],['SelectNextV3','HostBegin','HostEditor',
+            ('HostTyped','APPROVE 0123456789abcdef'),'HostSubmit','HostVerified','ConfigureFinancialSetup'])
+        self.assertEqual(set(state['deadlines']),{flow.fixture.deadline_ns})
+    def test_wait_is_not_a_guard_bypass_and_needs_visible_unprotected_idle_controls(self):
+        from unittest import mock
+        for restriction,code in [('failure','observer_failure'),('focus','input_phase')]:
+            flow,c,state,stop=self.harness(proof='absent',restriction=restriction)
+            with mock.patch.object(F.time,'monotonic_ns',side_effect=lambda:state['clock']):
+                with self.assertRaises(F.C.Rejected) as error:flow.run()
+            self.assertEqual(error.exception.code,code);self.assertEqual(state['effects'],['SelectNextV3'])
+            flow.operator.parked.assert_not_called();flow.operator.financial_gate.assert_not_called()
+        flow,c,state,stop=self.harness(proof='absent');state['phase']='Selecting'
+        with mock.patch.object(F.time,'monotonic_ns',side_effect=lambda:state['clock']):s=flow.snapshot()
+        self.assertTrue(flow.waiting_for_host_admission(s,'Signer1'))
+        changes=[lambda s:s.update(phase='V3Audited'),lambda s:s.update(owner='Signer1'),lambda s:s.update(focused=False),
+                 lambda s:s.update(secret_input=True),lambda s:s.update(host_input=True),
+                 lambda s:s['host_observation'].update(context_valid=False),lambda s:s['host_observation'].update(entry='Writing'),
+                 lambda s:s.update(widgets=[w for w in s['widgets'] if w['tag']!='HostOutput']),
+                 lambda s:next(w for w in s['widgets'] if w['tag']=='BeginHostLine').update(enabled=False)]
+        for change in changes:
+            bad=json.loads(json.dumps(s));change(bad);self.assertFalse(flow.waiting_for_host_admission(bad,'Signer1'))
+        for field in ('pending_host','host_prepared'):
+            setattr(flow,field,('inert','pending'));self.assertFalse(flow.waiting_for_host_admission(s,'Signer1'));setattr(flow,field,None)
+        self.assertFalse(flow.waiting_for_host_admission(s,'Signer2'));self.assertEqual(state['effects'],[])
+    def test_no_or_other_owner_proof_never_calls_operator_or_crosses_financial_boundary(self):
+        from unittest import mock
+        for owner in ('Signer1','Signer2'):
+            for proof in ('absent','other'):
+                for action in ('ConfigureFinancialSetup','Configure'):
+                    flow,c,state,stop=self.harness(owner=owner,proof=proof,action=action,deadline=30_000_000_000)
+                    with mock.patch.object(F.time,'monotonic_ns',side_effect=lambda:state['clock']):
+                        with self.assertRaises(F.C.Rejected) as error:flow.run()
+                    self.assertEqual(error.exception.code,'deadline');self.assertIsNone(state['selected'])
+                    self.assertEqual(state['effects'],['SelectNextV3'])
+                    flow.operator.parked.assert_not_called();flow.operator.financial_gate.assert_not_called()
+                    self.assertEqual(set(state['deadlines']),{30_000_000_000})
+    def test_exact_proof_does_not_replace_external_park_and_pending_selection_still_prevents_replay(self):
+        from unittest import mock
+        flow,c,state,stop=self.harness(proof='present',parked=False,deadline=30_000_000_000)
+        with mock.patch.object(F.time,'monotonic_ns',side_effect=lambda:state['clock']):
+            with self.assertRaises(F.C.Rejected) as error:flow.run()
+        self.assertEqual(error.exception.code,'deadline');self.assertIsNone(state['selected'])
+        flow.operator.parked.assert_called();flow.operator.financial_gate.assert_not_called()
+        flow,c,state,stop=self.harness(proof='present',hold_after_click=6)
+        with mock.patch.object(F.time,'monotonic_ns',side_effect=lambda:state['clock']):
+            with self.assertRaises(stop):flow.run()
+        self.assertEqual(state['effects'],['ConfigureFinancialSetup']);self.assertEqual(flow.actions,1)
+        flow.operator.financial_gate.assert_called_once();self.assertIsNotNone(flow.pending_selection)
+    def test_direct_configure_uses_active_owner_not_unrelated_current_target(self):
+        from unittest import mock
+        for proof,allowed in [('other',False),('present',True)]:
+            flow,c,state,stop=self.harness(owner='Signer2',action='Configure',proof=proof,direct=True,deadline=30_000_000_000)
+            self.assertEqual(flow.current_owner(),'Signer1')
+            with mock.patch.object(F.time,'monotonic_ns',side_effect=lambda:state['clock']):
+                with self.assertRaises(stop if allowed else F.C.Rejected):flow.run()
+            self.assertEqual(state['effects'],['Configure'] if allowed else [])
+            if allowed:flow.operator.financial_gate.assert_called_once_with('Signer2',flow.records)
+            else:flow.operator.parked.assert_not_called();flow.operator.financial_gate.assert_not_called()
+    def test_native_producer_finishes_separate_status_display_before_owner_verified(self):
+        base=ROOT.parent/'crates/wholepact-native-host/src/host/financial'
+        export=(base/'durable_delivery_admission_v2/closed_review_v3/coordinated_export_v1.rs').read_text()
+        verify=export.split('fn verify_admission(&mut self)',1)[1].split('fn checked_export',1)[0]
+        self.assertLess(verify.index('display_original_coordinated_admission_status_v1'),verify.index('self.admitted = Some(status)'))
+        foreground=(base/'retained_foreground_v1.rs').read_text()
+        for owner in ('First','Second'):
+            block=foreground.split("impl<'host> "+owner+"OriginalAdmissionAttemptV1<'host>",1)[1].split('pub(super) fn park_after_verified',1)[0]
+            self.assertLess(block.index('self.admission.verify_admission()'),block.index('observe_host_milestone('))
+        native=(ROOT.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
+        allowed=native.split('fn host_phase_allows_input(',1)[1].split('fn host_entry_blocks_source',1)[0]
+        self.assertIn('Phase::Selecting',allowed)
+        for phase in ('FinancialSetupConfiguring','Configuring','HistoryRetiring'):
+            self.assertNotIn('Phase::'+phase,allowed)
+
 class ActorDiagnosticTests(unittest.TestCase):
     copy=staticmethod(lambda value:json.loads(json.dumps(value)))
     setUp=HostExitDiagnosticTests.setUp

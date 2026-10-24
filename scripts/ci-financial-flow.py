@@ -224,6 +224,30 @@ class FullFlow:
         return any(r['kind']=='SignerMilestone' and r['facts']=={'owner':owner,'step':step} for r in self.records)
     def host_milestone(self,step):
         return any(r['kind']=='HostMilestone' and r['facts']=={'step':step} for r in self.records)
+    def financial_selection_ready(self,owner):
+        # Scheduling only: the external audit service can be parked before H's
+        # separately approved admission-status display completes. Keep Selecting
+        # reachable for that Host prompt; never infer H completion from S audit.
+        C.require(owner in ('Signer1','Signer2'),'input_phase')
+        if not self.host_milestone('Owner'+owner[-1]+'AdmissionVerified'):return False
+        if self.operator is not None:
+            if not self.operator.parked(owner):return False
+            self.operator.financial_gate(owner,self.records)
+        return True
+    def waiting_for_host_admission(self,s,owner):
+        # Visible Host controls need no repeated navigation while H completes
+        # its separately approved display. The outer loop still pumps every
+        # fresh prompt and validates the unchanged original observation bound.
+        h=s['host_observation']
+        return (s['phase']=='Selecting' and s['subphase']=='None' and s['owner'] is None
+                and owner in ('Signer1','Signer2') and self.host_startup_complete
+                and self.milestone(owner,'AdmissionAudited')
+                and not self.host_milestone('Owner'+owner[-1]+'AdmissionVerified')
+                and s['focused'] and not(s['secret_input'] or s['host_input'])
+                and h['context_valid'] and h['entry']=='Idle'
+                and self.pending_host is None and self.host_prepared is None
+                and all((w:=self.find(s,tag,None)) is not None and w['enabled']
+                        for tag in ('HostOutput','BeginHostLine')))
     def current_owner(self):
         for owner in ('Signer1','Signer2'):
             if not self.milestone(owner,'SigningRetired'):return owner
@@ -969,7 +993,8 @@ class FullFlow:
                     if self.find(s,action,owner)['enabled']:self.press(s,action,owner)
                 continue
             if phase=='FinancialSetupSelected':
-                if self.seek(s,'Configure',owner) and not self.used(s,'Configure',owner):self.press(s,'Configure',owner)
+                if (not self.used(s,'Configure',owner) and self.financial_selection_ready(owner)
+                        and self.seek(s,'Configure',owner)):self.press(s,'Configure',owner)
                 continue
             if phase=='Selecting' or phase in RESULT_PHASES:
                 if self.milestone('Signer1','SigningRetired') and self.milestone('Signer2','SigningRetired'):
@@ -984,13 +1009,12 @@ class FullFlow:
                     for action in SELECT:
                         w=self.find(s,action,target)
                         if w and w['enabled'] and not self.used(s,action,target):
-                            if self.operator is not None and action in ('ConfigureFinancialSetup','Configure'):
-                                if not self.operator.parked(target):continue
-                                self.operator.financial_gate(target,self.records)
+                            if action in ('ConfigureFinancialSetup','Configure') and not self.financial_selection_ready(target):continue
                             self.press(s,action,target);self.pending_selection=phase_key;selected=True;break
                     if selected:continue
                 if phase in RESULT_PHASES and self.find(s,'SelectNextV3',owner) and not self.used(s,'SelectNextV3',owner):
                     self.press(s,'SelectNextV3',owner);self.pending_selection=phase_key;continue
+                if self.waiting_for_host_admission(s,target):continue
                 if not self.wait_initial_pair_after_sweep(s,target):self.idle_scan(s)
             elif phase=='Waiting':self.idle_scan(s)
             # All other phases wait actual observations under original deadline.
