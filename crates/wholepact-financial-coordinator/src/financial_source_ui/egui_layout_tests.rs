@@ -143,7 +143,7 @@ fn layout_protocol_inner() {
         }
         let mut arm_enabled=false;
         checkpoint(8);
-        let _=ctx.run_ui(raw, |parent| {
+        let mut frame_output=ctx.run_ui(raw, |parent| {
             let frame=ctx.cumulative_frame_nr(); let visible=parent.is_enabled()&&parent.is_visible()&&!parent.is_sizing_pass();
             crate::financial_ci::begin(&ctx,"V3AdmitReview","None",Some("Signer1"),true,false,false);
             crate::financial_ci::host_observation(0,0,true,"Idle",None,None);
@@ -161,6 +161,10 @@ fn layout_protocol_inner() {
             (read_to_end,acknowledged)=review_progress_after_pass((read_to_end,acknowledged),(painted_to_end,ack_in_pass),eligible,true);
             if eligible {last_tail=Some(frame); if clicked {assert!(v3_admission_tail_eligible(Phase::V3AdmitReview,Phase::V3AdmitReview,read_to_end,acknowledged,true,false,frame>0));arm_clicked=true;}}
         });
+        // Headless layout has no GPU backend. epaint 0.36.2 requires explicit
+        // disposal of unapplied texture deltas; retain all layout/font work.
+        frame_output.textures_delta.clear();
+        drop(frame_output);
         checkpoint(9);
         let snapshot=crate::financial_ci::take_layout_test_snapshot();
         let geometry=GEOMETRY.with(|g|g.borrow().clone());

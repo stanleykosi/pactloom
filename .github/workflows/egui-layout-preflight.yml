@@ -1,14 +1,14 @@
-name: Exact material-backed headless egui startup diagnosis
+name: Exact material-backed headless egui backend disposal correction
 on:
   push:
-    branches: [checkpoint/egui-layout-d62b]
+    branches: [checkpoint/egui-layout-d62c]
 permissions: {}
 concurrency:
-  group: egui-layout-d62b
+  group: egui-layout-d62c
   cancel-in-progress: false
 jobs:
   diagnostic:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/egui-layout-d62b' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/egui-layout-d62c' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
