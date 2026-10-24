@@ -385,8 +385,10 @@ impl CoordinatedAdmissionWorkerV1 {
         match self.ready.try_recv() {
             Ok(v) => Ok(Some(v)),
             Err(std::sync::mpsc::TryRecvError::Empty) => Ok(None),
-            Err(std::sync::mpsc::TryRecvError::Disconnected) if self.finished() => Ok(None),
-            Err(_) => Err(Error::Unavailable),
+            // Sender teardown can precede publication of thread completion.
+            // The unchanged nonblocking driver joins only after is_finished;
+            // its original actor, cancellation and transport checks keep running.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Ok(None),
         }
     }
     pub(in crate::native_ui::runtime) fn provide_final(
@@ -787,3 +789,7 @@ pub(in crate::native_ui::runtime) struct HistoryReturnedCoordinatedV3V1 {
 mod coordinated_financial_handoff_v1;
 pub(in crate::native_ui::runtime) use coordinated_financial_handoff_v1::DetachedCoordinatedFinancialHandoffV1;
 pub(in crate::native_ui::runtime) use coordinated_financial_handoff_v1::coordinated_financial_entry_v1::{PresentedFinancialEntryRoleV1,OpenedFinancialEntryRoleV1,PreparedInitialFinancialReadRoleV1,PresentedInitialFinancialReadRoleV1,ReadInitialFinancialRoleV1};
+
+#[cfg(test)]
+#[path = "coordinated_delivery_admission_v1/ready_disconnect_tests.rs"]
+mod ready_disconnect_tests;

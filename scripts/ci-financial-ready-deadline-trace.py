@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Exact deadline/wait-loop extraction. Virtual time and inert adapters; no TLS or Final."""
-import argparse,hashlib,json,subprocess,selectors,os,time
+import argparse,hashlib,json,subprocess,selectors,os,time,importlib.util
 from pathlib import Path
 p=argparse.ArgumentParser();p.add_argument('--source',type=Path,required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--run',action='store_true');a=p.parse_args();a.out.mkdir(parents=True,exist_ok=True)
 T='crates/wholepact-authority/src/transport.rs';A='crates/wholepact-authority/src/transport/durable_delivery_admission_v3.rs';D='crates/wholepact-signer/src/native_ui/runtime/coordinated_delivery_admission_v1.rs';J='crates/wholepact-signer/src/consent_journal/durable_delivery_admission_intent_v3/coordinated_v1.rs';U='crates/wholepact-financial-coordinator/src/financial_source_ui.rs'
 s={n:(a.source/n).read_text() for n in (T,A,D,J,U)}
 BASELINE_SOURCE_SHA256 = {'crates/wholepact-authority/src/transport.rs': '2c58ec5ae515ce13786ec81661901c9ba1c72a5f9827d3c925e4fbc48e4f2716', 'crates/wholepact-authority/src/transport/durable_delivery_admission_v3.rs': 'dda6bd34a47e3144bfc1fb8f633374da35ee30efa2a6fa7518dfb6ecc5a0af13', 'crates/wholepact-signer/src/native_ui/runtime/coordinated_delivery_admission_v1.rs': '59c9fc8331a83323fab2d85ae4f0de853888af1eadcf090561d01b574846ef46', 'crates/wholepact-signer/src/consent_journal/durable_delivery_admission_intent_v3/coordinated_v1.rs': 'e14cd1da0c7c263722217a721453f6bd47132578629fbaf4e8b5c0bb4a71f2a8', 'crates/wholepact-financial-coordinator/src/financial_source_ui.rs': 'e7eab264c493c758e8723576fb476b1373204502d35d125113ede6d537dbdc96'}
-assert {n:hashlib.sha256(v.encode()).hexdigest() for n,v in s.items()} == BASELINE_SOURCE_SHA256
+spec=importlib.util.spec_from_file_location('ready_worker_audit',a.source/'scripts/ci-financial-admit-read-source-audit.py')
+prior=importlib.util.module_from_spec(spec);spec.loader.exec_module(prior)
+assert {n:hashlib.sha256((prior.restore_ready_worker(v) if n==D else v).encode()).hexdigest() for n,v in s.items()} == BASELINE_SOURCE_SHA256
 def block(text,needle):
  start=text.index(needle);i=text.index('{',start);depth=1;j=i+1
  while depth:

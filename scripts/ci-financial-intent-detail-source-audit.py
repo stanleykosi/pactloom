@@ -57,6 +57,8 @@ def main():
  assert counts==CALLSITE_COUNTS
  for relative,expected in UNCHANGED.items():
   raw=(root/relative).read_text()
+  if relative.endswith('/runtime/coordinated_delivery_admission_v1.rs'):
+   raw=prior.restore_ready_worker(raw)
   if relative.endswith('/financial_ci_actor.rs'):
    assert raw.count(TEST_PEEK)==1
    raw=raw.replace(TEST_PEEK,'')

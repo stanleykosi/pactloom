@@ -207,7 +207,8 @@ class IntentValidationExecutionPreflightTests(unittest.TestCase):
 
  def test_intent_feature_union_is_exact_and_does_not_replace_old_target(self):
   self.assertEqual(set(C.INTENT_FEATURES),set(C.SIGNER_FEATURES)|{'synthetic-qualification'})
-  self.assertEqual(len(C.HANDOFF_SECURITY_TESTS),50)
+  self.assertEqual(len(C.HANDOFF_SECURITY_TESTS),51)
+  self.assertEqual(C.HANDOFF_SECURITY_TESTS[0],'native_ui::runtime::financial_v1::coordinated_v3_delivery::coordinated_delivery_admission_v1::ready_disconnect_tests::ready_disconnect_preserves_pending_worker_error_and_panic_without_fabricating_ready')
   self.assertEqual(len(C.INTENT_VALIDATION_TESTS),20)
   self.assertTrue(set(C.INTENT_VALIDATION_TESTS).isdisjoint(C.HANDOFF_SECURITY_TESTS))
   rows=copy.deepcopy(self.rows);rows[-1]['features']=list(C.SIGNER_FEATURES)

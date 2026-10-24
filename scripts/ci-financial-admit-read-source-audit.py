@@ -16,6 +16,16 @@ OLD_HISTORY_BLOCK = '        let mut callback_error = None;\n        let result 
 FINISH_SHA = 'b297cdf4bf324809ff50552bdfc4a192029a07c150679e8ffce6133dceba8d9e'
 OLD_FINISH = '    pub fn finish_read(mut self) -> Result<()> {\n        self.check_current()?;\n        self.binding.owner.pair.entry.core.phase.step(\n            self.binding.owner.pair.entry.slot(),\n            151,\n            152,\n        )?;\n        self.consumed = true;\n        Ok(())\n    }'
 
+# Exact P67 worker-result preservation delta. No deadline/currentness change.
+READY_WORKER_CURRENT_SHA = '45ca71f1653973ed6909fc2011506ecef4f88ef291dfe5862857dba6d1f61f8c'
+READY_WORKER_NEW = '            // Sender teardown can precede publication of thread completion.\n            // The unchanged nonblocking driver joins only after is_finished;\n            // its original actor, cancellation and transport checks keep running.\n            Err(std::sync::mpsc::TryRecvError::Disconnected) => Ok(None),'
+READY_WORKER_OLD = '            Err(std::sync::mpsc::TryRecvError::Disconnected) if self.finished() => Ok(None),\n            Err(_) => Err(Error::Unavailable),'
+READY_WORKER_TEST_INCLUDE = '\n#[cfg(test)]\n#[path = "coordinated_delivery_admission_v1/ready_disconnect_tests.rs"]\nmod ready_disconnect_tests;\n'
+def restore_ready_worker(text):
+    assert hashlib.sha256(text.encode()).hexdigest()==READY_WORKER_CURRENT_SHA
+    assert text.count(READY_WORKER_NEW)==1 and text.count(READY_WORKER_TEST_INCLUDE)==1
+    return text.replace(READY_WORKER_NEW,READY_WORKER_OLD,1).replace(READY_WORKER_TEST_INCLUDE,'',1)
+
 def digest(text): return hashlib.sha256(text.encode()).hexdigest()
 def tokens(text):
     return ''.join(token for token in re.findall(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/|[^\s]', text, re.S)
@@ -62,6 +72,8 @@ def main():
         raw=(root/relative).read_bytes();assert hashlib.sha256(raw).hexdigest()==expected,relative
     for relative,expected in BASE_TOKEN_HASHES.items():
         raw=(root/relative).read_text(); restored=raw
+        if relative.endswith('/runtime/coordinated_delivery_admission_v1.rs'):
+            restored=restore_ready_worker(restored)
         restored=restored.replace('        #[cfg(wholepact_financial_rendered_host_semantic_ci)]\n        let _observation = crate::financial_ci_actor::AdmitReadObservation::enter();\n','')
         if relative.endswith('coordinated_admit_read_v1.rs'):
             start=restored.index('        let mut callback_error = None;')
