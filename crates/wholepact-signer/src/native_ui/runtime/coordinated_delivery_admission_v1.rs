@@ -19,17 +19,19 @@ impl CoordinatedVerifiedImportV1 {
         self,
         action: SignerV3AdmitReadFinalV1,
     ) -> Result<CoordinatedReadAdmissionV1> {
-        self.check_current()?;
-        action.check_current()?;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        let _observation = crate::financial_ci_actor::AdmitReadObservation::enter();
+        actor_admit_read_result!(AdmitReadCurrent, &action, self.check_current())?;
+        actor_admit_read_result!(AdmitReadAction, &action, action.check_current())?;
         // A DTO-equivalent report alone cannot enter: this method consumes the
         // sole actual proof-verified source/client/material owner as well.
         if action.facts().received != self.report
-            || self.intent.digest().map_err(|_| Error::ReviewMismatch)?
+            || actor_admit_read_result!(AdmitReadIntentDigest, &action, self.intent.digest().map_err(|_| Error::ReviewMismatch))?
                 != self.report.recipient_intent_digest
         {
-            return Err(Error::ReviewMismatch);
+            return actor_admit_read_result!(AdmitReadReceivedBinding, &action, Err(Error::ReviewMismatch));
         }
-        self.source.check_admit_read_source(&action)?;
+        actor_admit_read_result!(AdmitReadSourceBefore, &action, self.source.check_admit_read_source(&action))?;
         let Self {
             source,
             witness,
@@ -41,7 +43,7 @@ impl CoordinatedVerifiedImportV1 {
         // The callback below is restriction-only; all actual journal reads are
         // separately guarded by the retained nominal Final before and after.
         let witness = witness.read_for_admission(action, || source.check_current())?;
-        source.check_admit_read_source(witness.action())?;
+        actor_admit_read_result!(AdmitReadSourceAfter, witness.action(), source.check_admit_read_source(witness.action()))?;
         Ok(CoordinatedReadAdmissionV1 {
             source,
             witness,
@@ -68,12 +70,14 @@ pub(in crate::native_ui::runtime) struct PreparedCoordinatedAdmissionV1 {
 }
 impl CoordinatedReadAdmissionV1 {
     pub(in crate::native_ui::runtime) fn prepare(self) -> Result<PreparedCoordinatedAdmissionV1> {
-        let prepared = self.source.prepare_admission_intent(
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        let _observation = crate::financial_ci_actor::AdmitReadObservation::enter();
+        let prepared = actor_admit_read_result!(AdmitReadPrepareIntent, self.witness.action(), self.source.prepare_admission_intent(
             self.witness.action(),
             &self.fixed,
             &self.intent,
             self.witness.history(),
-        )?;
+        ))?;
         let request = prepared.request();
         let retained_report = wholepact_financial_coordinator_origin::SignerV3AdmitReadRetainedV1 {
             admit_read_presentation_digest: self
@@ -85,20 +89,20 @@ impl CoordinatedReadAdmissionV1 {
             source_identity_digest: self.received.source_identity_digest.clone(),
             owner_service_digest: self.received.owner_service_digest.clone(),
             recipient_intent_digest: self.received.recipient_intent_digest.clone(),
-            authenticated_history_digest: self
+            authenticated_history_digest: actor_admit_read_result!(AdmitReadHistoryDigest, self.witness.action(), self
                 .witness
                 .history()
                 .history_digest()
-                .map_err(|_| Error::ReviewMismatch)?,
-            admission_request_digest: prepared.request_digest()?,
+                .map_err(|_| Error::ReviewMismatch))?,
+            admission_request_digest: actor_admit_read_result!(AdmitReadRequestDigest, self.witness.action(), prepared.request_digest())?,
             admission_review_digest: prepared.review_digest().into(),
             operation_id: request.operation_id.clone(),
             expected_head_sequence: request.expected_head.sequence,
             expected_head_digest: request.expected_head.digest.clone(),
-            display: prepared.display()?,
+            display: actor_admit_read_result!(AdmitReadDisplay, self.witness.action(), prepared.display())?,
         };
-        retained_report.validate()?;
-        self.source.check_admit_read_source(self.witness.action())?;
+        actor_admit_read_result!(AdmitReadReport, self.witness.action(), retained_report.validate())?;
+        actor_admit_read_result!(AdmitReadPreparedSource, self.witness.action(), self.source.check_admit_read_source(self.witness.action()))?;
         let read_deadline = self.witness.action().original_read_deadline();
         let read_expires_at_ms = self.witness.action().facts().expires_at_ms;
         let (witness, history) = self.witness.finish()?;

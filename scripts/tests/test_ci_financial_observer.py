@@ -3034,6 +3034,27 @@ class ActorDiagnosticTests(unittest.TestCase):
             facts=self.facts();facts['driver']['class']=cls
             with self.assertRaises(O.C.Rejected):O.C.validate_actor_failure_facts(facts,'Signer1')
 
+    def test_exact_admit_read_stages_and_authority_classes_are_closed(self):
+        stages=frozenset(('AdmitReadAction', 'AdmitReadCurrent', 'AdmitReadDisplay', 'AdmitReadFinishCurrent', 'AdmitReadFinishCustody', 'AdmitReadFinishPhase', 'AdmitReadHistory', 'AdmitReadHistoryBounds', 'AdmitReadHistoryCallback', 'AdmitReadHistoryCallerDeadline', 'AdmitReadHistoryDigest', 'AdmitReadHistoryDisclosure', 'AdmitReadHistoryEventReplay', 'AdmitReadHistoryExchangeDeadline', 'AdmitReadHistoryFinalValidation', 'AdmitReadHistoryPageConnect', 'AdmitReadHistoryPageHandshake', 'AdmitReadHistoryPagePeerBinding', 'AdmitReadHistoryPageRequestBuild', 'AdmitReadHistoryPageRequestWrite', 'AdmitReadHistoryPageResponse', 'AdmitReadHistoryPageResponseRead', 'AdmitReadHistoryPageValidation', 'AdmitReadHistorySnapshotConnect', 'AdmitReadHistorySnapshotHandshake', 'AdmitReadHistorySnapshotPeerBinding', 'AdmitReadHistorySnapshotRequestBuild', 'AdmitReadHistorySnapshotRequestWrite', 'AdmitReadHistorySnapshotResponse', 'AdmitReadHistorySnapshotResponseRead', 'AdmitReadHistorySnapshotValidation', 'AdmitReadHistorySourceCallback', 'AdmitReadIntentDigest', 'AdmitReadPrepareIntent', 'AdmitReadPreparedSource', 'AdmitReadReceivedBinding', 'AdmitReadReport', 'AdmitReadRequestDigest', 'AdmitReadSourceAcquire', 'AdmitReadSourceAction', 'AdmitReadSourceAfter', 'AdmitReadSourceBefore', 'AdmitReadSourceBinding', 'AdmitReadSourceCallback', 'AdmitReadSourceCurrent', 'AdmitReadSourceLeasePermission', 'AdmitReadSourcePresentation', 'AdmitReadSourcePurpose', 'AdmitReadSourceRecords', 'AdmitReadSourceRetained', 'AdmitReadSourceRevision', 'AdmitReadSourceRevisionMissing', 'AdmitReadWitnessAction', 'AdmitReadWitnessBinding', 'AdmitReadWitnessCheck', 'AdmitReadWitnessCustody', 'AdmitReadWitnessDigest', 'AdmitReadWitnessPresentation'))
+        classes=frozenset(('IoConnectionRefused', 'AuthorityInvalidBinding', 'AuthorityPermission', 'AuthorityStaleHead', 'AuthorityConflict', 'AuthorityInactive', 'AuthorityRecoveryRequired', 'AuthorityExpired', 'AuthorityPolicyDenied', 'AuthorityBudgetExceeded', 'AuthorityInputReserved', 'AuthorityObligationReserved', 'AuthorityLimit', 'AuthorityStorage', 'AuthorityCorruptHistory', 'AuthorityPermanentStopUnavailable', 'AuthorityOfflineHistoryUnsupported', 'AuthorityConstructionHistoryUnsupported', 'AuthorityUnsupportedVersion', 'AuthorityAuthentication', 'AuthorityUncertain', 'AuthorityResolutionUnavailable', 'AuthoritySessionRequired', 'AuthoritySessionPending'))
+        self.assertEqual(frozenset(x for x in O.C.ACTOR_DRIVER_STAGES if x.startswith('AdmitRead')),stages)
+        self.assertEqual(frozenset(x for x in O.C.ACTOR_CLASSES if x.startswith('Authority')),classes-{'IoConnectionRefused'})
+        for stage in stages:
+            for cls in classes:
+                facts=self.facts();facts['driver']=dict(stage=stage,**{'class':cls})
+                O.C.validate_record(self.record('ActorFailureBoundary',facts,2,role='Signer1'),O.C.SEMANTIC_PROFILE)
+                value=O.C.unavailable_actor_diagnostic();value['actors']['Signer1']['failure']={k:facts[k] for k in ('driver','listener','origin')}
+                O.C.validate_actor_diagnostic(value)
+        for key,value in [('stage','AdmitReadRawError'),('stage',True),('class','AuthorityOther'),('class','AuthorityRawError'),('class',True)]:
+            facts=self.facts();facts['driver'][key]=value
+            with self.assertRaises(O.C.Rejected):O.C.validate_actor_failure_facts(facts,'Signer1')
+    def test_new_admit_read_labels_fit_original_native_and_projection_bounds(self):
+        facts=self.facts();facts['driver']=dict(stage=max(O.C.ACTOR_DRIVER_STAGES,key=len),**{'class':max(O.C.ACTOR_CLASSES,key=len)})
+        record=self.record('ActorFailureBoundary',facts,2,role='Signer1')
+        O.C.validate_record(record,O.C.SEMANTIC_PROFILE)
+        self.assertLessEqual(len(json.dumps(record,separators=(',',':')).encode()),8192)
+        self.test_worst_projection_fits_original_line_bound_and_is_strict()
+
 from unittest import mock
 class StopObservation(Exception):pass
 class CaptureReached(Exception):pass

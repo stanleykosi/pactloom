@@ -64,9 +64,9 @@ impl CoordinatedPreparedDeliverySourceV1 {
     /// This is a fresh guarded read, never an INSERT or a replacement receipt.
     /// Retained metadata is checked against the original live session owner.
     pub(crate) fn check_admit_read_source(&self, action: &SignerV3AdmitReadFinalV1) -> Result<()> {
-        self.check_current()?;
-        action.check_current()?;
-        action.presentation().validate()?;
+        actor_admit_read_detail_result!(AdmitReadSourceCurrent, self.check_current())?;
+        actor_admit_read_detail_result!(AdmitReadSourceAction, action.check_current())?;
+        actor_admit_read_detail_result!(AdmitReadSourcePresentation, action.presentation().validate())?;
         let received = &action.facts().received;
         if received.source_identity_digest != self.custody.staged.source_identity()
             || received.prepare_read_presentation_digest != self.read.presentation_digest
@@ -75,34 +75,34 @@ impl CoordinatedPreparedDeliverySourceV1 {
             || action.original_material_deadline() != self.custody.staged.original_material_deadline()
             || action.original_service_deadline() != self.custody.lifetime.original_service_deadline()
         {
-            return Err(Error::ReviewMismatch);
+            return actor_admit_read_detail_result!(AdmitReadSourceBinding, Err(Error::ReviewMismatch));
         }
         let ready = &self.custody.staged.source.ready;
         let source = &ready.pairing.source;
-        source.retained.check()?;
-        action.check_current()?;
-        let pin = source.revision.as_ref().ok_or(Error::Unavailable)?;
-        source
+        actor_admit_read_detail_result!(AdmitReadSourceRetained, source.retained.check())?;
+        actor_admit_read_detail_result!(AdmitReadSourceAction, action.check_current())?;
+        let pin = actor_admit_read_detail_result!(AdmitReadSourceRevisionMissing, source.revision.as_ref().ok_or(Error::Unavailable))?;
+        actor_admit_read_detail_result!(AdmitReadSourceRevision, source
             .journal
-            .check_coordinated_v3_admit_read_revision(pin, action)?;
-        let lease = ready.session.acquire_construction_records(
+            .check_coordinated_v3_admit_read_revision(pin, action))?;
+        let lease = actor_admit_read_detail_result!(AdmitReadSourceAcquire, ready.session.acquire_construction_records(
             &source.journal,
             ready.enrollment.reference(),
             ready.manifest.reference(),
             &ready.accepted,
-            CoordinatedConstructionActionV1::AdmitRead(action, self.purpose_binding(action)?),
-        )?;
+            CoordinatedConstructionActionV1::AdmitRead(action, actor_admit_read_detail_result!(AdmitReadSourcePurpose, self.purpose_binding(action))?),
+        ))?;
         if lease.enrollment() != &ready.enrollment || lease.manifest() != &ready.manifest {
-            return Err(Error::ReviewMismatch);
+            return actor_admit_read_detail_result!(AdmitReadSourceRecords, Err(Error::ReviewMismatch));
         }
-        lease.require_admit_read(action)?;
-        action.check_current()?;
+        actor_admit_read_detail_result!(AdmitReadSourceLeasePermission, lease.require_admit_read(action))?;
+        actor_admit_read_detail_result!(AdmitReadSourceAction, action.check_current())?;
         drop(lease);
-        source
+        actor_admit_read_detail_result!(AdmitReadSourceRevision, source
             .journal
-            .check_coordinated_v3_admit_read_revision(pin, action)?;
-        self.check_current()?;
-        action.check_current()?;
+            .check_coordinated_v3_admit_read_revision(pin, action))?;
+        actor_admit_read_detail_result!(AdmitReadSourceCurrent, self.check_current())?;
+        actor_admit_read_detail_result!(AdmitReadSourceAction, action.check_current())?;
         Ok(())
     }
 }

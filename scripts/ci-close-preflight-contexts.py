@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed P52 typechecks and selected maintained synthetic tests; no fullflow or artifact export."""
+"""Fixed P53 typechecks and selected maintained synthetic tests; no fullflow or artifact export."""
 import importlib.util,json,os,pathlib,shutil,time
 HERE=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('preflight_supervisor',HERE/'ci-financial-supervisor.py');S=importlib.util.module_from_spec(spec);spec.loader.exec_module(S)
@@ -133,6 +133,12 @@ HANDOFF_SECURITY_TESTS=(
     'account::birth::enrollment::roster_v2::durable_entry_v1::prepared_delivery_v3::coordinated_source_entry_v1::coordinated_delivery_source_v1::material_selection_handoff_tests::material_selection_does_not_refresh_on_later_observation',
     'account::birth::enrollment::roster_v2::durable_entry_v1::prepared_delivery_v3::coordinated_source_entry_v1::coordinated_delivery_source_v1::material_selection_handoff_tests::material_selection_rejects_wall_rollback_and_absolute_expiry',
     'account::birth::enrollment::roster_v2::durable_entry_v1::prepared_delivery_v3::coordinated_source_entry_v1::coordinated_delivery_source_v1::material_selection_handoff_tests::material_selection_refuses_expired_or_unstarted_originals',
+    'financial_ci_actor::admit_read_observation_tests::borrowed_detail_outside_owned_scope_is_unavailable',
+    'financial_ci_actor::admit_read_observation_tests::owned_scope_first_detail_wins_and_success_discards_it',
+    'financial_ci_actor::admit_read_observation_tests::nested_owned_scope_restores_exact_parent_detail',
+    'financial_ci_actor::admit_read_observation_tests::unwind_restores_scope_without_latching_or_closing',
+    'financial_ci_actor::admit_read_observation_tests::details_do_not_cross_worker_threads',
+    'financial_ci_actor::admit_read_observation_tests::original_authority_error_variant_classification_is_exact',
 )
 def signer_test_executable(raw,target):
     rows=[json.loads(line) for line in raw.splitlines() if line.startswith(b'{')]

@@ -21,6 +21,33 @@ macro_rules! actor_driver_result {
         result
     }};
 }
+// Terminal owned AdmitRead failures only. The genuine Final denies custody
+// through the existing close kernel before best-effort observation. This
+// intentionally advances restrictive shutdown; the original error and Rust
+// automatic drop sequence are retained. No output or hook in other profiles.
+macro_rules! actor_admit_read_result {
+    ($stage:ident, $action:expr, $result:expr) => {{
+        let result = $result;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error) = &result {
+            crate::financial_ci_actor::admit_read_terminal(
+                wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::DriverStage::$stage, error);
+            ($action).financial_ci_close_for_failed_admit_read_v1();
+        }
+        result
+    }};
+}
+// Borrowed checks only retain a finite detail in an owning worker's lexical
+// scope. They never mark failure, write output, or close a capability.
+macro_rules! actor_admit_read_detail_result {
+    ($stage:ident, $result:expr) => {{
+        let result = $result;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error) = &result { crate::financial_ci_actor::admit_read_detail(
+            wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::DriverStage::$stage, error); }
+        result
+    }};
+}
 macro_rules! actor_driver_detail_result {
     ($stage:ident, $result:expr) => {{
         let result = $result;

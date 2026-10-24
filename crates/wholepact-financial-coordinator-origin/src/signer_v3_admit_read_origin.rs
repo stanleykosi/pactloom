@@ -143,13 +143,37 @@ impl SignerV3AdmitReadFinalV1 {
     pub fn original_material_deadline(&self) -> Instant {
         self.binding.owner.material_deadline
     }
+    /// Semantic failure reporting only. An unconditional owned-worker error
+    /// already exists. Advance the same restrictive close before the original
+    /// automatic drops, so IPC-first cleanup cannot erase the latched error.
+    /// This is not a success/permission API and performs no additional check.
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    pub fn financial_ci_close_for_failed_admit_read_v1(&self) {
+        self.binding.owner.pair.entry.core.close_with_failure_observation();
+    }
     pub fn finish_read(mut self) -> Result<()> {
-        self.check_current()?;
-        self.binding.owner.pair.entry.core.phase.step(
+        let current = self.check_current();
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error) = &current {
+            crate::financial_ci_actor_diagnostics::driver(
+                crate::financial_ci_actor_diagnostics::DriverStage::AdmitReadFinishCurrent,
+                crate::financial_ci_actor_diagnostics::classify_io(error.kind()));
+            self.financial_ci_close_for_failed_admit_read_v1();
+        }
+        current?;
+        let transition = self.binding.owner.pair.entry.core.phase.step(
             self.binding.owner.pair.entry.slot(),
             151,
             152,
-        )?;
+        );
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error) = &transition {
+            crate::financial_ci_actor_diagnostics::driver(
+                crate::financial_ci_actor_diagnostics::DriverStage::AdmitReadFinishPhase,
+                crate::financial_ci_actor_diagnostics::classify_io(error.kind()));
+            self.financial_ci_close_for_failed_admit_read_v1();
+        }
+        transition?;
         self.consumed = true;
         Ok(())
     }

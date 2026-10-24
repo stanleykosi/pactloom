@@ -71,3 +71,168 @@ impl ErrorClass for crate::consent_journal::JournalError {fn finite_class(&self)
  E::Conflict=>Class::JournalConflict,E::NotFound=>Class::JournalNotFound,E::LiveAuthorization=>Class::JournalLiveAuthorization,
  E::InputReserved=>Class::JournalInputReserved,E::BudgetExceeded=>Class::JournalBudgetExceeded,E::Limit=>Class::JournalLimit}
 }}
+
+// Only the owned AdmitRead/prepare lexical scopes enable these details. A
+// reusable borrowed check cannot poison the global failure latch on its own.
+type AdmitReadDetail = (DriverStage, Class);
+std::thread_local! {
+    static ADMIT_READ_DETAIL: std::cell::Cell<Option<Option<AdmitReadDetail>>> = const { std::cell::Cell::new(None) };
+}
+pub(crate) struct AdmitReadObservation { previous: Option<Option<AdmitReadDetail>> }
+impl AdmitReadObservation {
+    pub(crate) fn enter() -> Self {
+        Self { previous: ADMIT_READ_DETAIL.with(|slot| slot.replace(Some(None))) }
+    }
+}
+impl Drop for AdmitReadObservation {
+    fn drop(&mut self) { ADMIT_READ_DETAIL.with(|slot| slot.set(self.previous)); }
+}
+pub(crate) fn admit_read_detail_value(detail: AdmitReadDetail) {
+    ADMIT_READ_DETAIL.with(|slot| { if slot.get() == Some(None) { slot.set(Some(Some(detail))); } });
+}
+pub(crate) fn admit_read_detail(stage: DriverStage, error: &impl ErrorClass) {
+    admit_read_detail_value((stage, error.finite_class()));
+}
+fn admit_read_selected(stage: DriverStage, class: Class) -> AdmitReadDetail {
+    ADMIT_READ_DETAIL.with(|slot| slot.get().flatten().unwrap_or((stage, class)))
+}
+pub(crate) fn admit_read_terminal(stage: DriverStage, error: &impl ErrorClass) {
+    let (stage, class) = admit_read_selected(stage, error.finite_class());
+    diagnostic::driver(stage, class);
+}
+impl ErrorClass for wholepact_authority::AuthorityError {
+    fn finite_class(&self) -> Class {
+        use wholepact_authority::AuthorityError as E;
+        match self {
+            E::InvalidBinding=>Class::AuthorityInvalidBinding,
+            E::Permission=>Class::AuthorityPermission,
+            E::StaleHead=>Class::AuthorityStaleHead,
+            E::Conflict=>Class::AuthorityConflict,
+            E::Inactive=>Class::AuthorityInactive,
+            E::RecoveryRequired=>Class::AuthorityRecoveryRequired,
+            E::Expired=>Class::AuthorityExpired,
+            E::PolicyDenied=>Class::AuthorityPolicyDenied,
+            E::BudgetExceeded=>Class::AuthorityBudgetExceeded,
+            E::InputReserved=>Class::AuthorityInputReserved,
+            E::ObligationReserved=>Class::AuthorityObligationReserved,
+            E::Limit=>Class::AuthorityLimit,
+            E::Storage=>Class::AuthorityStorage,
+            E::CorruptHistory=>Class::AuthorityCorruptHistory,
+            E::PermanentStopUnavailable=>Class::AuthorityPermanentStopUnavailable,
+            E::OfflineHistoryUnsupported=>Class::AuthorityOfflineHistoryUnsupported,
+            E::ConstructionHistoryUnsupported=>Class::AuthorityConstructionHistoryUnsupported,
+            E::UnsupportedVersion=>Class::AuthorityUnsupportedVersion,
+            E::Authentication=>Class::AuthorityAuthentication,
+            E::Uncertain=>Class::AuthorityUncertain,
+            E::ResolutionUnavailable=>Class::AuthorityResolutionUnavailable,
+            E::SessionRequired=>Class::AuthoritySessionRequired,
+            E::SessionPending=>Class::AuthoritySessionPending,
+        }
+    }
+}
+#[cfg(feature = "synthetic-qualification")]
+pub(crate) fn admit_read_history_detail(error: &wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryFailureV1) -> AdmitReadDetail {
+    use wholepact_authority::transport::history_diagnostics_v1::{CheckedHistoryStageV1 as S, CheckedHistoryIoKindV1 as I};
+    let stage = match error.stage() {
+        S::CallerDeadline=>DriverStage::AdmitReadHistoryCallerDeadline,
+        S::ExchangeDeadline=>DriverStage::AdmitReadHistoryExchangeDeadline,
+        S::SourceCallback=>DriverStage::AdmitReadHistorySourceCallback,
+        S::SnapshotConnect=>DriverStage::AdmitReadHistorySnapshotConnect,
+        S::SnapshotHandshake=>DriverStage::AdmitReadHistorySnapshotHandshake,
+        S::SnapshotPeerBinding=>DriverStage::AdmitReadHistorySnapshotPeerBinding,
+        S::SnapshotRequestBuild=>DriverStage::AdmitReadHistorySnapshotRequestBuild,
+        S::SnapshotRequestWrite=>DriverStage::AdmitReadHistorySnapshotRequestWrite,
+        S::SnapshotResponseRead=>DriverStage::AdmitReadHistorySnapshotResponseRead,
+        S::SnapshotResponse=>DriverStage::AdmitReadHistorySnapshotResponse,
+        S::SnapshotValidation=>DriverStage::AdmitReadHistorySnapshotValidation,
+        S::PageConnect=>DriverStage::AdmitReadHistoryPageConnect,
+        S::PageHandshake=>DriverStage::AdmitReadHistoryPageHandshake,
+        S::PagePeerBinding=>DriverStage::AdmitReadHistoryPagePeerBinding,
+        S::PageRequestBuild=>DriverStage::AdmitReadHistoryPageRequestBuild,
+        S::PageRequestWrite=>DriverStage::AdmitReadHistoryPageRequestWrite,
+        S::PageResponseRead=>DriverStage::AdmitReadHistoryPageResponseRead,
+        S::PageResponse=>DriverStage::AdmitReadHistoryPageResponse,
+        S::PageValidation=>DriverStage::AdmitReadHistoryPageValidation,
+        S::EventReplay=>DriverStage::AdmitReadHistoryEventReplay,
+        S::FinalValidation=>DriverStage::AdmitReadHistoryFinalValidation,
+        S::Bounds=>DriverStage::AdmitReadHistoryBounds,
+        _ => DriverStage::AdmitReadHistory,
+    };
+    let class = match error.io_kind() {
+        Some(I::Timeout)=>Class::IoTimedOut, Some(I::Closed)=>Class::IoUnexpectedEof,
+        Some(I::Refused)=>Class::IoConnectionRefused, Some(I::Other)=>Class::IoOther,
+        None=>error.error().finite_class(),
+    };
+    (stage, class)
+}
+
+#[cfg(test)]
+mod admit_read_observation_tests {
+    use super::*;
+    const FIRST: AdmitReadDetail = (DriverStage::AdmitReadSourceRevision, Class::JournalInvalidBinding);
+    const FALLBACK: AdmitReadDetail = (DriverStage::AdmitReadSourceBefore, Class::SignerReviewMismatch);
+    fn selected() -> AdmitReadDetail { admit_read_selected(FALLBACK.0, FALLBACK.1) }
+    #[test]
+    fn borrowed_detail_outside_owned_scope_is_unavailable() {
+        admit_read_detail_value(FIRST);
+        assert_eq!(selected(), FALLBACK);
+    }
+    #[test]
+    fn owned_scope_first_detail_wins_and_success_discards_it() {
+        { let _scope = AdmitReadObservation::enter();
+          admit_read_detail_value(FIRST); admit_read_detail_value(FALLBACK);
+          assert_eq!(selected(), FIRST); }
+        assert_eq!(selected(), FALLBACK);
+    }
+    #[test]
+    fn nested_owned_scope_restores_exact_parent_detail() {
+        let _parent = AdmitReadObservation::enter();
+        admit_read_detail_value(FIRST);
+        { let _child = AdmitReadObservation::enter();
+          assert_eq!(selected(), FALLBACK);
+          admit_read_detail_value(FALLBACK); assert_eq!(selected(), FALLBACK); }
+        assert_eq!(selected(), FIRST);
+    }
+    #[test]
+    fn unwind_restores_scope_without_latching_or_closing() {
+        let _parent = AdmitReadObservation::enter();
+        admit_read_detail_value(FIRST);
+        let result = std::panic::catch_unwind(|| {
+            let _child = AdmitReadObservation::enter();
+            admit_read_detail_value(FALLBACK); panic!("synthetic scope unwind");
+        });
+        assert!(result.is_err()); assert_eq!(selected(), FIRST);
+    }
+    #[test]
+    fn details_do_not_cross_worker_threads() {
+        let _scope = AdmitReadObservation::enter(); admit_read_detail_value(FIRST);
+        assert_eq!(std::thread::spawn(selected).join().unwrap(), FALLBACK);
+        assert_eq!(selected(), FIRST);
+    }
+    #[test]
+    fn original_authority_error_variant_classification_is_exact() {
+        assert_eq!(wholepact_authority::AuthorityError::InvalidBinding.finite_class(), Class::AuthorityInvalidBinding);
+        assert_eq!(wholepact_authority::AuthorityError::Permission.finite_class(), Class::AuthorityPermission);
+        assert_eq!(wholepact_authority::AuthorityError::StaleHead.finite_class(), Class::AuthorityStaleHead);
+        assert_eq!(wholepact_authority::AuthorityError::Conflict.finite_class(), Class::AuthorityConflict);
+        assert_eq!(wholepact_authority::AuthorityError::Inactive.finite_class(), Class::AuthorityInactive);
+        assert_eq!(wholepact_authority::AuthorityError::RecoveryRequired.finite_class(), Class::AuthorityRecoveryRequired);
+        assert_eq!(wholepact_authority::AuthorityError::Expired.finite_class(), Class::AuthorityExpired);
+        assert_eq!(wholepact_authority::AuthorityError::PolicyDenied.finite_class(), Class::AuthorityPolicyDenied);
+        assert_eq!(wholepact_authority::AuthorityError::BudgetExceeded.finite_class(), Class::AuthorityBudgetExceeded);
+        assert_eq!(wholepact_authority::AuthorityError::InputReserved.finite_class(), Class::AuthorityInputReserved);
+        assert_eq!(wholepact_authority::AuthorityError::ObligationReserved.finite_class(), Class::AuthorityObligationReserved);
+        assert_eq!(wholepact_authority::AuthorityError::Limit.finite_class(), Class::AuthorityLimit);
+        assert_eq!(wholepact_authority::AuthorityError::Storage.finite_class(), Class::AuthorityStorage);
+        assert_eq!(wholepact_authority::AuthorityError::CorruptHistory.finite_class(), Class::AuthorityCorruptHistory);
+        assert_eq!(wholepact_authority::AuthorityError::PermanentStopUnavailable.finite_class(), Class::AuthorityPermanentStopUnavailable);
+        assert_eq!(wholepact_authority::AuthorityError::OfflineHistoryUnsupported.finite_class(), Class::AuthorityOfflineHistoryUnsupported);
+        assert_eq!(wholepact_authority::AuthorityError::ConstructionHistoryUnsupported.finite_class(), Class::AuthorityConstructionHistoryUnsupported);
+        assert_eq!(wholepact_authority::AuthorityError::UnsupportedVersion.finite_class(), Class::AuthorityUnsupportedVersion);
+        assert_eq!(wholepact_authority::AuthorityError::Authentication.finite_class(), Class::AuthorityAuthentication);
+        assert_eq!(wholepact_authority::AuthorityError::Uncertain.finite_class(), Class::AuthorityUncertain);
+        assert_eq!(wholepact_authority::AuthorityError::ResolutionUnavailable.finite_class(), Class::AuthorityResolutionUnavailable);
+        assert_eq!(wholepact_authority::AuthorityError::SessionRequired.finite_class(), Class::AuthoritySessionRequired);
+        assert_eq!(wholepact_authority::AuthorityError::SessionPending.finite_class(), Class::AuthoritySessionPending);
+    }
+}
