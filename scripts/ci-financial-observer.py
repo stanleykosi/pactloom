@@ -24,6 +24,7 @@ class ObserverFiles:
         self._validation_profiles={}
         self._semantic_active=None
         self._diagnostics=None
+        self._collection_size=None
         self._failure_latched=False;self._failure_drain_deadline=None
         try:meta=self.directory.stat(follow_symlinks=False)
         except OSError:raise C.Rejected('observer_missing') from None
@@ -47,11 +48,16 @@ class ObserverFiles:
             if diagnostics['timing']['availability']=='Observed':
                 diagnostics['timing']['observer_remaining_ns']=self.deadline_ns-now
             self._diagnostics=diagnostics
+            try:self._collection_size=dict(semantics='LastSuccessfulCompletePrefix',source_records=len(records),source_complete_bytes=sum(len(value[1]) for value in self._files.values()))
+            except Exception:self._collection_size=None
             return records
         except C.Rejected:
             self._clear_host_view();raise
         except OSError:
             self._clear_host_view();raise C.Rejected('observer_failure') from None
+    def collection_diagnostic(self):
+        # Previously successful collection metadata only; no IO or record values.
+        return None if self._collection_size is None else self._collection_size.copy()
     def _read(self,final):
         meta=self.directory.stat(follow_symlinks=False)
         C.require((meta.st_dev,meta.st_ino)==self._directory_identity,'observer_failure')

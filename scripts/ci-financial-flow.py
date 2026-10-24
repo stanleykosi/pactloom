@@ -108,7 +108,7 @@ class FullFlow:
             if owner not in ('Signer1','Signer2') and not(owner is None and phase=='NormalFinishReview'):return
             old=self._review_observed
             same=old is not None and old['owner']==owner and old['phase']==phase
-            value=dict(version=2,semantics='LastValidatedReview',phase=phase,subphase='None',
+            value=dict(version=3,semantics='LastValidatedReview',phase=phase,subphase='None',
                 owner=owner,generation=s['view_generation'],widgets=[],
                 seek_counts=[0 if t is None else self.scrolls.get((phase,'None','seek',t,owner),0) for t in tags],
                 scroll_counts=[self.scrolls.get((phase,'None',t,o,d),0) for t,o,d in
@@ -118,7 +118,9 @@ class FullFlow:
                 last_seek=old['last_seek'] if same else 'None',
                 operation=old['operation'] if same else 'None',boundary=old['boundary'] if same else 'None',
                 operation_generation=old['operation_generation'] if same else None,
-                anchor=old['anchor'] if same else 'None',point_inside=old['point_inside'] if same else None)
+                anchor=old['anchor'] if same else 'None',point_inside=old['point_inside'] if same else None,
+                costs=old['costs'] if same else {name:dict(attempted=0,returned=0,failed=0,total_ns=0,max_ns=0) for name in C.REVIEW_COST_BUCKETS},
+                source_size=old['source_size'] if same else None)
             for tag in tags:
                 w=self.find(s,tag,owner);value['widgets'].append([w is not None,False if w is None else w['enabled']])
             if seek is not None:value['last_seek']={tags[0]:'Body',tags[1]:'Ack',tags[2]:'Action'}.get(seek,'None')
@@ -133,6 +135,45 @@ class FullFlow:
                     value['point_inside']=x0*scale<x<x1*scale and y0*scale<y<y1*scale
             self._review_observed=value
         except Exception:pass # Diagnostic failure cannot alter original inputs or failure.
+    def _review_timed(self,bucket,call,*,snapshot_result=False,frame=None):
+        # Observation only. Failure attribution is the LAST validated phase,
+        # not proof of the failing native frame or acceptance. No call retries.
+        observed=None
+        try:
+            observed=self._review_observed
+            if observed is not None:
+                identity=(observed['phase'],observed['subphase'],observed['owner'])
+                if frame is not None and (frame['phase'],frame['subphase'],frame['owner'])!=identity:observed=None
+        except Exception:observed=None
+        started=None;result=None;returned=False
+        if observed is not None:
+            try:started=time.monotonic_ns()
+            except Exception:pass
+        try:
+            result=call();returned=True;return result
+        finally:
+            try:
+                if observed is not None and self._review_observed is observed:
+                    if snapshot_result and returned and (result['phase'],result['subphase'],result['owner'])!=(observed['phase'],observed['subphase'],observed['owner']):
+                        pass # Do not charge a cross-phase snapshot to either phase.
+                    elif observed['costs'] is not None:
+                        ended=time.monotonic_ns()
+                        if type(started) is not int or type(ended) is not int or not 0<=started<=ended:raise ValueError()
+                        elapsed=ended-started;row=observed['costs'][bucket]
+                        updated=dict(attempted=row['attempted']+1,returned=row['returned']+int(returned),failed=row['failed']+int(not returned),total_ns=row['total_ns']+elapsed,max_ns=max(row['max_ns'],elapsed))
+                        if not all(type(v) is int and 0<=v<=2**63-1 for v in updated.values()):raise ValueError()
+                        observed['costs'][bucket]=updated
+            except Exception:
+                try:
+                    if observed is not None:observed['costs']=None
+                except Exception:pass
+    def _note_review_source_size(self,frame):
+        try:
+            if self._review_observed is not None and (frame['phase'],frame['subphase'],frame['owner'])==(self._review_observed['phase'],self._review_observed['subphase'],self._review_observed['owner']):self._review_observed['source_size']=self.observer.collection_diagnostic()
+        except Exception:
+            try:
+                if self._review_observed is not None:self._review_observed['source_size']=None
+            except Exception:pass
     def review_diagnostic(self):
         # Deep copy only; not current-at-failure state or proof of input acceptance.
         return None if self._review_observed is None else json.loads(json.dumps(self._review_observed))
@@ -164,14 +205,15 @@ class FullFlow:
                 coverage='Unobserved' if cached is None else cached[3],capture_outcome=self.host_capture_outcome,
                 capture_context=capture_context))
     def snapshot(self):
-        self.fixture.check();snapshot=self.native.snapshot()
+        self.fixture.check();snapshot=self._review_timed('NativeSnapshot',self.native.snapshot,snapshot_result=True)
         self.note_review_observation(snapshot)
         self.cache_host_observation(snapshot['host_observation'])
         # next_snapshot may observe later records while awaiting a fresh frame.
         # Refresh AFTER that read: Finished is not normal-completion proof, and
         # the exact native proof guard must not receive a pre-frame record set.
         # ObserverFiles retains append-only validation and the original deadline.
-        self.records=self.observer.read()
+        self.records=self._review_timed('ProofRead',self.observer.read,frame=snapshot)
+        self._note_review_source_size(snapshot)
         C.require(not any(r['kind']=='Failure' for r in self.records),'observer_failure')
         return snapshot
     @staticmethod
@@ -193,7 +235,7 @@ class FullFlow:
         C.require(key not in self.done,'replay')
         # Two real later frames before one effect. Repeated observations may wait;
         # an attempted effect is latched BEFORE send and never retried.
-        latest=self.native.stable(s['phase'],s['owner'],protected=s['secret_input'] or s['host_input'])
+        latest=self._review_timed('StableFrames',lambda:self.native.stable(s['phase'],s['owner'],protected=s['secret_input'] or s['host_input']),frame=s)
         self.note_review_observation(latest)
         if tag=='PasswordSubmit' and s['phase'] in ('V3Password','Password'):
             self.password_guard(latest,s)
@@ -241,7 +283,7 @@ class FullFlow:
         operation='BodyDown' if body=='ReviewBody' and direction=='down' else 'OuterUp' if body=='ScrollRegion' and direction=='up' else 'OuterDown' if body=='ScrollRegion' else 'OtherScroll'
         anchor='Body' if operation=='BodyDown' else 'Outer' if operation in ('OuterUp','OuterDown') else 'None'
         self.note_review_observation(s,operation=operation,boundary='Requested',anchor=anchor,point=point)
-        action(*point);self.controller.wait_render_progress()
+        self._review_timed('WheelInput',lambda:action(*point),frame=s);self._review_timed('RenderWait',self.controller.wait_render_progress,frame=s)
         self.note_review_observation(s,operation=operation,boundary='Returned',anchor=anchor,point=point)
         return True
     def password_guard(self,latest,original):
@@ -334,7 +376,7 @@ class FullFlow:
         if order is not None and tag in order:
             # Exact native order is body, optional acknowledgement, action. An owed body
             # scroll must not turn downward after repeated action/body trips.
-            latest=self.native.stable(s['phase'],s['owner'])
+            latest=self._review_timed('StableFrames',lambda:self.native.stable(s['phase'],s['owner']),frame=s)
             self.note_review_observation(latest,seek=tag)
             h=latest['host_observation'];old=s['host_observation']
             C.require(latest['subphase']==s['subphase'] and owner==latest['owner']

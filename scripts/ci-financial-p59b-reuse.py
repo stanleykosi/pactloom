@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed P59b binaries + exact H66 Python harness; never a general build cache.
+"""Fixed P59b binaries + exact H67 Python harness; never a general build cache.
 
 P is the native producer, H is the independently reviewed runtime harness, and
 L is this exact CI event checkout. Nothing rewrites or relaxes the same-job or
@@ -33,30 +33,31 @@ MODE=b'financial-semantic-p59b-reuse\n'
 PROFILE='coordinated-financial-rendered-host-semantic-v1'
 PRODUCER=dict(repository='stanleykosi/pactloom',source='6dab2eb6e4ef29b74f54b5678ac3815276b72490',
  source_tree='81a06e346ace5e8a97e4f8e106c6dded74a2665c',run_id=40089346941,attempt=1)
-# Independently published exact eight-path H66 commit; native producer remains P59b.
-HARNESS=dict(repository='stanleykosi/pactloom',source='0c6f03630d1a328469a2e95df8be5491913870dc',source_tree='acfe79551e06da7f38cba01b244485b30a0173eb')
+# Independently published exact eight-path H67 commit; native producer remains P59b.
+# Diagnostic timing only: P59b lacks the separate native67 masking-race correction.
+HARNESS=dict(repository='stanleykosi/pactloom',source='001a607d4fa89531312c44b91d5cad078c41b316',source_tree='060ffb61bf91795462531ec629d8fb6d09e389e5')
 JOB_ID=120858653379
 EXPIRES_AT='2026-10-25T11:44:47Z'
 INVENTORY_SHA='a96e3cae9e4d6b568df905ce837884d8897d78c34323936dc6d7b6046f987342'
 # Inventory hashes bind the Git mode: SHA256(b'100644\0' + exact reviewed bytes).
-# Raw reviewed H66 SHA256s, in the same path order as H_CHANGES below:
+# Raw reviewed H67 SHA256s, in the same path order as H_CHANGES below:
 # 1f72c26a3a9a34687331476648af8c78d65d4b4447e2c89d15459d04f7d961e5
-# 72d67b488495b058da0c09783202513ea012ee89f7b8e5e24e7968c3a045ed54
-# e73211f35904c773d40771186f433b0e47da3c45fd6e1e9c71c6abd5a157b88a
-# 7b4df75581a3c9eb341753fd81263e2793013f0a551b8c6467b58f0695da021f
+# 001adcfca0da6092bb69743df3113dfbc1bb80b8859fb62c002c6f8039f0b865
+# b1084a5705bbdac3154fa2ec03dcdcd41d271b991664e921d2d3963845a7110c
+# 2b3a8e81b108760df3eb8dbe21bd1b465932231c6c9e5d62175ba58303fa8ef6
 # 4c4cc915fcbcbe779b48f1f60ff90b9bce081843d8b98a31cb9e4877fbb77186
 # 6b72e28373807ccb27be577c263bd067f3f75aef7c5dfb7fb4c7ae79aa78da69
 # be89b6d51b065f0f59ba5dc6bc3242599edf8f45708eb0bf42f6dfc3303a064e
-# 636319c8990af2a9e8a379a478d3af864aeebf5036b2dc0b342c1c8fbee6b11b
+# ffdf94e331b7437a72513ca9a9a0536d6fb29d2efbd8959ad96b0ef80908b13f
 H_CHANGES={
  'scripts/ci-financial-container.py':'424892dcf1b32ff7d4569b136d2e2f9046eb6dfcc7aa44b737bdc604a2ce4714',
- 'scripts/ci-financial-contract.py':'99aa4f28d9e8d2954558e8949ada9c12dfe5189e8ae4b92bd01101b8df90a99d',
- 'scripts/ci-financial-flow.py':'d59c9d7b8abd4effcd0d4a0f3d2630e3bbbabcceb3c33c04b29fddf25fe5a599',
- 'scripts/ci-financial-observer.py':'f122f9d42e66fb56b2301d38e3d39d8c8782242b7d2b602b6a96b387a66fea80',
+ 'scripts/ci-financial-contract.py':'ec91ed0a3f69f9fd5c24a5249540ced62cb22d6be4ffb741893a5233b172eef2',
+ 'scripts/ci-financial-flow.py':'aafbd0bc2e45fee574d1221f1736c99f443154482282766a49fc99361b803086',
+ 'scripts/ci-financial-observer.py':'2525ea793335fc3f0c9e529c9a7cf123684ffafd3775be5501d2c1f9f8ee2b40',
  'scripts/ci-financial-scenario.py':'28bb88f6ebd53563a10bbe95ad18e691dfebf3e9bb64fc8cbf1f79239597535e',
  'scripts/ci-financial-supervisor.py':'02fbc8580089e575a336abab35fbcee0e6f0ca0dc2c2ff1a2d6a8d036f6ee0ab',
  'scripts/tests/test_ci_financial_composition.py':'6a67acb48c5b450f74d717b6b48aab1c7e861bfc0709634c22b7bf393d03e99e',
- 'scripts/tests/test_ci_financial_observer.py':'b376e960cdaeb5b5429cdd1e7a6e5cccda0af13274ca5184d22412e66bc10bf1'}
+ 'scripts/tests/test_ci_financial_observer.py':'fba36d5576a9105a6916ccfde7fe78a2951213d289436c682ea61d46ab858574'}
 L_ADDED=frozenset(('scripts/ci-financial-p59b-reuse.py','scripts/tests/test_ci_financial_p59b_reuse.py'))
 L_CHANGED=frozenset(('.github/workflows/durable-native-linux.yml','scripts/qualification-gate-mode'))
 API_PINS={'run':'622a841b6852168a1f6b067f1fff9195cf979aa4e2f27e7e2456fdb7907288b6',
@@ -69,7 +70,7 @@ ELF_PINS={
  'coordinator-production':dict(size=99876704,sha256='f4d3db8bc828c5af0821033ac8f51c23f866dcd2007881c37b38f5f7968c1a63'),
  'coordinator-observed':dict(size=100558816,sha256='a806602bc26c7f6ffd12c9032c333789c116962921febaebd2dcade80b3758ca'),
  'pristine-setup':dict(size=154828280,sha256='a4d6d9819194a6efed603f219a5459c7e112bb6b8bffc1c4ef35975475512f80')}
-# Complete fixed cleanup closure: P59b plus the exact reviewed H66 contract
+# Complete fixed cleanup closure: P59b plus the exact reviewed H67 contract
 # and supervisor annex. Nine files come from tracked L bytes;
 # the tenth is the original P59b semantic gate literal, independently pinned.
 # L's new activation mode never becomes P/H's native profile or source bytes.
@@ -77,7 +78,7 @@ CLEANUP_PINS={
  'ci-bootstrap-output.py':'ce7c9a11b439e2a31f6e38c8401ab644840abba78c05482224484e5c931cc898',
  'ci-bootstrap-supervisor.py':'f606f43e4c3436209a380377ae7d8225fe8ee45828a748c776699f6190c709c0',
  'ci-financial-artifacts.py':'f31041a577f3fa0dc65f5880ac0a77d8fd145e53d4d576524ede3e2adbec29ce',
- 'ci-financial-contract.py':'72d67b488495b058da0c09783202513ea012ee89f7b8e5e24e7968c3a045ed54',
+ 'ci-financial-contract.py':'001adcfca0da6092bb69743df3113dfbc1bb80b8859fb62c002c6f8039f0b865',
  'ci-financial-external-output.py':'109dded70c7d7eca3160dd305601b3f5c9f31e24c8f0e6bb3c5161f8652c5587',
  'ci-financial-image.py':'0f638a42094bc41204a3869cbe33c0332e79c478782b813ed2cf8a6503b36439',
  'ci-financial-ocr-image.py':'5dd479e0def902357714b07d1116a83f2c9ad215ea462493032502e29d564d67',
