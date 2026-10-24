@@ -15,6 +15,11 @@ CALLSITE_COUNTS = {'AdmitReadIntentAction': 4, 'AdmitReadIntentAuthorityRequest'
 TEST_FOOTER = '\n#[cfg(all(test, feature = "synthetic-qualification"))]\n#[path = "coordinated_v1/full_intent_validation_tests.rs"]\nmod full_intent_validation_tests;\n'
 TEST_PEEK = '\n// Test-only finite observation; cannot set metadata or mint native authority.\n#[cfg(test)]\npub(crate) fn admit_read_detail_for_test() -> Option<(DriverStage, Class)> {\n    ADMIT_READ_DETAIL.with(|slot| slot.get().flatten())\n}\n'
 UNCHANGED = {'crates/wholepact-signer/src/lib.rs': '83e2424be07c90d42cb41db56ac93e94b81b322ab68e39329516174d2e512f5f', 'crates/wholepact-signer/src/financial_ci_actor.rs': 'e7655f95e8e4d7845ee4499475a6823074c6b394d89ce327ba60520871964a1a', 'crates/wholepact-signer/src/native_ui/runtime/coordinated_delivery_admission_v1.rs': '59c9fc8331a83323fab2d85ae4f0de853888af1eadcf090561d01b574846ef46', 'crates/wholepact-financial-coordinator-origin/src/signer_v3_admit_read_origin.rs': 'ed874cb1966596cea5ef563fea08853ec669a57948972fc370c6c7c068e8a6d3', 'crates/wholepact-financial-coordinator-origin/src/signer_continue_state.rs': 'f22c0ad3452dc038b0e34f45f8fbd1182c11113d6977d15b1bb347e838fe6cea'}
+# Lossless full nine-item review JSON compacted only for the existing wire
+# budget; restore this exact method prefix for the historical operation audit.
+COMPACT_DISPLAY = '    pub(crate) fn display(&self) -> Result<String> {\n        serde_json::to_string(&('
+PRETTY_DISPLAY = '    pub(crate) fn display(&self) -> Result<String> {\n        serde_json::to_string_pretty(&('
+
 # Exactly the two pre-existing implicit `?` conversions made explicit before
 # finite classification; not a general permission/error remapping allowance.
 IDENTITY_CONVERSIONS = [
@@ -30,6 +35,8 @@ def main():
  for relative,expected in BASE_TOKEN_HASHES.items():
   raw=(root/relative).read_text();restored=raw.replace(TEST_FOOTER,'')
   if relative.endswith('/coordinated_v1.rs'):
+   assert restored.count(COMPACT_DISPLAY)==1
+   restored=restored.replace(COMPACT_DISPLAY,PRETTY_DISPLAY)
    for conversion in IDENTITY_CONVERSIONS:
     assert restored.count(conversion)==1
     restored=restored.replace(conversion,conversion.removesuffix('.map_err(JournalError::from)'))

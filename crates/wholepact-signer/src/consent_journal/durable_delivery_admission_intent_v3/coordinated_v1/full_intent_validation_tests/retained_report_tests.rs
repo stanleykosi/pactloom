@@ -48,10 +48,13 @@ fn packet_bytes(p: &SignerV3AdmitPresentationV1) -> usize {
     checked(serde_json::to_vec(&PacketProjection::V3AdmitDisplay { presentation: p })).len() + 8
 }
 
-#[test]
-fn complete_prepared_display_reproduces_retained_and_admit_size_boundaries() {
-    let f = MaterialFixture::coordinated();
-    let mut i = complete(&f);
+fn measure_case(
+    f: &MaterialFixture,
+    mut i: CoordinatedAdmissionIntentV1,
+    material_input_id: bool,
+) -> ((usize, usize, usize), impl FnOnce()) {
+    assert!(i.validate().is_ok(), "report case complete retained DTO");
+    let input_id_bytes = checked(record(&i.request)).scope.authorization.inputs[0].input_id.len();
     // Match the actual prepared stage: admission provenance is absent; it is
     // excluded from both review digest and the complete display projection.
     i.admission = AdmissionProvenanceV1 {
@@ -72,14 +75,16 @@ fn complete_prepared_display_reproduces_retained_and_admit_size_boundaries() {
         review_digest: checked(i.review_digest()), intent: i.clone(),
     };
     let display = checked(prepared.display());
-    // A lossless compact comparison only, NOT a production formatting change.
+    // Exact prior pretty oracle versus the actual lossless compact getter.
     let tuple = (&i.request, &i.disclosure, &i.owner_certificate_digest,
         &i.enrollment_ref, &i.manifest_ref, &i.recipient_intent, &i.read,
         &i.admit_read, &i.ceilings);
-    assert!(display == checked(serde_json::to_string_pretty(&tuple)), "actual full display projection changed");
+    // Exact frozen P56/P57 pretty expression remains the old-behavior oracle.
+    let pretty = checked(serde_json::to_string_pretty(&tuple));
     let compact = checked(serde_json::to_string(&tuple));
-    let pretty_value: serde_json::Value = checked(serde_json::from_str(&display));
-    let compact_value: serde_json::Value = checked(serde_json::from_str(&compact));
+    assert!(display == compact, "actual display must be the complete compact tuple");
+    let pretty_value: serde_json::Value = checked(serde_json::from_str(&pretty));
+    let compact_value: serde_json::Value = checked(serde_json::from_str(&display));
     assert!(pretty_value == compact_value, "compact diagnostic must retain every field");
     let request = prepared.request();
     let report = SignerV3AdmitReadRetainedV1 {
@@ -91,7 +96,7 @@ fn complete_prepared_display_reproduces_retained_and_admit_size_boundaries() {
         admission_request_digest: checked(prepared.request_digest()),
         admission_review_digest: prepared.review_digest().into(),
         operation_id: request.operation_id.clone(), expected_head_sequence: request.expected_head.sequence,
-        expected_head_digest: request.expected_head.digest.clone(), display,
+        expected_head_digest: request.expected_head.digest.clone(), display: pretty,
     };
     assert!(report.recipient_intent_digest == i.admit_read.recipient_intent_digest);
     assert!(report.admission_request_digest == checked(i.request_digest()));
@@ -110,7 +115,7 @@ fn complete_prepared_display_reproduces_retained_and_admit_size_boundaries() {
 
     let pretty_facts = facts(&i, report.clone());
     let pretty_presentation = presentation(pretty_facts.clone());
-    let mut compact_report = report.clone(); compact_report.display = compact;
+    let mut compact_report = report.clone(); compact_report.display = display;
     let compact_facts = facts(&i, compact_report.clone());
     let compact_presentation = presentation(compact_facts.clone());
     let pretty_facts_bytes = checked(serde_json::to_vec(&pretty_facts)).len();
@@ -118,7 +123,8 @@ fn complete_prepared_display_reproduces_retained_and_admit_size_boundaries() {
     let pretty_presentation_bytes = checked(serde_json::to_vec(&pretty_presentation)).len();
     let compact_presentation_bytes = checked(serde_json::to_vec(&compact_presentation)).len();
     // Only finite sizes/outcomes are logged: no display, request, keys or IDs.
-    eprintln!("COORDINATED_RETAINED_REPORT_SIZE_V1 {}", serde_json::json!({
+    eprintln!("COORDINATED_RETAINED_REPORT_SIZE_V2 {}", serde_json::json!({
+        "material_input_id": material_input_id, "input_id_bytes": input_id_bytes,
         "pretty_display_bytes": report.display.len(), "compact_display_bytes": compact_report.display.len(),
         "request_json_bytes": pretty_facts.request_json.len(),
         "pretty_facts_bytes": pretty_facts_bytes, "compact_facts_bytes": compact_facts_bytes,
@@ -128,14 +134,55 @@ fn complete_prepared_display_reproduces_retained_and_admit_size_boundaries() {
         "pretty_facts_valid": pretty_facts.validate().is_ok(), "compact_facts_valid": compact_facts.validate().is_ok(),
         "pretty_presentation_valid": pretty_presentation.validate().is_ok(), "compact_presentation_valid": compact_presentation.validate().is_ok()
     }));
-    assert_eq!(packet_bytes(&pretty_presentation), pretty_presentation_bytes + 41 + 8);
-    assert_eq!(packet_bytes(&compact_presentation), compact_presentation_bytes + 41 + 8);
-    assert_eq!(report.validate().is_ok(), report.display.len() <= 16_384);
-    assert_eq!(compact_report.validate().is_ok(), compact_report.display.len() <= 16_384);
-    assert_eq!(compact_facts.validate().is_ok(), compact_report.display.len() <= 16_384
-        && compact_facts.request_json.len() <= 16_384 && compact_facts_bytes <= 48 * 1024);
-    assert_eq!(compact_presentation.validate().is_ok(), compact_facts.validate().is_ok()
-        && compact_presentation_bytes <= 60 * 1024);
-    assert!(report.display.len() > 16_384, "complete fixture did not reproduce oversized display; do not infer a runtime fix");
-    assert!(report.validate().is_err(), "old full report must demonstrate the current size rejection");
+    let sizes = (report.display.len(), compact_report.display.len(), pretty_facts.request_json.len());
+    // Both cases emit their strict finite records before any final size verdict.
+    let check = move || {
+        assert_eq!(packet_bytes(&pretty_presentation), pretty_presentation_bytes + 41 + 8);
+        assert_eq!(packet_bytes(&compact_presentation), compact_presentation_bytes + 41 + 8);
+        assert_eq!(report.validate().is_ok(), report.display.len() <= 16_384);
+        assert_eq!(compact_report.validate().is_ok(), compact_report.display.len() <= 16_384);
+        assert_eq!(compact_facts.validate().is_ok(), compact_report.display.len() <= 16_384
+            && compact_facts.request_json.len() <= 16_384 && compact_facts_bytes <= 48 * 1024);
+        assert_eq!(compact_presentation.validate().is_ok(), compact_facts.validate().is_ok()
+            && compact_presentation_bytes <= 60 * 1024);
+        if material_input_id {
+            assert!(input_id_bytes >= 75, "real decoded input ID must retain its full canonical length");
+            assert!(report.display.len() > 16_384, "real material input ID must reproduce the prior oversized display");
+            assert!(report.validate().is_err(), "old full report must demonstrate size rejection");
+        } else {
+            assert_eq!(input_id_bytes, 11);
+            assert_eq!(report.display.len(), 16_381, "preserve actual P57 short-fixture boundary");
+            assert!(report.validate().is_ok(), "the historical short fixture was not oversized");
+        }
+        assert!(compact_report.validate().is_ok(), "actual compact full report");
+        assert!(compact_facts.validate().is_ok(), "actual compact full Admit facts");
+        assert!(compact_presentation.validate().is_ok(), "actual compact full presentation");
+        assert!(packet_bytes(&compact_presentation) <= 65_536, "actual compact packet budget");
+    };
+    (sizes, check)
+}
+
+#[test]
+fn complete_prepared_display_reproduces_retained_and_admit_size_boundaries() {
+    let f = MaterialFixture::coordinated();
+    let short = complete(&f);
+    assert_eq!(checked(record(&short.request)).scope.authorization.inputs.len(), 1);
+    let material_ids = f.rows()[0].request().material.input_ids().collect::<Vec<_>>();
+    assert_eq!(material_ids.len(), 1);
+    let actual_id = material_ids[0];
+    let short_id_bytes = checked(record(&short.request)).scope.authorization.inputs[0].input_id.len();
+    assert!(actual_id.starts_with("ironwood:"));
+    assert!(actual_id.len() >= 75 && actual_id.len() > short_id_bytes);
+    let mut realistic = short.clone();
+    // Only this real decoded material field varies. No arbitrary padding,
+    // extra inputs, renamed display keys, removed data, or cap increase.
+    scope_mut(&mut realistic).authorization.inputs[0].input_id = actual_id.into();
+    rebind_request(&mut realistic); retain(&mut realistic);
+    let (before, check_before) = measure_case(&f, short, false);
+    let (after, check_after) = measure_case(&f, realistic, true);
+    check_before(); check_after();
+    let delta = actual_id.len() - short_id_bytes;
+    assert_eq!(after.0 - before.0, delta, "only input-ID length changes pretty display");
+    assert_eq!(after.1 - before.1, delta, "only input-ID length changes compact display");
+    assert_eq!(after.2 - before.2, delta, "only input-ID length changes actual request JSON");
 }

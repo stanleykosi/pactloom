@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed P57 test-only retained report size measurement and selected maintained synthetic tests; no fullflow or artifact export."""
+"""Fixed P58 complete retained report compact formatting and selected maintained synthetic tests; no fullflow or artifact export."""
 import importlib.util,json,os,pathlib,shutil,time
 HERE=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('preflight_supervisor',HERE/'ci-financial-supervisor.py');S=importlib.util.module_from_spec(spec);spec.loader.exec_module(S)
@@ -322,29 +322,33 @@ def intent_test_executable(raw,target):
     assert seen==set(packages)
     return executables[0]
 REPORT_MEASUREMENT_TEST='consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::retained_report_tests::complete_prepared_display_reproduces_retained_and_admit_size_boundaries'
-REPORT_MEASUREMENT_MARKER='COORDINATED_RETAINED_REPORT_SIZE_V1 '
-REPORT_LENGTHS=('pretty_display_bytes','compact_display_bytes','request_json_bytes','pretty_facts_bytes','compact_facts_bytes','pretty_presentation_bytes','compact_presentation_bytes','pretty_packet_bytes','compact_packet_bytes')
-REPORT_VALIDATIONS=('pretty_report_valid','compact_report_valid','pretty_facts_valid','compact_facts_valid','pretty_presentation_valid','compact_presentation_valid')
+REPORT_MEASUREMENT_MARKER='COORDINATED_RETAINED_REPORT_SIZE_V2 '
+REPORT_LENGTHS=('input_id_bytes','pretty_display_bytes','compact_display_bytes','request_json_bytes','pretty_facts_bytes','compact_facts_bytes','pretty_presentation_bytes','compact_presentation_bytes','pretty_packet_bytes','compact_packet_bytes')
+REPORT_VALIDATIONS=('material_input_id','pretty_report_valid','compact_report_valid','pretty_facts_valid','compact_facts_valid','pretty_presentation_valid','compact_presentation_valid')
 def report_measurement(output):
-    # Only content-free measurements may leave this exact test boundary.
-    assert output.count(REPORT_MEASUREMENT_MARKER)==1
+    # Validate the complete finite pair before any measurement leaves the test.
+    assert output.count(REPORT_MEASUREMENT_MARKER)==2
     lines=[line for line in output.splitlines() if REPORT_MEASUREMENT_MARKER in line]
-    assert len(lines)==1
-    prefix,raw=lines[0].split(REPORT_MEASUREMENT_MARKER,1)
-    assert prefix in ('','test '+REPORT_MEASUREMENT_TEST+' ... ')
-    assert len(raw.encode('utf-8'))<=2048
+    assert len(lines)==2
     def pairs(items):
         result={}
         for key,value in items:
             assert key not in result
             result[key]=value
         return result
-    try:value=json.loads(raw,object_pairs_hook=pairs)
-    except (ValueError,UnicodeError):raise AssertionError('measurement_schema') from None
-    assert type(value) is dict and set(value)==set(REPORT_LENGTHS+REPORT_VALIDATIONS)
-    assert all(type(value[k]) is int and 0<=value[k]<=2*1024*1024 for k in REPORT_LENGTHS)
-    assert all(type(value[k]) is bool for k in REPORT_VALIDATIONS)
-    return value
+    values=[]
+    for line in lines:
+        prefix,raw=line.split(REPORT_MEASUREMENT_MARKER,1)
+        assert prefix in ('','test '+REPORT_MEASUREMENT_TEST+' ... ')
+        assert len(raw.encode('utf-8'))<=2048
+        try:value=json.loads(raw,object_pairs_hook=pairs)
+        except (ValueError,UnicodeError):raise AssertionError('measurement_schema') from None
+        assert type(value) is dict and set(value)==set(REPORT_LENGTHS+REPORT_VALIDATIONS)
+        assert all(type(value[k]) is int and 0<=value[k]<=2*1024*1024 for k in REPORT_LENGTHS)
+        assert all(type(value[k]) is bool for k in REPORT_VALIDATIONS)
+        values.append(value)
+    assert {v['material_input_id'] for v in values}=={False,True}
+    return sorted(values,key=lambda v:v['material_input_id'])
 
 def intent_elapsed_ms(started):
     # Harness monotonic execution interval only; never a native authority clock.
@@ -366,7 +370,7 @@ def run_intent_validation_tests(root,env):
             if measurement:
                 try:
                     value=report_measurement(error.output.decode('utf-8',errors='strict'))
-                    print('CI_RETAINED_REPORT_SIZE '+json.dumps(value,sort_keys=True))
+                    print('CI_RETAINED_REPORT_SIZE_V2 '+json.dumps(value,sort_keys=True))
                 except BaseException:
                     pass # Missing/malformed measurements never replace the original failure.
                 finally:
@@ -383,7 +387,7 @@ def run_intent_validation_tests(root,env):
         measurement=name==REPORT_MEASUREMENT_TEST
         output=fixed([str(executable),'--exact',name,'--test-threads=1']+(['--nocapture'] if measurement else []),measurement=measurement)
         assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in output
-        if measurement:print('CI_RETAINED_REPORT_SIZE '+json.dumps(report_measurement(output),sort_keys=True))
+        if measurement:print('CI_RETAINED_REPORT_SIZE_V2 '+json.dumps(report_measurement(output),sort_keys=True))
         print('CI_INTENT_VALIDATION_TEST '+json.dumps(dict(name=name,passed=True,ignored=0,elapsed_ms=intent_elapsed_ms(test_started)),sort_keys=True))
     print('CI_INTENT_VALIDATION_TESTS '+json.dumps(dict(actual_maintained_tests=len(INTENT_VALIDATION_TESTS),elapsed_ms=intent_elapsed_ms(started),passed=True,genuine_pair_or_final_fixture=False,fullflow=False),sort_keys=True))
     return len(INTENT_VALIDATION_TESTS)

@@ -1,14 +1,14 @@
-name: Retained report size measurement preflight only
+name: Complete retained report compact formatting preflight only
 on:
   push:
-    branches: [checkpoint/report-size-preflight-p57]
+    branches: [checkpoint/report-format-preflight-p58]
 permissions: {}
 concurrency:
-  group: report-size-preflight-p57
+  group: report-format-preflight-p58
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/report-size-preflight-p57' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/report-format-preflight-p58' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -172,7 +172,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/report-size-preflight-p57' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/report-format-preflight-p58' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

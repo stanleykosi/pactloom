@@ -140,6 +140,10 @@ def main():
  old[PRODUCER]=src[PRODUCER].replace(COMMENT,'').replace('process_instance: self.peer.original_host_process_instance().into(),','process_instance: self.peer.actual_peer().instance().into(),')
  assert src[CONSUMER].count('process_instance != &self.original_host_process_instance')==1
  old[CONSUMER]=src[CONSUMER].replace('process_instance != &self.original_host_process_instance','process_instance != &self.observed_host_process_instance')
+ # Later lossless display compaction is unrelated to the unchanged row join.
+ compact='    pub(crate) fn display(&self) -> Result<String> {\n        serde_json::to_string(&('
+ assert old[ROWS].count(compact)==1
+ old[ROWS]=old[ROWS].replace(compact,compact.replace('to_string(', 'to_string_pretty('))
  for path,expected in PINS.items():assert digest(old[path])==expected,path
  def fn(raw,start):
   begin=raw.index(start);brace=raw.index('{',begin);return raw[begin:prior.balanced_end(raw,brace,"{","}")]

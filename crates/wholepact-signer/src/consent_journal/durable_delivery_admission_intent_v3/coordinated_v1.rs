@@ -495,7 +495,7 @@ impl PreparedCoordinatedAdmissionIntentV1 {
         self.intent.request_digest()
     }
     pub(crate) fn display(&self) -> Result<String> {
-        serde_json::to_string_pretty(&(
+        serde_json::to_string(&(
             &self.intent.request,
             &self.intent.disclosure,
             &self.intent.owner_certificate_digest,
