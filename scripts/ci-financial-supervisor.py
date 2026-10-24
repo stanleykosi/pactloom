@@ -749,6 +749,14 @@ def isolation(mode, check, ok, expected, actual):
         raise error
 
 
+def runtime_cpu_limit():
+    # The semantic observer shares CPU with the native actors and compositor.
+    # Keep a fixed bound; the separately callable pixel-only gate retains two.
+    profile = I.profile()
+    require(profile in (P.C.EXTERNAL_PROFILE, P.C.SEMANTIC_PROFILE), 'container', 'artifact_profile')
+    return 4 if profile == P.C.SEMANTIC_PROFILE else 2
+
+
 def inspect_isolation(name, token, mode, image_id, sha):
     raw = docker(['inspect', '--type', 'container', name], 'container', limit=65536)
     try:
@@ -790,7 +798,7 @@ def inspect_isolation(name, token, mode, image_id, sha):
     isolation(mode, 'cap_add', type(caps) is list and len(caps) == 2 and set(normalized) == {'SETUID', 'SETGID'},
               ['SETUID', 'SETGID'], B.finite_list(caps, set(aliases)))
     for check, field, expected in (('pids_limit', 'PidsLimit', 128), ('memory_limit', 'Memory', 2 * 1024**3),
-            ('swap_limit', 'MemorySwap', 2 * 1024**3), ('cpu_limit', 'NanoCpus', 2_000_000_000)):
+            ('swap_limit', 'MemorySwap', 2 * 1024**3), ('cpu_limit', 'NanoCpus', runtime_cpu_limit() * 1_000_000_000)):
         value = host.get(field)
         isolation(mode, check, type(value) is int and value == expected, expected, B.finite_number(value))
     for check, value in (('bind_mounts', host.get('Binds')), ('devices', host.get('Devices')),
@@ -948,7 +956,7 @@ def run_case(mode, image_id, token, sha):
         args = ['create', '--pull', 'never', '--name', name, '--label', LABEL + '=' + token,
             '--label', SOURCE_LABEL + '=' + sha, '--network', 'none', '--read-only', '--cap-drop', 'ALL',
             '--cap-add', 'SETUID', '--cap-add', 'SETGID', '--security-opt', 'no-new-privileges:true',
-            '--pids-limit', '128', '--memory', '2g', '--memory-swap', '2g', '--cpus', '2',
+            '--pids-limit', '128', '--memory', '2g', '--memory-swap', '2g', '--cpus', str(runtime_cpu_limit()),
             '--ipc', 'private', '--cgroupns', 'private', '--ulimit', 'core=0:0', '--ulimit', 'nofile=512:512',
             '--log-driver', 'none', '--restart', 'no']
         for path, options in TMPFS.items():
