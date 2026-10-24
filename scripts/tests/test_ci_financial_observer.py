@@ -1340,6 +1340,7 @@ class ReviewViewportTests(unittest.TestCase):
                     self.assertGreaterEqual(reads[0],2);events.append(tag)
                     flow.done.add(flow.key(s,tag,role)+(None,))
                 flow.seek=seek;flow.scroll=scroll;flow.press=press
+                flow.review_seek=lambda s,tag,role,action,ack,body:seek(s,tag,role)
                 for _ in range(16):
                     w=dict(tag='ReturnRead' if view[0]=='action' else 'ReviewBody',owner=owner,enabled=reads[0]>=2 if view[0]=='action' else True)
                     flow.review(base|dict(widgets=[w]),'ReturnRead',owner,ack=ack)
@@ -3473,7 +3474,7 @@ class ReviewFailureObservationTests(unittest.TestCase):
  def test_schema_rejects_extra_unknown_bool_counts_and_inconsistent_state(self):
   import copy
   f,c,state,s=self.flow();good=f.review_diagnostic();F.C.validate_review_diagnostic(good)
-  changes=[dict(extra='private'),dict(version=2),dict(semantics='Current'),dict(phase='Finished'),dict(owner=None),dict(generation=True),dict(widgets=[[False,True],[False,False],[True,False]]),dict(seek_counts=[66,0,0]),dict(seek_counts=[True,0,0]),dict(scroll_counts=[129,0,0]),dict(last_seek='private'),dict(operation='private'),dict(boundary='Returned'),dict(anchor='None',point_inside=True),dict(attempted=[1,False]),dict(operation='BodyDown',boundary='Returned',operation_generation=1,anchor='Arm',point_inside=True),dict(operation='OuterUp',boundary='Requested',operation_generation=1,anchor='Outer',point_inside=None),dict(operation_generation=1)]
+  changes=[dict(extra='private'),dict(version=1),dict(version=3),dict(semantics='Current'),dict(phase='Finished'),dict(owner=None),dict(generation=True),dict(widgets=[[False,True],[False,False],[True,False]]),dict(seek_counts=[66,0,0]),dict(seek_counts=[True,0,0]),dict(scroll_counts=[129,0,0]),dict(last_seek='private'),dict(operation='private'),dict(boundary='Returned'),dict(anchor='None',point_inside=True),dict(attempted=[1,False]),dict(operation='BodyDown',boundary='Returned',operation_generation=1,anchor='Arm',point_inside=True),dict(operation='OuterUp',boundary='Requested',operation_generation=1,anchor='Outer',point_inside=None),dict(operation_generation=1)]
   for changeset in changes:
    with self.subTest(changeset=changeset):
     with self.assertRaises(F.C.Rejected):F.C.validate_review_diagnostic(copy.deepcopy(good)|changeset)
@@ -3557,3 +3558,107 @@ class SameBatchValidationTests(unittest.TestCase):
    with mock.patch.object(O.C,'_native_failure_sequence_validated') as native,mock.patch.object(O.C,'_join_host_views_validated') as join:
     with self.assertRaises(O.C.Rejected):o.read()
     native.assert_not_called();join.assert_not_called();self.assertIsNone(o._semantic_active)
+
+def single_review_navigation_model(phase,required=25,confirm=False,owner='Signer1'):
+ state=dict(phase=phase,outer=0,inner=0,generation=0,ack=False,done=False,events=[],wrong=0)
+ class Observer:
+  expected_profile=F.C.SEMANTIC_PROFILE;host_view=mock.Mock()
+  def read(self):return []
+  def next_snapshot(self,deadline):
+   if state['done']:raise Finished()
+   state['generation']+=1
+   assert state['generation']<10000,'bounded model'
+   body,ack,action=F.C.REVIEW_ROUTES[state['phase']]
+   ws=[dict(tag='ScrollRegion',owner=None,enabled=True,rect=[0,0,1280,800])]
+   if state['outer']==0:ws.append(dict(tag=body,owner=owner,enabled=True,rect=[20,200,800,590]))
+   else:
+    if ack:ws.append(dict(tag=ack,owner=owner,enabled=True,rect=[20,620,800,650]))
+    enabled=(state['ack'] if state['phase'] in F.CONFIRM else state['inner']>=required and (not ack or state['ack']))
+    ws.append(dict(tag=action,owner=owner,enabled=enabled,rect=[20,660,500,690]))
+   return dict(phase=state['phase'],subphase='None',owner=owner,view_generation=state['generation'],focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=ws,host_view_id=None,host_observation=dict(revision=19,nonws_end=0,context_valid=True,entry='Idle',editor=None,view=None))
+ c=mock.Mock();fixture=mock.Mock(deadline_ns=time.monotonic_ns()+120_000_000_000);f=F.FullFlow(c,fixture,Observer(),None);f.startup_index=13;f.startup_focus_seen=True;f.commands_instruction_observed=True;f._startup_ceiling=None
+ def wheel(d,x,y):
+  if x<1000 and state['outer']==0:
+   assert d==1;state['inner']+=1;state['events'].append('body')
+  else:
+   old=state['outer'];state['outer']=0 if d<0 else 1;state['events'].append('up' if d<0 else 'down');state['wrong']+=int(old==state['outer'])
+ def click(x,y):
+  if y==635:assert not state['ack'];state['ack']=True;state['events'].append('ack')
+  elif y==675:
+   body,ack,action=F.C.REVIEW_ROUTES[state['phase']]
+   assert state['ack'] if state['phase'] in F.CONFIRM else state['inner']>=required and (not ack or state['ack'])
+   state['events'].append(action)
+   if confirm and state['phase']=='EntryReview':state['phase']='EntryConfirm';state['inner']=0;state['ack']=False
+   else:state['done']=True
+  else:raise AssertionError('invented click')
+ c.scroll_up.side_effect=lambda x,y:wheel(-1,x,y);c.scroll_down.side_effect=lambda x,y:wheel(1,x,y);c.click.side_effect=click
+ try:f.run()
+ except Finished:outcome='native_enabled_action_once'
+ except F.C.Rejected as e:outcome=e.code
+ return dict(outcome=outcome,events=state['events'],wrong=state['wrong'],inner=state['events'].count('body'),diagnostic=f.review_diagnostic())
+
+class SingleReviewOrderTests(unittest.TestCase):
+ def test_actual_readonly_to_confirmation_reaches_each_enabled_action_once(self):
+  r=single_review_navigation_model('EntryReview',25,True)
+  self.assertEqual(r['outcome'],'native_enabled_action_once');self.assertEqual(r['inner'],25);self.assertEqual(r['wrong'],0)
+  self.assertEqual([x for x in r['events'] if x not in ('body','up','down')],['EntryConfirm','ack','EnterPassword'])
+  d=F.C.validate_review_diagnostic(r['diagnostic']);self.assertEqual(d['phase'],'EntryConfirm');self.assertEqual(d['attempted'],[True,True]);self.assertEqual(d['operation'],'ActionPress')
+ def test_actual_ordinary_review_and_owner_none_normal_finish_keep_native_gates(self):
+  for phase,owner in [('V3AuditReview','Signer1'),('NormalFinishReview',None),('NormalFinishReview','Signer2')]:
+   r=single_review_navigation_model(phase,25,owner=owner);self.assertEqual(r['outcome'],'native_enabled_action_once');self.assertEqual(r['wrong'],0);self.assertEqual(r['inner'],25)
+   self.assertEqual(r['events'].count('ack'),1);self.assertEqual(r['events'].count(F.REVIEW[phase]),1);self.assertEqual(F.C.validate_review_diagnostic(r['diagnostic'])['owner'],owner)
+ def test_closed_route_guards_original_budgets_and_nonreview_fallback(self):
+  for change in ({'phase':'Waiting'},{'owner':'Signer2'},{'subphase':'SetupNeeded'},{'focused':False},{'secret_input':True},{'host_input':True},{'host_observation':dict(revision=2,nonws_end=1,context_valid=True,entry='Idle',editor=None,view=None)}):
+   f,c,state=AdmitReviewNavigationTests().guarded_model();original=f.native.next_snapshot
+   f.native.next_snapshot=lambda deadline:original(deadline)|{'phase':'EntryReview','widgets':[dict(tag='ScrollRegion',owner=None,enabled=True,rect=[0,0,1280,800]),dict(tag='EntryConfirm',owner='Signer1',enabled=False,rect=[20,660,500,690])]}
+   s=f.native.snapshot();before=f.native.next_snapshot;f.native.next_snapshot=lambda deadline:before(deadline)|change
+   try:f.review_seek(s,'ReviewBody','Signer1','EntryConfirm',None,'ReviewBody')
+   except F.C.Rejected:pass
+   c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();c.click.assert_not_called()
+  for key in ('seek','scroll','deadline','pending_host','host_prepared'):
+   f,c,state=AdmitReviewNavigationTests().guarded_model();s=f.native.snapshot();s['phase']='EntryReview';original=f.native.next_snapshot;f.native.next_snapshot=lambda deadline:original(deadline)|{'phase':'EntryReview'}
+   if key=='seek':f.scrolls[('EntryReview','None','seek','ReviewBody','Signer1')]=64
+   elif key=='scroll':f.scrolls[('EntryReview','None','ScrollRegion',None,'up')]=128
+   elif key=='deadline':f.fixture.deadline_ns=time.monotonic_ns()-1
+   else:setattr(f,key,('pending',))
+   try:f.review_seek(s,'ReviewBody','Signer1','EntryConfirm',None,'ReviewBody')
+   except F.C.Rejected:pass
+   c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();c.click.assert_not_called()
+  f,c,state=AdmitReviewNavigationTests().guarded_model();s=f.native.snapshot();s['phase']='WriterFlow';s['subphase']='ReadReview'
+  with mock.patch.object(f,'seek',return_value=False) as generic:self.assertFalse(f.review_seek(s,'ReviewBody','Signer1','WriterAction','ReviewAcknowledgement','ReviewBody'));generic.assert_called_once()
+ def test_diagnostic_phase_identity_optional_ack_unknown_and_size(self):
+  f,c,state,s=ReviewFailureObservationTests().flow();f.note_review_observation(s,operation='AckPress',boundary='Returned',anchor='Ack',point=(1,1))
+  later=dict(s,phase='EntryReview',view_generation=s['view_generation']+1);f.note_review_observation(later);d=F.C.validate_review_diagnostic(f.review_diagnostic())
+  self.assertEqual(d['operation'],'None');self.assertIsNone(d['operation_generation']);self.assertEqual(d['widgets'][1],[False,False]);self.assertEqual(d['attempted'],[False,False])
+  for bad in (dict(d,phase=[]),dict(d,phase='WriterFlow'),dict(d,phase='EntryConfirm',owner=None),dict(d,widgets=[[False,False],[True,True],[False,False]]),dict(d,attempted=[True,False])):
+   with self.assertRaises(F.C.Rejected):F.C.validate_review_diagnostic(bad)
+  for phase,route in F.C.REVIEW_ROUTES.items():
+   v=dict(d,phase=phase);F.C.validate_review_diagnostic(v);self.assertLessEqual(len(json.dumps(v).encode()),2048)
+
+# Exact reviewed native conditional arms, not an inference from first-button order.
+NATIVE_SINGLE_REVIEW_ARMS={'V3PairReview': (5232, '4637f1cb605c01a1f3113abd375613636dab716187fd9117805227cbe71ab260'), 'V3EnrollmentReview': (5091, '9369186787f9e9fd826c9851503ea9a55b40483fec985bffbc8bad6852e8f993'), 'V3ManifestReview': (5106, 'b9ed7c82fc3733f47d59f652bd27b62f409e56a632d61da1a85b277ea1f58cae'), 'V3RedisclosureReadReview': (5121, '2d11235db3b782483db5694fade46fb2417535c842c3cad5b83acd965164a2ec'), 'V3RediscloseReview': (5136, '4283a27b77389190d7b53b845ccb265237d186f64b51c0b26b90f900c0c5ffed'), 'V3PrepareReadReview': (5166, '2e17e56b57bdefe296db964347e2b406180bcfa6151947b4e415afe56a3e4282'), 'V3ReceiveReview': (5181, '8b4b6051b2a96ad8fd49ca138ef6a0cde8bacd063e8866b2fdc0d33339a00036'), 'V3AdmitReadReview': (5196, '5a5da13b9fca64341a9e67b97f2d5832d50b11650bb7c302236ab4e241e36495'), 'V3AdmitReview': (5196, '5a5da13b9fca64341a9e67b97f2d5832d50b11650bb7c302236ab4e241e36495'), 'V3AdmitReady': (5196, '5a5da13b9fca64341a9e67b97f2d5832d50b11650bb7c302236ab4e241e36495'), 'V3AuditReview': (5218, 'bed877446e70598d8b8416a19da06d4bf955aee376622ce4f99e60bb05a99695'), 'HistorySetupReview': (5329, 'dfb7f998b9777e616b61587e07ff7712d6b7a67b7ecb5504f24016863b408811'), 'HistoryReview': (5341, '302fca3568db92828db9c6d3d3a7e288b7cbdf5692fa7a6937bf9b097706d2e7'), 'SetupReview': (5275, '5949274eb5a0b6cf1bec0e951596d41bb8e1f18362dc05a091b43bc9695390ed'), 'ActivateReadReview': (5011, '3a924854081825aa1c124308377e6ebc0c85a238d329f00c3c6e76aeaa3e0a3d'), 'ActivateReview': (5011, '3a924854081825aa1c124308377e6ebc0c85a238d329f00c3c6e76aeaa3e0a3d'), 'ActivateReady': (5011, '3a924854081825aa1c124308377e6ebc0c85a238d329f00c3c6e76aeaa3e0a3d'), 'WalletPrepareReview': (5001, '98cae73769b9612dd0c2416dad3673e5bb32efd668b96e9ba89a970e1ab95bcf'), 'WalletObserveReview': (5001, '98cae73769b9612dd0c2416dad3673e5bb32efd668b96e9ba89a970e1ab95bcf'), 'SignReadReview': (4974, '5b0022f7efbecdba1ef257b78fb2a53f71259db5cb5b957ea081cd6f624c4201'), 'SignExactReview': (4974, '5b0022f7efbecdba1ef257b78fb2a53f71259db5cb5b957ea081cd6f624c4201'), 'ReturnReadReview': (4963, '191ba6486f5d133c2323e517d1fa0df7a5b6bf5419968913ee6852277b4f420b'), 'ReturnExactReview': (4963, '191ba6486f5d133c2323e517d1fa0df7a5b6bf5419968913ee6852277b4f420b'), 'NormalFinishReview': (5403, 'cac73569daba77c5d58414e7d4a90b1f0b85487079ccbb3cba156628cb7696fe'), 'V3Review': (5056, '30c29ddef0e9b49c2bc20ebfddc2eb354b8cb3809a58e009683f31e175f408c9'), 'EntryReview': (5289, 'ffb4b2592ce33d0b95a684b03d964b0247b8a528aa024d9e477d97056916356c'), 'ReadReview': (5353, 'b3eb6eb09240b341d1b591ee2c6655a423c4bbe9aca8c85e793af3a627e5ef44'), 'ContinueReview': (5379, '0821d43fabda9cc9d7ddf96adc57b013d60471b4500342ecf71e0b0d7ae150c2'), 'V3Confirm': (5056, '30c29ddef0e9b49c2bc20ebfddc2eb354b8cb3809a58e009683f31e175f408c9'), 'EntryConfirm': (5289, 'ffb4b2592ce33d0b95a684b03d964b0247b8a528aa024d9e477d97056916356c'), 'ReadConfirm': (5353, 'b3eb6eb09240b341d1b591ee2c6655a423c4bbe9aca8c85e793af3a627e5ef44'), 'ContinueConfirm': (5379, '0821d43fabda9cc9d7ddf96adc57b013d60471b4500342ecf71e0b0d7ae150c2')}
+class SingleReviewSourceBindingTests(unittest.TestCase):
+ def test_all_closed_routes_bind_exact_native_conditional_arms_and_tag_mappings(self):
+  import re,hashlib
+  source=(ROOT.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text();lines=source.splitlines()
+  routes={phase:('ReviewBody',None if family is F.READ_ONLY else 'ReviewAcknowledgement',action) for family in (F.REVIEW,F.READ_ONLY,F.CONFIRM) for phase,action in family.items()}
+  self.assertEqual(routes,F.C.REVIEW_ROUTES);self.assertEqual(set(routes),set(NATIVE_SINGLE_REVIEW_ARMS));self.assertEqual(len(routes),32)
+  starts=[i for i,line in enumerate(lines) if 4950<=i+1<=5455 and re.match(r'^                Phase::',line)]
+  for phase,(line,digest) in NATIVE_SINGLE_REVIEW_ARMS.items():
+   i=line-1;self.assertIn(i,starts);self.assertRegex(lines[i].split('=>')[0],r'Phase::'+phase+r'\b')
+   end=next((x for x in starts if x>i),5455);block='\n'.join(lines[i:end]);self.assertEqual(hashlib.sha256(block.encode()).hexdigest(),digest)
+   body,ack,action=routes[phase];self.assertIn('review_display(',block)
+   self.assertTrue('"'+action+'"' in block or 'Intent::'+action in block)
+   if ack:self.assertIn('"ReviewAcknowledgement"',block)
+  # Grouped split-phase routes retain their actual distinct conditions/tags.
+  for phase,action in F.READ_ONLY.items():
+   if phase in ('V3Review','ReadReview'):self.assertIn('if self.phase == Phase::'+phase+' {',source)
+   else:self.assertIn('Phase::'+phase+' => {',source)
+   self.assertIn('"'+action+'", self.active)',source)
+  for phase,action in F.CONFIRM.items():self.assertIn('"'+action+'", self.active)',source)
+  for phase,action in [('V3AdmitReadReview','FinalV3AdmitRead'),('V3AdmitReview','ArmV3Admit'),('ActivateReadReview','ActivateRead'),('ActivateReview','ActivateArm')]:
+   self.assertRegex(source,r'Phase::'+phase+r'=>\([^\n]*Intent::'+action+r'\)')
+  # Terminal owner is the actual current active value; no forced Signer/None.
+  normal=source.split('Phase::NormalFinishReview => {',1)[1].split('Phase::NormalClosing =>',1)[0]
+  self.assertIn('"NormalFinish", self.active)',normal);self.assertIn('"ReviewAcknowledgement", self.active)',normal)
+  for excluded in ('AdmissionReview','WriterFlow','CompletedPairFlow'):self.assertNotIn(excluded,routes)
