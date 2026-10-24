@@ -21,6 +21,7 @@ class ObserverFiles:
         C.require(expected_profile in (C.PROFILE,C.EXTERNAL_PROFILE,C.SEMANTIC_PROFILE));self.expected_profile=expected_profile
         self.directory=pathlib.Path(directory);self.deadline_ns=deadline_ns
         self._files={};self._roles={};self._snapshot_generation=0
+        self._validation_profiles={}
         self._semantic_active=None
         self._diagnostics=None
         self._failure_latched=False;self._failure_drain_deadline=None
@@ -75,16 +76,22 @@ class ObserverFiles:
             complete=raw[:raw.rfind(b'\n')+1]
             if final:C.require(raw==complete and len(raw)==before.st_size==after.st_size,'observer_failure')
             C.require(len(raw)-len(complete)<=C.MAX_RECORD_BYTES,'record_limit')
+            # The exact complete byte prefix was already shape-validated under
+            # this fixed profile and file identity. Still parse EVERY line into
+            # fresh objects; no parsed value or aggregate authority is cached.
+            prior_count=len(prior[1].splitlines()) if self._validation_profiles.get(name)==self.expected_profile else 0
             entries=[]
-            for line in complete.splitlines():
+            for index,line in enumerate(complete.splitlines()):
                 C.require(len(records)+len(entries)<C.MAX_RECORDS,'record_limit')
-                entry=C.validate_record(C.loads(line),self.expected_profile);entries.append(entry)
+                entry=C.loads(line)
+                if index>=prior_count:C.validate_record(entry,self.expected_profile)
+                entries.append(entry)
             if entries:
                 role=entries[0]['role'];birth=entries[0]
                 C.require(birth['kind']=='Birth' and birth['facts']['pid']==int(name[:-6]),'lineage')
                 C.require(all(r['role']==role and r['sequence']==i for i,r in enumerate(entries,1)),'order')
                 C.require(self._roles.get(role,name)==name,'lineage');self._roles[role]=name
-            self._files[name]=(identity,complete);records.extend(entries)
+            self._files[name]=(identity,complete);self._validation_profiles[name]=self.expected_profile;records.extend(entries)
         C.require(not final or len(self._roles)==17,'observer_missing')
         C._native_failure_sequence_validated(records)
         C.validate_host_exit_cardinality(records)
