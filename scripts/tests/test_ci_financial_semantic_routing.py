@@ -119,9 +119,9 @@ class SemanticRoutingTests(unittest.TestCase):
   text=(ROOT.parent/'.github/workflows/durable-native-linux.yml').read_text()
   old=text.split('      - name: Distinct financial profile evidence boundary',1)[1].split('      - name:',1)[0]
   new=text.split('      - name: Distinct semantic-assisted financial evidence boundary',1)[1].split('      - name:',1)[0]
-  self.assertIn("success() && steps.mode.outputs.gate == 'financial-ui'",old)
+  self.assertIn("success() && steps.financial.outcome == 'success' && steps.mode.outputs.gate == 'financial-ui'",old)
   self.assertNotIn('financial-semantic',old)
-  self.assertIn("success() && steps.mode.outputs.gate == 'financial-semantic'",new)
+  self.assertIn("success() && steps.financial.outcome == 'success' && steps.mode.outputs.gate == 'financial-semantic'",new)
   self.assertIn('NOT pixel-only UI qualification',new)
   self.assertIn("always() && (steps.mode.outputs.gate == 'financial-ui' || steps.mode.outputs.gate == 'financial-semantic')",text)
 if __name__=='__main__':unittest.main()

@@ -425,3 +425,6 @@ mod transport_identity_tests;
 
 #[path = "full_intent_validation_tests/retained_report_tests.rs"]
 mod retained_report_tests;
+
+#[path = "full_intent_validation_tests/downstream_composition_tests.rs"]
+mod downstream_composition_tests;

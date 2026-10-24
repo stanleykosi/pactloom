@@ -275,3 +275,7 @@ pub use result_ipc::{
 mod coordinated_signing;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 pub(crate) use coordinated_signing::{reserve_coordinated_financial_authorization_v1, CoordinatedFinancialSignFailureV1};
+
+// Test-only access to pure data projections; no authority constructors.
+#[cfg(all(test, feature = "coordinated-financial-workflow-v1", feature = "durable-proposal", feature = "pending-birth-owner-signing", feature = "native-ui", target_os = "linux"))]
+pub(crate) use result_ipc::project_return_display;

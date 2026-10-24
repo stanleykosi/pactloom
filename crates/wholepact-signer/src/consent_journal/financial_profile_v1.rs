@@ -569,3 +569,7 @@ mod expected_schema_cache_tests_v1 {
         println!("SCHEMA_REFERENCE_COMPONENT profile=20 iterations=16 uncached_us={} cached_us={} full_profile_proven=false",uncached,cached_us);
     }
 }
+
+// Test-only access to pure data projections; no authority constructors.
+#[cfg(all(test, feature = "coordinated-financial-workflow-v1", feature = "durable-proposal", feature = "pending-birth-owner-signing", feature = "native-ui", target_os = "linux"))]
+pub(crate) use session::{project_spend_display, project_sign_exact_facts};

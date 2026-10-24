@@ -743,3 +743,7 @@ pub(crate) fn validate_prepared_delivery_policy_v3(
 pub mod durable_review_ipc_v3;
 #[cfg(all(feature = "durable-proposal", target_os = "linux"))]
 pub mod durable_delivery_admission_ipc_v3;
+
+// Test-only access to pure data projections; no authority constructors.
+#[cfg(all(test, feature = "coordinated-financial-workflow-v1", feature = "durable-proposal", feature = "pending-birth-owner-signing", feature = "native-ui", target_os = "linux"))]
+pub(crate) use financial_continuation_v1::project_return_display;

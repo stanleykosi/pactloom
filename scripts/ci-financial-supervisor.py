@@ -18,6 +18,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 
@@ -112,6 +113,40 @@ def require(ok, stage, check):
 
 def emit(kind, value):
     print('CI_FINANCIAL_' + kind + ' ' + json.dumps(value, sort_keys=True, separators=(',', ':')), flush=True)
+
+
+class PipelineStage:
+    """Best-effort harness timing, not authority time or full-flow evidence.
+
+    Exactly three fixed boundaries; no subprocess/runtime text is accepted.
+    The fixture-runtime boundary includes container setup and owned removal.
+    Overall RESULT still requires the existing outer cleanup to succeed.
+    """
+    def __init__(self, stage):
+        require(stage in ('build', 'image', 'fixture-runtime'), 'supervisor', 'arguments')
+        self.stage, self.started, self.passed = stage, None, False
+
+    def record(self, event, status, *, unwinding=False):
+        try:
+            elapsed = None if self.started is None else max(0, (time.monotonic_ns() - self.started) // 1000000)
+            emit('STAGE', dict(schema_version=1, stage=self.stage, event=event,
+                status=status, elapsed_ms=elapsed, fullflow=False))
+        except Failure:
+            if not unwinding:raise  # Do not swallow the supervisor's signal handler.
+        except Exception:
+            pass  # Optional telemetry must not replace primary failure or cleanup.
+
+    def __enter__(self):
+        try: self.started = time.monotonic_ns()
+        except Failure: raise
+        except Exception: pass
+        self.record('start', 'running')
+        return self
+
+    def __exit__(self, kind, error, traceback):
+        status = 'passed' if kind is None and self.passed else 'failed'
+        self.record('end', status, unwinding=kind is not None)
+        return False
 
 
 def failure_record(error):
@@ -488,9 +523,8 @@ def validate_compiler_cfg(raw, name, target, profile):
     require(seen==set(packages), 'compile','artifact_profile')
 
 
-def export_compiled_artifacts(artifacts, sha):
-    # Host-only output established before any container/fixture starts. This
-    # directory is never mounted into a container. No environment dump or logs.
+def compiled_source_identity(sha):
+    """The current recipe's complete tracked content-and-mode input closure."""
     exact_source(sha)
     require(A.RECIPE['rustc'] == B.RUSTC and A.RECIPE['coordinator_features'] == FEATURE
             and A.RECIPE['artifact_features'] == FEATURES,
@@ -511,6 +545,8 @@ def export_compiled_artifacts(artifacts, sha):
         meta = file.lstat()
         require(stat.S_ISREG(meta.st_mode) and meta.st_nlink == 1 and meta.st_size <= 64 * 1024 * 1024,
                 'compile', 'artifact_bundle')
+        require(stat.S_IMODE(meta.st_mode) == (0o755 if mode == b'100755' else 0o644),
+                'compile', 'artifact_bundle')
         # Bind file mode as well as content. Tree/source IDs remain explicit.
         digest = hashlib.sha256(mode + b'\0')
         with file.open('rb') as stream:
@@ -519,8 +555,27 @@ def export_compiled_artifacts(artifacts, sha):
         inventory[name] = digest.hexdigest()
     producer = dict(repository=os.environ['GITHUB_REPOSITORY'], source=sha, source_tree=tree,
                     run_id=int(os.environ['GITHUB_RUN_ID']), attempt=int(os.environ['GITHUB_RUN_ATTEMPT']))
-    destination = pathlib.Path(os.environ['RUNNER_TEMP']) / (
-        'wholepact-financial-build-' + str(producer['run_id']) + '-' + str(producer['attempt']))
+    return producer, inventory
+
+
+def compiled_bundle_directory():
+    # context() has already bound run, attempt and synthetic-only job.
+    return pathlib.Path(os.environ['RUNNER_TEMP']) / (
+        'wholepact-financial-build-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'])
+
+
+def publish_compiled_bundle(pin):
+    # The separate build step calls this only after its private root is removed.
+    with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='ascii') as stream:
+        stream.write('artifact_bundle_sha256=' + pin['sha256'] + '\n')
+        stream.write('artifact_bundle_size=' + str(pin['size']) + '\n')
+        stream.write('artifact_bundle_ready=true\n')
+
+
+def export_compiled_artifacts(artifacts, sha):
+    # Host-only output, before any fixture. Never mounted into a container.
+    producer, inventory = compiled_source_identity(sha)
+    destination = compiled_bundle_directory()
     destination.mkdir(mode=0o700, exist_ok=False)
     bundle = destination / 'build.tar'
     try:
@@ -529,12 +584,11 @@ def export_compiled_artifacts(artifacts, sha):
         digest = hashlib.sha256()
         with bundle.open('rb') as stream:
             digest = hashlib.file_digest(stream, 'sha256')
-        output = os.environ['GITHUB_OUTPUT']
-        with open(output, 'a', encoding='ascii') as stream:
-            stream.write('artifact_bundle_ready=true\n')
-        emit('BUILD_BUNDLE', dict(source=sha, source_tree=tree,profile=I.profile(), run_id=producer['run_id'],
+        pin = dict(sha256=digest.hexdigest(), size=bundle.stat().st_size)
+        emit('BUILD_BUNDLE', dict(source=sha, source_tree=producer['source_tree'],profile=I.profile(), run_id=producer['run_id'],
             attempt=producer['attempt'], sha256=digest.hexdigest(), size=bundle.stat().st_size,
             artifacts=list(A.NAMES), pre_credential=True, reused=False, uploaded=False))
+        return pin
     except Exception:
         # Never mark an incomplete bundle uploadable. Only this fresh directory.
         shutil.rmtree(destination)
@@ -542,7 +596,7 @@ def export_compiled_artifacts(artifacts, sha):
 
 
 
-def build_inputs(root, sha):
+def build_inputs(root, sha, *, bundle_only=False):
     package_preflight()
     inputs=root/'artifacts';inputs.mkdir()
     for folder in ('home','cargo','target'):(root/folder).mkdir()
@@ -571,12 +625,70 @@ def build_inputs(root, sha):
     require(pin(inputs/'coordinator-production')['sha256'] != pin(inputs/'coordinator-observed')['sha256'],
             'compile','artifact_profile')
     exact_source(sha)
-    export_compiled_artifacts(inputs,sha)
+    bundle_pin=export_compiled_artifacts(inputs,sha)
+    if bundle_only:return bundle_pin
+    publish_compiled_bundle(bundle_pin)
+    return stage_image_context(root,inputs,sha)
+
+
+def stage_image_context(root, inputs, sha):
     build_context=root/'context'
     args=[sys.executable,'-I','-B',str(HERE/'ci-financial-image.py'),'--output',str(build_context),'--source-commit',sha]
     for name in I.ARTIFACT_FILES:args+=['--'+name,str(inputs/name)]
     checked(args,'packages',seconds=900,limit=1024*1024,env={'PATH':os.environ['PATH'],'HOME':'/nonexistent'})
     exact_source(sha);return build_context
+
+
+def same_job_inputs(root, sha):
+    """Consume only the preceding successful build step in this exact job.
+
+    GitHub step outputs, not the bundle's self-description, pin the bytes.
+    No cross-run API/archive acquisition, historical producer or harness delta.
+    """
+    producer, inventory = compiled_source_identity(sha)
+    digest=os.environ.get('FINANCIAL_BUILD_SHA256','')
+    size=os.environ.get('FINANCIAL_BUILD_SIZE','')
+    require(re.fullmatch('[0-9a-f]{64}',digest) is not None and re.fullmatch('[1-9][0-9]{0,9}',size) is not None,
+            'compile','artifact_bundle')
+    expected_size=int(size)
+    require(expected_size <= A.MAX_TOTAL + A.MAX_MANIFEST + 65536,'compile','artifact_bundle')
+    directory=compiled_bundle_directory();meta=directory.lstat()
+    require(stat.S_ISDIR(meta.st_mode) and meta.st_uid==os.getuid()
+            and stat.S_IMODE(meta.st_mode)==0o700 and {p.name for p in directory.iterdir()}=={'build.tar'},
+            'compile','artifact_bundle')
+    original=directory/'build.tar';meta=original.lstat()
+    require(stat.S_ISREG(meta.st_mode) and meta.st_nlink==1 and meta.st_uid==os.getuid()
+            and stat.S_IMODE(meta.st_mode)==0o444 and meta.st_size==expected_size,'compile','artifact_bundle')
+    bundle=root/'same-job-build.tar'
+    with original.open('rb') as source,bundle.open('xb') as destination:
+        opened=os.fstat(source.fileno())
+        require((opened.st_dev,opened.st_ino)==(meta.st_dev,meta.st_ino),'compile','artifact_bundle')
+        remaining=expected_size
+        while remaining:
+            chunk=source.read(min(1024*1024,remaining))
+            require(bool(chunk),'compile','artifact_bundle')
+            destination.write(chunk);remaining-=len(chunk)
+        require(source.read(1)==b'','compile','artifact_bundle')
+    bundle.chmod(0o400)
+    with bundle.open('rb') as stream:actual=hashlib.file_digest(stream,'sha256').hexdigest()
+    require(bundle.stat().st_size==expected_size and actual==digest,'compile','artifact_bundle')
+    try:
+        value=A.verify_bundle(bundle,producer,inventory,I.profile())
+        inputs=root/'artifacts';inputs.mkdir(mode=0o700)
+        # Headers, fixed names, bounds and digests were checked above. Never extractall.
+        with tarfile.open(bundle,'r:') as archive:
+            for name in A.NAMES:
+                with archive.extractfile(name) as source,(inputs/name).open('xb') as destination:
+                    shutil.copyfileobj(source,destination)
+                (inputs/name).chmod(0o555)
+                require(A.file_pin(inputs/name)==value['files'][name],'compile','artifact_bundle')
+    except A.Rejected:raise Failure('compile','artifact_bundle') from None
+    exact_source(sha)
+    emit('BUILD_HANDOFF',dict(schema_version=1,source=sha,source_tree=producer['source_tree'],
+        run_id=producer['run_id'],attempt=producer['attempt'],job='synthetic-only',
+        sha256=digest,size=expected_size,profile=I.profile(),same_job=True,
+        native_binaries_freshly_compiled=True,cross_run_reuse=False,fullflow=False))
+    return inputs
 
 
 def docker_env():
@@ -1016,8 +1128,9 @@ def cleanup(token, tag):
 
 def main():
     sha,token=context()
-    require(len(sys.argv)==2 and sys.argv[1] in ('run','cleanup'),'preflight','arguments')
+    require(len(sys.argv)==2 and sys.argv[1] in ('run','build','run-built','cleanup'),'preflight','arguments')
     cleanup_only=sys.argv[1]=='cleanup';tag='wholepact-financial:'+token
+    build_only=sys.argv[1]=='build';runtime_only=sys.argv[1]=='run-built';bundle_pin=None
     root=pathlib.Path(tempfile.mkdtemp(prefix='wholepact-financial-',dir=os.environ['RUNNER_TEMP']))
     (root/'docker').mkdir();os.environ['FINANCIAL_DOCKER_CONFIG']=str(root/'docker')
     passed,first=cleanup_only,None
@@ -1030,23 +1143,42 @@ def main():
                 financial_session_seconds=1800,original_fixture_ceiling_seconds=900,
                 active_financial_witnesses=7,retained_inert_witnesses=6,external_native_witness=True,
                 public_chain_verified=False,dispatch_requested=False))
-            build_context=build_inputs(root,sha)
-            docker(['pull','--platform','linux/amd64',BASE],'image',seconds=300,limit=4*1024*1024)
-            foundation_tag='wholepact-financial-foundation:'+token
-            foundation=build_image(build_context,'foundation',foundation_tag,token,sha,fresh=True)
-            image_id=final_image(build_context,tag,foundation_tag,token,sha,foundation)
-            exact_source(sha);result,passed=run_case('external',image_id,token,sha)
+            if not runtime_only:
+                with PipelineStage('build') as stage:
+                    built=build_inputs(root,sha,bundle_only=build_only)
+                    if build_only:bundle_pin=built;passed=True
+                    else:build_context=built
+                    stage.passed=True
+            if not build_only:
+                with PipelineStage('image') as stage:
+                    if runtime_only:
+                        inputs=same_job_inputs(root,sha)
+                        package_preflight()
+                        build_context=stage_image_context(root,inputs,sha)
+                    docker(['pull','--platform','linux/amd64',BASE],'image',seconds=300,limit=4*1024*1024)
+                    foundation_tag='wholepact-financial-foundation:'+token
+                    foundation=build_image(build_context,'foundation',foundation_tag,token,sha,fresh=True)
+                    image_id=final_image(build_context,tag,foundation_tag,token,sha,foundation)
+                    stage.passed=True
+                with PipelineStage('fixture-runtime') as stage:
+                    exact_source(sha);result,passed=run_case('external',image_id,token,sha)
+                    stage.passed=passed
     except Failure as error:
         first=failure_record(error)
         if not getattr(error,'published',False):emit('FAILURE',dict(**first,cleanup_pending=True))
     except Exception:
         first=failure_record(Failure('supervisor','internal'));emit('FAILURE',dict(**first,cleanup_pending=True))
     finally:
-        clean=cleanup(token,tag)
+        try:clean=cleanup(token,tag)
+        except Exception:clean=False
         try:shutil.rmtree(root)
         except OSError:clean=False
         passed=passed and clean and first is None
-        emit('RESULT',dict(passed=passed,cleanup_only=cleanup_only,source=sha,profile=I.profile(),
+        if build_only:
+            if passed:publish_compiled_bundle(bundle_pin)
+            emit('BUILD_RESULT',dict(passed=passed,source=sha,profile=I.profile(),
+                private_build_root_removed=not root.exists(),pre_credential=True,fullflow=False))
+        else:emit('RESULT',dict(passed=passed,cleanup_only=cleanup_only,source=sha,profile=I.profile(),
             semantic_assisted_host_observation=I.profile()==P.C.SEMANTIC_PROFILE,
             pixel_only_ui_verified=passed and not cleanup_only and I.profile()==P.C.EXTERNAL_PROFILE,
             synthetic_external_witness_flow_verified=passed and not cleanup_only,

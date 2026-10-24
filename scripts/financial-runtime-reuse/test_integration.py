@@ -18,7 +18,7 @@ class IntegrationTests(unittest.TestCase):
    data=(HERE/path).read_bytes();self.assertEqual(hashlib.sha256(data).hexdigest(),pin)
    relative=str(pathlib.Path(path).relative_to('cleanup_snapshot'))
    # Historical P40 cleanup remains pinned; fresh P49 uses exact reviewed current bytes.
-   fresh_changes={'scripts/ci-financial-container.py': '2b5769a8ecbcac522232c4af97ba718c42a64b9dda690ea66ddc59cd5bf2603f', 'scripts/ci-financial-contract.py': 'e50e10802466562816da6249e91914de739d77d315c001a8e958489e3ddeed41', 'scripts/ci-financial-external-output.py': '109dded70c7d7eca3160dd305601b3f5c9f31e24c8f0e6bb3c5161f8652c5587', 'scripts/ci-financial-observer.py': '6e24b52ce80097552b774b2ebc1259fa2d933494ba61df9ccf5871516c10b119', 'scripts/ci-financial-scenario.py': 'db76d745c672a002cafe22b6195acd6ab5c2073a89fe79e4aad75d1cda6fc98e', 'scripts/ci-financial-supervisor.py': '4895660680f176408c52895e1f62d80b50d31e2860de08fcb27d36818edeee41', 'scripts/tests/test_ci_financial_observer.py': 'f8b621d0784122614855a4795ef03bb38016be1a65ca6ae087fe4a9d856337bd', 'scripts/ci-financial-artifacts.py': 'f31041a577f3fa0dc65f5880ac0a77d8fd145e53d4d576524ede3e2adbec29ce'}
+   fresh_changes={'scripts/ci-financial-container.py': '2b5769a8ecbcac522232c4af97ba718c42a64b9dda690ea66ddc59cd5bf2603f', 'scripts/ci-financial-contract.py': 'e50e10802466562816da6249e91914de739d77d315c001a8e958489e3ddeed41', 'scripts/ci-financial-external-output.py': '109dded70c7d7eca3160dd305601b3f5c9f31e24c8f0e6bb3c5161f8652c5587', 'scripts/ci-financial-observer.py': '6e24b52ce80097552b774b2ebc1259fa2d933494ba61df9ccf5871516c10b119', 'scripts/ci-financial-scenario.py': 'db76d745c672a002cafe22b6195acd6ab5c2073a89fe79e4aad75d1cda6fc98e', 'scripts/ci-financial-supervisor.py': '6f0007eb6ead75ada0b1417fb984bde1af8ba1713728c5ea35310413e8c2da41', 'scripts/tests/test_ci_financial_observer.py': 'f8b621d0784122614855a4795ef03bb38016be1a65ca6ae087fe4a9d856337bd', 'scripts/ci-financial-artifacts.py': 'f31041a577f3fa0dc65f5880ac0a77d8fd145e53d4d576524ede3e2adbec29ce'}
    if relative in fresh_changes:self.assertEqual(hashlib.sha256((ROOT/relative).read_bytes()).hexdigest(),fresh_changes[relative])
    else:self.assertEqual(data,b'financial-semantic\n' if path.endswith('/qualification-gate-mode') else (ROOT/relative).read_bytes())
  def test_cleanup_dependency_closure_imports_without_execution(self):
@@ -32,9 +32,17 @@ class IntegrationTests(unittest.TestCase):
  def test_exact_private_workflow_wiring(self):
   self.assertEqual((ROOT/'scripts/qualification-gate-mode').read_bytes(),b'financial-semantic\n')
   w=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
-  fresh=w.split('      - name: Fresh isolated two-signer financial UI',1)[1].split('      - name:',1)[0]
-  self.assertIn("steps.mode.outputs.gate == 'financial-semantic'",fresh)
-  self.assertIn('run: bash scripts/ci-financial-linux.sh',fresh)
+  titles=('Financial recipe and projection gates (no build or fixture)','Fresh exact-source financial build (no runtime fixture)','Preserve exact credential-free compiled financial bundle','Financial image and native runtime (verified same-job fresh bundle)')
+  positions=[w.index('      - name: '+title) for title in titles]
+  self.assertEqual(positions,sorted(positions))
+  blocks=[w.split('      - name: '+title,1)[1].split('      - name:',1)[0] for title in titles]
+  for block in blocks:self.assertIn("steps.mode.outputs.gate == 'financial-semantic'",block)
+  self.assertIn('scripts/ci-financial-launch-tests.py',blocks[0]);self.assertIn("-p 'test*financial*.py'",blocks[0])
+  self.assertIn('scripts/ci-financial-supervisor.py build',blocks[1])
+  self.assertIn("steps.financial_build.outcome == 'success'",blocks[2]);self.assertIn("steps.financial_build.outputs.artifact_bundle_ready == 'true'",blocks[2])
+  self.assertIn("steps.financial_build.outcome == 'success'",blocks[3]);self.assertIn('test "$FINANCIAL_BUILD_READY" = true',blocks[3])
+  self.assertIn('scripts/ci-financial-supervisor.py run-built',blocks[3])
+  self.assertIn('steps.financial_build.outputs.artifact_bundle_sha256',blocks[3]);self.assertIn('steps.financial_build.outputs.artifact_bundle_size',blocks[3])
   for title in ('Fetch exact independent producer P and reviewed harness H without credentials','Acquire exact producer bundle with isolated read token','Actual synthetic financial runtime using verified producer binaries (not a fresh build)','Preserved P35 preparation, owned admissions and process-death reopen diagnostic (NOT full flow)'):
    block=w.split('      - name: '+title,1)[1].split('      - name:',1)[0]
    condition=next(line for line in block.splitlines() if line.strip().startswith('if:'))

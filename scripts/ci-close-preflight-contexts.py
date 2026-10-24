@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed P58 complete retained report compact formatting and selected maintained synthetic tests; no fullflow or artifact export."""
+"""Fixed P59 essential handoff composition and staged runtime and selected maintained synthetic tests; no fullflow or artifact export."""
 import importlib.util,json,os,pathlib,shutil,time
 HERE=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('preflight_supervisor',HERE/'ci-financial-supervisor.py');S=importlib.util.module_from_spec(spec);spec.loader.exec_module(S)
@@ -289,6 +289,9 @@ INTENT_VALIDATION_TESTS=(
     'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::diagnostic_stage_tests::actual_transaction_identity_error_keeps_original_journal_conversion',
     'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::transport_identity_tests::distinct_observed_and_original_process_labels_require_canonical_current_rows',
     'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::retained_report_tests::complete_prepared_display_reproduces_retained_and_admit_size_boundaries',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::downstream_composition_tests::complete_continue_projection_preserves_request_and_fits_full_packet',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::downstream_composition_tests::complete_sign_projection_preserves_lower_display_and_original_wallet_join',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::downstream_composition_tests::complete_return_projection_preserves_original_host_result_and_full_packet',
 )
 def intent_test_executable(raw,target):
     rows=[json.loads(line) for line in raw.splitlines() if line.startswith(b'{')]
@@ -350,6 +353,41 @@ def report_measurement(output):
     assert {v['material_input_id'] for v in values}=={False,True}
     return sorted(values,key=lambda v:v['material_input_id'])
 
+COMPOSITION_MEASUREMENT_TESTS={'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::downstream_composition_tests::complete_continue_projection_preserves_request_and_fits_full_packet': ('continue',), 'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::downstream_composition_tests::complete_sign_projection_preserves_lower_display_and_original_wallet_join': ('sign_lower', 'sign'), 'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::downstream_composition_tests::complete_return_projection_preserves_original_host_result_and_full_packet': ('return_read', 'return_exact')}
+COMPOSITION_MEASUREMENT_MARKER='COORDINATED_COMPOSITION_SIZE_V1 '
+COMPOSITION_LENGTHS=('display_bytes','request_json_bytes','facts_bytes','presentation_bytes','packet_bytes')
+def composition_measurement(name,output,*,complete):
+    expected=COMPOSITION_MEASUREMENT_TESTS[name]
+    count=output.count(COMPOSITION_MEASUREMENT_MARKER)
+    assert 0<count<=len(expected) and (not complete or count==len(expected))
+    lines=[line for line in output.splitlines() if COMPOSITION_MEASUREMENT_MARKER in line]
+    assert len(lines)==count
+    def pairs(items):
+        result={}
+        for key,value in items:
+            assert key not in result
+            result[key]=value
+        return result
+    values=[]
+    for line in lines:
+        prefix,raw=line.split(COMPOSITION_MEASUREMENT_MARKER,1)
+        assert prefix in ('','test '+name+' ... ') and len(raw.encode('utf-8'))<=1024
+        try:value=json.loads(raw,object_pairs_hook=pairs)
+        except (ValueError,UnicodeError):raise AssertionError('composition_measurement_schema') from None
+        assert type(value) is dict and set(value)==set(COMPOSITION_LENGTHS+('stage',))
+        assert type(value['stage']) is str
+        assert all(type(value[k]) is int and 0<=value[k]<=2*1024*1024 for k in COMPOSITION_LENGTHS)
+        values.append(value)
+    assert tuple(v['stage'] for v in values)==expected[:count]
+    return values
+
+def emit_test_measurement(name,output,*,complete):
+    if name==REPORT_MEASUREMENT_TEST:
+        print('CI_RETAINED_REPORT_SIZE_V2 '+json.dumps(report_measurement(output),sort_keys=True))
+    else:
+        values=composition_measurement(name,output,complete=complete)
+        print('CI_COMPOSITION_SIZE_V1 '+json.dumps(dict(test=name,complete=complete,test_passed=complete,records=values),sort_keys=True))
+
 def intent_elapsed_ms(started):
     # Harness monotonic execution interval only; never a native authority clock.
     elapsed=time.monotonic()-started
@@ -362,15 +400,14 @@ def run_intent_validation_tests(root,env):
     raw=S.checked(args,'compile',env=selected,seconds=900,limit=32*1024*1024)
     executable=intent_test_executable(raw,root/'target-shared')
     started=time.monotonic();deadline=started+360
-    def fixed(args,measurement=False):
+    def fixed(args,measurement=None):
         remaining=deadline-time.monotonic();assert remaining>0
         try:
             raw=S.checked(args,'compile',env=selected,seconds=min(60,remaining),limit=1024*1024)
         except S.Failure as error:
             if measurement:
                 try:
-                    value=report_measurement(error.output.decode('utf-8',errors='strict'))
-                    print('CI_RETAINED_REPORT_SIZE_V2 '+json.dumps(value,sort_keys=True))
+                    emit_test_measurement(measurement,error.output.decode('utf-8',errors='strict'),complete=False)
                 except BaseException:
                     pass # Missing/malformed measurements never replace the original failure.
                 finally:
@@ -384,10 +421,10 @@ def run_intent_validation_tests(root,env):
         assert [line for line in listing.splitlines() if line.endswith(': test')]==[name+': test']
     for name in INTENT_VALIDATION_TESTS:
         test_started=time.monotonic()
-        measurement=name==REPORT_MEASUREMENT_TEST
+        measurement=name if name==REPORT_MEASUREMENT_TEST or name in COMPOSITION_MEASUREMENT_TESTS else None
         output=fixed([str(executable),'--exact',name,'--test-threads=1']+(['--nocapture'] if measurement else []),measurement=measurement)
         assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in output
-        if measurement:print('CI_RETAINED_REPORT_SIZE_V2 '+json.dumps(report_measurement(output),sort_keys=True))
+        if measurement:emit_test_measurement(measurement,output,complete=True)
         print('CI_INTENT_VALIDATION_TEST '+json.dumps(dict(name=name,passed=True,ignored=0,elapsed_ms=intent_elapsed_ms(test_started)),sort_keys=True))
     print('CI_INTENT_VALIDATION_TESTS '+json.dumps(dict(actual_maintained_tests=len(INTENT_VALIDATION_TESTS),elapsed_ms=intent_elapsed_ms(started),passed=True,genuine_pair_or_final_fixture=False,fullflow=False),sort_keys=True))
     return len(INTENT_VALIDATION_TESTS)

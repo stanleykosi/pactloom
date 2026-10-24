@@ -208,7 +208,7 @@ class IntentValidationExecutionPreflightTests(unittest.TestCase):
  def test_intent_feature_union_is_exact_and_does_not_replace_old_target(self):
   self.assertEqual(set(C.INTENT_FEATURES),set(C.SIGNER_FEATURES)|{'synthetic-qualification'})
   self.assertEqual(len(C.HANDOFF_SECURITY_TESTS),50)
-  self.assertEqual(len(C.INTENT_VALIDATION_TESTS),17)
+  self.assertEqual(len(C.INTENT_VALIDATION_TESTS),20)
   self.assertTrue(set(C.INTENT_VALIDATION_TESTS).isdisjoint(C.HANDOFF_SECURITY_TESTS))
   rows=copy.deepcopy(self.rows);rows[-1]['features']=list(C.SIGNER_FEATURES)
   with self.assertRaises(AssertionError):self.check(rows)
@@ -303,3 +303,35 @@ class ReportMeasurementTests(unittest.TestCase):
   self.assertEqual(output.splitlines(),['CI_RETAINED_REPORT_SIZE_V2 '+json.dumps([self.value(),self.value(True)],sort_keys=True)])
  def test_failure_projection_print_error_cannot_replace_original(self):
   self.assertEqual(self.failure(self.output().encode(),broken=True),'')
+
+class CompositionMeasurementTests(unittest.TestCase):
+ def row(self,stage):return dict(stage=stage,**{k:123 for k in C.COMPOSITION_LENGTHS})
+ def output(self,rows):return '\n'.join(C.COMPOSITION_MEASUREMENT_MARKER+json.dumps(v) for v in rows)
+ def test_exact_three_domains_and_failure_prefix_only(self):
+  self.assertEqual(list(C.COMPOSITION_MEASUREMENT_TESTS.values()),[('continue',),('sign_lower','sign'),('return_read','return_exact')])
+  for name,stages in C.COMPOSITION_MEASUREMENT_TESTS.items():
+   rows=[self.row(s) for s in stages]
+   self.assertEqual(C.composition_measurement(name,self.output(rows),complete=True),rows)
+   self.assertEqual(C.composition_measurement(name,self.output(rows[:1]),complete=False),rows[:1])
+   if len(rows)>1:
+    with self.assertRaises(AssertionError):C.composition_measurement(name,self.output(rows[:1]),complete=True)
+ def test_bad_stages_records_and_values_fail_closed(self):
+  name=next(n for n,v in C.COMPOSITION_MEASUREMENT_TESTS.items() if v==('sign_lower','sign'));base=self.row('sign_lower')
+  cases=[[],[self.row('sign')],[base,base],[self.row('return_read')],[base,self.row('sign'),self.row('sign')]]
+  for key,value in [('stage','unknown'),('stage',1),('display_bytes',True),('display_bytes',-1),('display_bytes',2*1024*1024+1),('display_bytes',float('nan')),('display_bytes',float('inf')),('display_bytes','1')]:
+   row=dict(base);row[key]=value;cases.append([row])
+  row=dict(base,payload='PRIVATE');cases.append([row])
+  for rows in cases:
+   with self.assertRaises(AssertionError):C.composition_measurement(name,self.output(rows),complete=False)
+  for raw in (C.COMPOSITION_MEASUREMENT_MARKER+'{bad',C.COMPOSITION_MEASUREMENT_MARKER+'{"stage":"sign_lower","stage":"sign_lower"}',C.COMPOSITION_MEASUREMENT_MARKER+' '*1025+json.dumps(base)):
+   with self.assertRaises(AssertionError):C.composition_measurement(name,raw,complete=False)
+ def test_designated_failed_test_emits_only_safe_prefix_and_original_failure(self):
+  from unittest import mock
+  import contextlib,io
+  name=next(n for n,v in C.COMPOSITION_MEASUREMENT_TESTS.items() if v==('sign_lower','sign'));rows=[self.row('sign_lower')]
+  with tempfile.TemporaryDirectory() as td:
+   error=C.S.Failure('compile','command_failed',('PRIVATE\n'+self.output(rows)).encode(),exit_status=101);error.cleanup_failed=True;captured=io.StringIO()
+   with mock.patch.object(C,'INTENT_VALIDATION_TESTS',(name,)),mock.patch.object(C.S,'select_build_environment',return_value={}),mock.patch.object(C,'intent_test_executable',return_value=pathlib.Path(td)/'testbin'),mock.patch.object(C.S,'checked',side_effect=[b'compiler',(name+': test\n').encode(),error]) as checked,contextlib.redirect_stdout(captured):
+    with self.assertRaises(C.S.Failure) as caught:C.run_intent_validation_tests(pathlib.Path(td),{})
+   self.assertIs(caught.exception,error);self.assertEqual(error.output,b'');self.assertEqual(error.exit_status,101);self.assertTrue(error.cleanup_failed);self.assertIn('--nocapture',checked.call_args_list[-1].args[0])
+   self.assertNotIn('PRIVATE',captured.getvalue());value=json.loads(captured.getvalue().split('CI_COMPOSITION_SIZE_V1 ',1)[1]);self.assertEqual(value,dict(test=name,complete=False,test_passed=False,records=rows))

@@ -642,3 +642,9 @@ impl NativeRuntime {
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 #[path = "coordinated_v3_delivery_v1.rs"]
 mod coordinated_v3_delivery;
+
+// Test-only access to pure data projections; no authority constructors.
+#[cfg(all(test, feature = "coordinated-financial-workflow-v1", feature = "durable-proposal", feature = "pending-birth-owner-signing", feature = "native-ui", target_os = "linux"))]
+pub(crate) use coordinated_continue::project_continue_presentation;
+#[cfg(all(test, feature = "coordinated-financial-workflow-v1", feature = "durable-proposal", feature = "pending-birth-owner-signing", feature = "native-ui", target_os = "linux"))]
+pub(crate) use coordinated_admit::coordinated_writer_read::coordinated_financial_activate_v1::coordinated_financial_wallet_v1::coordinated_financial_sign_v1::coordinated_financial_return_v1::{project_return_read_facts, project_return_exact_facts};

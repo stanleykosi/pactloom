@@ -85,23 +85,10 @@ impl AwaitingCoordinatedReturnReadV1 {
                 .ok_or(Error::Locked)?
                 .min(self.retained.receipt.expires_at_ms)
                 .min(self.retained.context.source.original_ceiling_ms());
-            let request_json =
-                serde_json::to_string(&event.request).map_err(|_| Error::InvalidData)?;
-            let facts = SignerReturnReadFactsV1 {
-                original: self.original.clone(),
-                observed: self.observed.clone(),
-                signed: self.report.clone(),
-                request_digest: SignerReturnReadFactsV1::calculate_request_digest(&request_json)?,
-                request_json,
-                original_host_process_instance: host.instance().into(),
-                display: format!(
-                    "Read only the actual persisted successful financial result for authorization {} and original Host {}. Prepare its immutable Preview; do not send signature bytes or sign again.",
-                    self.report.authorization_id,
-                    host.instance()
-                ),
-                reviewed_at_ms: wall,
-                expires_at_ms,
-            };
+            let facts = project_return_read_facts(
+                &self.original, &self.observed, &self.report, &event.request,
+                host.instance(), wall, expires_at_ms,
+            )?;
             let presentation = origin.offer_return_read(facts, deadline)?;
             issued = Some(presentation.clone());
             transport.check_current()?;
@@ -205,16 +192,14 @@ impl UnreportedCoordinatedReturnPreparedV1 {
             let wall = wall_now()?;
             let ms = u64::try_from(deadline.checked_duration_since(now).ok_or(Error::Locked)?.as_millis()).map_err(|_| Error::Locked)?;
             if ms==0 || ms>120_000 { return Err(Error::Locked); }
-            let facts = wholepact_financial_coordinator_origin::SignerReturnExactFactsV1 {
-                read:self.prepared.read_presentation().clone(),
-                preview_digest:self.prepared.preview_digest().into(),
-                reviewed_digest:self.prepared.reviewed_digest().into(),
-                signature_set_digest:self.prepared.signature_set_digest().into(),
-                display:self.prepared.display(),reviewed_at_ms:wall,
-                expires_at_ms:wall.checked_add(ms).ok_or(Error::Locked)?
+            let facts = project_return_exact_facts(
+                self.prepared.read_presentation(), self.prepared.preview_digest(),
+                self.prepared.reviewed_digest(), self.prepared.signature_set_digest(),
+                || self.prepared.display(), wall,
+                || Ok(wall.checked_add(ms).ok_or(Error::Locked)?
                     .min(self.retained.retained.receipt.expires_at_ms)
-                    .min(self.retained.retained.context.source.original_ceiling_ms()),
-            };
+                    .min(self.retained.retained.context.source.original_ceiling_ms())),
+            )?;
             Ok((origin.offer_return_exact(completed,facts,deadline)?,deadline))
         })();
         match result {
@@ -302,4 +287,52 @@ impl FailedCoordinatedReturnV1 {
             .report_return_failure(self.failure.clone())
             .map_err(Into::into)
     }
+}
+
+// Pure Return Read metadata projection; the caller retains all actual custody.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn project_return_read_facts(
+    original: &wholepact_financial_coordinator_origin::SignerWalletOriginalV1,
+    observed: &wholepact_financial_coordinator_origin::SignerWalletObservedV1,
+    signed: &wholepact_financial_coordinator_origin::SignerSignCommittedV1,
+    request: &crate::authority_bridge::financial_continuation_v1::FinancialResultRequestV1,
+    original_host: &str, reviewed_at_ms: u64, expires_at_ms: u64,
+) -> Result<SignerReturnReadFactsV1> {
+    let request_json =
+        serde_json::to_string(request).map_err(|_| Error::InvalidData)?;
+    let facts = SignerReturnReadFactsV1 {
+        original: original.clone(),
+        observed: observed.clone(),
+        signed: signed.clone(),
+        request_digest: SignerReturnReadFactsV1::calculate_request_digest(&request_json)?,
+        request_json,
+        original_host_process_instance: original_host.into(),
+        display: format!(
+            "Read only the actual persisted successful financial result for authorization {} and original Host {}. Prepare its immutable Preview; do not send signature bytes or sign again.",
+            signed.authorization_id,
+            original_host
+        ),
+        reviewed_at_ms,
+        expires_at_ms,
+    };
+    Ok(facts)
+}
+
+// Pure Return Exact projection, without manufacturing a completed Read or Final.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn project_return_exact_facts(
+    read: &SignerReturnReadPresentationV1,
+    preview_digest: &str, reviewed_digest: &str, signature_set_digest: &str,
+    display: impl FnOnce() -> String, reviewed_at_ms: u64,
+    expires_at_ms: impl FnOnce() -> Result<u64>,
+) -> Result<wholepact_financial_coordinator_origin::SignerReturnExactFactsV1> {
+    let facts = wholepact_financial_coordinator_origin::SignerReturnExactFactsV1 {
+        read:read.clone(),
+        preview_digest:preview_digest.into(),
+        reviewed_digest:reviewed_digest.into(),
+        signature_set_digest:signature_set_digest.into(),
+        display:display(),reviewed_at_ms,
+        expires_at_ms:expires_at_ms()?,
+    };
+    Ok(facts)
 }

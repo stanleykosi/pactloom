@@ -225,15 +225,9 @@ impl PreparedCoordinatedFinancialReturnV1 {
         self.setup_deadline
     }
     pub(crate) fn display(&self) -> String {
-        format!(
-            "RETURN ONLY THE ALREADY RETAINED EXACT FINANCIAL SIGNATURE RESULT\nAccount: {}\nAuthorization: {}\nOriginal consent: {}\nResult: {}\nOutbox: {}\nOriginal recipient: {}\nNo new signature, reservation or transaction.\nExact return: {}",
-            self.evidence.request.account_id,
-            self.evidence.request.authorization_id,
-            self.evidence.request.original_consent_ref,
-            self.evidence.result_digest,
-            self.evidence.outbox_digest,
-            self.host.instance(),
-            self.digest
+        project_return_display(
+            &self.evidence.request, &self.evidence.result_digest, &self.evidence.outbox_digest,
+            self.host.instance(), &self.digest,
         )
     }
 }
@@ -305,4 +299,21 @@ mod tests {
         assert!(check_setup_ceiling(now, later, &[now, later]).is_err());
         assert!(check_setup_ceiling(now, now, &[later]).is_err());
     }
+}
+
+// Pure complete Return display; no result/permission/stream constructor.
+pub(crate) fn project_return_display(
+    request: &FinancialResultRequestV1, result_digest: &str, outbox_digest: &str,
+    original_host: &str, reviewed_digest: &str,
+) -> String {
+    format!(
+        "RETURN ONLY THE ALREADY RETAINED EXACT FINANCIAL SIGNATURE RESULT\nAccount: {}\nAuthorization: {}\nOriginal consent: {}\nResult: {}\nOutbox: {}\nOriginal recipient: {}\nNo new signature, reservation or transaction.\nExact return: {}",
+        request.account_id,
+        request.authorization_id,
+        request.original_consent_ref,
+        result_digest,
+        outbox_digest,
+        original_host,
+        reviewed_digest
+    )
 }

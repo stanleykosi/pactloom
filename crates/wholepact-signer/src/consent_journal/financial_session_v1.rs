@@ -366,16 +366,10 @@ impl PreparedFinancialSpendV1 {
         &self.digest
     }
     pub(crate) fn display(&self) -> Result<String> {
-        Ok(format!(
-            "SIGN THIS EXACT ORIGINAL PAYMENT AND ITS BOUNDED FUTURE DISPATCH\n{}\nWitness reservation disclosure: {}\nExpected original head: {}\nProspective immutable delivery policy: {}\nBoth accounts' signatures are required. Once completed, only the first retained verified transaction may be dispatched by the named dedicated dispatcher, before the original expiry, following a fresh Host confirmation. This does not renew signing permission or authorize replacement inputs, another signature, replacement transaction, or exposure clearance.\nExact review: {}",
-            serde_json::to_string_pretty(&inert_terms(&self.terms)?)
-                .map_err(|_| JournalError::InvalidBinding)?,
-            serde_json::to_string(&self.disclosure).map_err(|_| JournalError::InvalidBinding)?,
-            serde_json::to_string(&self.head).map_err(|_| JournalError::InvalidBinding)?,
-            serde_json::to_string(&self.retained.terms()?.scope.delivery)
-                .map_err(|_| JournalError::InvalidBinding)?,
-            self.digest
-        ))
+        project_spend_display(
+            &self.terms, &self.disclosure, &self.head,
+            || Ok(&self.retained.terms()?.scope.delivery), &self.digest,
+        )
     }
     pub(crate) fn approve(
         self,
@@ -543,3 +537,27 @@ impl FinancialConsentJournalV1 {
         Ok(instance)
     }
 }
+
+// Pure complete Sign display; lazy delivery preserves the original error order.
+pub(crate) fn project_spend_display<'a>(
+    terms: &SpendConsentTerms,
+    disclosure: &WitnessDisclosureDescriptor,
+    head: &AuthorityHead,
+    delivery: impl FnOnce() -> Result<&'a wholepact_authority::durable_delivery_scope_v2::DurableDeliveryPlanV2>,
+    digest: &str,
+) -> Result<String> {
+    Ok(format!(
+        "SIGN THIS EXACT ORIGINAL PAYMENT AND ITS BOUNDED FUTURE DISPATCH\n{}\nWitness reservation disclosure: {}\nExpected original head: {}\nProspective immutable delivery policy: {}\nBoth accounts' signatures are required. Once completed, only the first retained verified transaction may be dispatched by the named dedicated dispatcher, before the original expiry, following a fresh Host confirmation. This does not renew signing permission or authorize replacement inputs, another signature, replacement transaction, or exposure clearance.\nExact review: {}",
+        serde_json::to_string_pretty(&inert_terms(terms)?)
+        .map_err(|_| JournalError::InvalidBinding)?,
+        serde_json::to_string(disclosure).map_err(|_| JournalError::InvalidBinding)?,
+        serde_json::to_string(head).map_err(|_| JournalError::InvalidBinding)?,
+        serde_json::to_string(delivery()?)
+        .map_err(|_| JournalError::InvalidBinding)?,
+        digest
+    ))
+}
+
+// Test-only access to pure data projections; no authority constructors.
+#[cfg(all(test, feature = "coordinated-financial-workflow-v1", feature = "durable-proposal", feature = "pending-birth-owner-signing", feature = "native-ui", target_os = "linux"))]
+pub(crate) use coordinated_sign_v1::project_sign_exact_facts;

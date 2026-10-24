@@ -86,20 +86,11 @@ impl FinancialConsentJournalV1 {
 }
 impl PreparedCoordinatedFinancialSpendV1 {
     pub(crate) fn facts(&self, reviewed_at_ms: u64, expires_at_ms: u64) -> Result<SignerSignExactFactsV1> {
-        let facts = SignerSignExactFactsV1 {
-            original: self.read.facts.original.clone(), observed: self.read.facts.observed.clone(),
-            original_read_presentation_digest: self.read.presentation_digest.clone(),
-            signing_terms_digest: self.prepared.digest.clone(),
-            signer_principal_id: self.prepared.terms.principal_id.clone(),
-            spend_terms_json: serde_json::to_string(&inert_terms(&self.prepared.terms)?).map_err(|_| JournalError::InvalidBinding)?,
-            authenticated_history_digest: self.history_digest.clone(),
-            authenticated_snapshot_json: self.snapshot_json.clone(),
-            active_receipt_json: self.active_receipt_json.clone(),
-            active_receipt_digest: SignerSignExactFactsV1::calculate_active_receipt_digest(&self.active_receipt_json).map_err(|_| JournalError::InvalidBinding)?,
-            display: self.prepared.display()?, reviewed_at_ms, expires_at_ms,
-        };
-        facts.validate().map_err(|_| JournalError::InvalidBinding)?;
-        Ok(facts)
+        project_sign_exact_facts(
+            &self.read, &self.prepared.terms, &self.prepared.digest,
+            &self.history_digest, &self.snapshot_json, &self.active_receipt_json,
+            || self.prepared.display(), reviewed_at_ms, expires_at_ms,
+        )
     }
     pub(crate) fn freeze_presentation(self, presentation: SignerSignExactPresentationV1, original_sign: Instant) -> Result<PresentedCoordinatedFinancialSpendV1> {
         presentation.validate().map_err(|_| JournalError::InvalidBinding)?;
@@ -184,4 +175,27 @@ impl ApprovedCoordinatedFinancialSpendConsentV1 {
     pub(in crate::consent_journal) fn result(&self, commit: impl FnOnce() -> std::io::Result<()>) -> std::io::Result<()> { self.action.execute_sign_result_publication(commit) }
     pub(crate) fn execute_key_use(&self, sign: impl FnOnce() -> std::io::Result<()>) -> std::io::Result<()> { self.action.execute_sign_key_use(sign) }
     pub(crate) fn finish(self) -> Result<()> { self.action.finish_sign().map_err(|_| JournalError::Permission) }
+}
+
+// Pure Sign facts projection. The callback supplies only the existing display.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn project_sign_exact_facts(
+    read: &SignerSignReadPresentationV1, terms: &SpendConsentTerms,
+    signing_digest: &str, history_digest: &str, snapshot_json: &str, receipt_json: &str,
+    display: impl FnOnce() -> Result<String>, reviewed_at_ms: u64, expires_at_ms: u64,
+) -> Result<SignerSignExactFactsV1> {
+    let facts = SignerSignExactFactsV1 {
+        original: read.facts.original.clone(), observed: read.facts.observed.clone(),
+        original_read_presentation_digest: read.presentation_digest.clone(),
+        signing_terms_digest: signing_digest.to_owned(),
+        signer_principal_id: terms.principal_id.clone(),
+        spend_terms_json: serde_json::to_string(&inert_terms(&terms)?).map_err(|_| JournalError::InvalidBinding)?,
+        authenticated_history_digest: history_digest.to_owned(),
+        authenticated_snapshot_json: snapshot_json.to_owned(),
+        active_receipt_json: receipt_json.to_owned(),
+        active_receipt_digest: SignerSignExactFactsV1::calculate_active_receipt_digest(&receipt_json).map_err(|_| JournalError::InvalidBinding)?,
+        display: display()?, reviewed_at_ms, expires_at_ms,
+    };
+    facts.validate().map_err(|_| JournalError::InvalidBinding)?;
+    Ok(facts)
 }

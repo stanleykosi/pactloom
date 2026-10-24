@@ -443,3 +443,7 @@ pub(crate) use preconstruction_lease::{CoordinatedConstructionActionV1, Coordina
 
 #[cfg(all(feature = "coordinated-financial-workflow-v1", feature = "durable-proposal", feature = "pending-birth-owner-signing", feature = "native-ui", target_os = "linux"))]
 pub(crate) use storage::financial_profile_v1::{PreparedCoordinatedFinancialSpendV1, PresentedCoordinatedFinancialSpendV1, ApprovedCoordinatedFinancialSpendConsentV1};
+
+// Test-only access to pure data projections; no authority constructors.
+#[cfg(all(test, feature = "coordinated-financial-workflow-v1", feature = "durable-proposal", feature = "pending-birth-owner-signing", feature = "native-ui", target_os = "linux"))]
+pub(crate) use storage::financial_profile_v1::{project_spend_display, project_sign_exact_facts};

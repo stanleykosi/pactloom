@@ -759,3 +759,7 @@ mod v3_delivery_packet_roundtrip_tests {
         assert!(check_direction(Role::Signer1, Role::Host, &decoded).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "financial_workflow_channel/composition_tests.rs"]
+mod composition_tests;

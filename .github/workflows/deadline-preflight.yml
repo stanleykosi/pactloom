@@ -1,14 +1,14 @@
-name: Complete retained report compact formatting preflight only
+name: Essential handoff composition and staged runtime preflight only
 on:
   push:
-    branches: [checkpoint/report-format-preflight-p58]
+    branches: [checkpoint/handoff-composition-preflight-p59]
 permissions: {}
 concurrency:
-  group: report-format-preflight-p58
+  group: handoff-composition-preflight-p59
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/report-format-preflight-p58' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/handoff-composition-preflight-p59' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -46,6 +46,7 @@ jobs:
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B scripts/ci-financial-handoff-source-audit.py --source "$PWD"
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B scripts/ci-financial-admit-read-source-audit.py --source "$PWD"
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B scripts/ci-financial-intent-detail-source-audit.py --source "$PWD"
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B scripts/ci-financial-downstream-projection-audit.py --source "$PWD"
       - name: Pinned compiler, API fences and focused deadline regressions
         shell: bash
         working-directory: source
@@ -89,6 +90,7 @@ jobs:
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-service-lifetime-trace.py', '--source', str(repo), '--out', str(root/'service-lifetime-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-admit-read-trace.py', '--source', str(repo), '--out', str(root/'admit-read-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-transport-identity-trace.py', '--source', str(repo), '--out', str(root/'transport-identity-traces'), '--run'], env=env, timeout=180))
+          print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-ready-deadline-trace.py', '--source', str(repo), '--out', str(root/'ready-deadline-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-pair-channel-trace.py', '--source', str(repo), '--out', str(root/'pair-channel-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-host-phase-trace.py', '--source', str(repo), '--out', str(root/'host-phase-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-admission-trace.py', '--source', str(repo), '--out', str(root/'admission-traces'), '--run'], env=env, timeout=180))
@@ -161,18 +163,19 @@ jobs:
           names += ['financial_workflow_origin::v3_entry::pair::pair_channel_wall_tests::'+n for n in ['separate_channel_wall_horizon_does_not_change_action_horizon', 'channel_wall_reconstruction_does_not_restart_and_denies_rollback_expiry']]
           names += ['financial_workflow_origin::v3_entry::delivery::tests::'+n for n in ['delivery_custody_wall_preserves_long_originals_without_widening_actions', 'delivery_custody_reconstruction_keeps_shorter_channel_epoch_and_expiry']]
           names += ['completed_pair_origin::tests::'+n for n in ['completed_pair_received_service_preserves_original_long_horizon_and_review120', 'completed_pair_received_service_keeps_epoch_both_sources_and_supervision_without_pair900']]
-          assert len(names) == 16 and len(set(names)) == 16
+          names += ['financial_workflow_channel::composition_tests::continue_valid_data_can_exceed_actual_packet_and_original_peer_join_remains_exact']
+          assert len(names) == 17 and len(set(names)) == 17
           for name in names:
               listing = run([exe, '--list', '--exact', name], env=env, timeout=30)
               assert [line for line in listing.splitlines() if line.endswith(': test')] == [name+': test'], name
               result = run([exe, '--exact', name, '--test-threads=1'], env=env, timeout=30)
               assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in result, name
               print(name+': passed')
-          print('Four clock, four actual packet round-trip, two actual Pair DTO, two Pair wall-helper tests, two delivery custody and two completed-Pair service clock tests, and four source-extracted inert-carrier regressions passed. Compiler/API preflight only; not authority-flow, native/full qualification, deployment or settlement.')
+          print('Four clock, four actual packet round-trip, two actual Pair DTO, two Pair wall-helper tests, two delivery custody and two completed-Pair service clock tests, one actual Continue packet/peer composition test, and four source-extracted inert-carrier regressions passed. Compiler/API preflight only; not authority-flow, native/full qualification, deployment or settlement.')
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/report-format-preflight-p58' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/handoff-composition-preflight-p59' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

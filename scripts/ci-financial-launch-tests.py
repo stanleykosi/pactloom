@@ -49,7 +49,7 @@ class LaunchTests(unittest.TestCase):
             def checked(args,stage,**kwargs):
                 return (S.B.RUSTC+'\n').encode() if '--version' in args else b''
             with patch.object(S,'checked',side_effect=checked),patch.object(S,'exact_source'), \
-                 patch.object(S,'export_compiled_artifacts'), \
+                 patch.object(S,'export_compiled_artifacts'),patch.object(S,'publish_compiled_bundle'), \
                  patch.object(S,'encrypted_build_environment',side_effect=lambda root,env:env), \
                  patch.object(S,'build_command',side_effect=command),patch.object(S,'select_artifact',side_effect=artifact), \
                  patch.object(S,'validate_compiler_cfg') as cfg_check, \
@@ -132,7 +132,7 @@ class LaunchTests(unittest.TestCase):
             base=pathlib.Path(tmp);repo=base/'source';repo.mkdir()
             source_files={'Cargo.lock':b'fabricated lock',**{name:b'fabricated build script' for name in S.A.BUILD_SCRIPTS}}
             for name,raw in source_files.items():
-                path=repo/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(raw)
+                path=repo/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(raw);path.chmod(0o644)
             build=base/'ephemeral-build';build.mkdir();inputs=build/'artifacts';inputs.mkdir()
             for name in S.A.NAMES:(inputs/name).write_bytes(b'\x7fELFfabricated '+name.encode())
             output=base/'github-output';output.touch()
@@ -143,12 +143,14 @@ class LaunchTests(unittest.TestCase):
                  patch.object(S,'exact_source') as guard, \
                  patch.object(S,'checked',side_effect=[b'b'*40+b'\n',rows]), \
                  contextlib.redirect_stdout(io.StringIO()):
-                S.export_compiled_artifacts(inputs,'a'*40)
+                pin=S.export_compiled_artifacts(inputs,'a'*40)
                 self.assertEqual(guard.call_count,2)
-            S.shutil.rmtree(build)
+                self.assertEqual(output.read_text(),'')
+                S.shutil.rmtree(build)
+                S.publish_compiled_bundle(pin)
             bundle=base/'wholepact-financial-build-123-1'/'build.tar'
             self.assertTrue(bundle.is_file())
-            self.assertEqual(output.read_text(),'artifact_bundle_ready=true\n')
+            self.assertEqual(output.read_text(),f"artifact_bundle_sha256={pin['sha256']}\nartifact_bundle_size={pin['size']}\nartifact_bundle_ready=true\n")
             expected={name:S.hashlib.sha256(b'100644\0'+raw).hexdigest() for name,raw in source_files.items()}
             value=S.A.verify_bundle(bundle,dict(repository='stanleykosi/pactloom',source='a'*40,
                     source_tree='b'*40,run_id=123,attempt=1),expected,S.I.profile())
@@ -157,7 +159,7 @@ class LaunchTests(unittest.TestCase):
     def test_failed_bundle_never_marks_upload_ready(self):
         with tempfile.TemporaryDirectory() as tmp:
             base=pathlib.Path(tmp);repo=base/'source';repo.mkdir()
-            (repo/'Cargo.lock').write_bytes(b'fabricated lock')
+            (repo/'Cargo.lock').write_bytes(b'fabricated lock');(repo/'Cargo.lock').chmod(0o644)
             output=base/'github-output';output.touch()
             env=dict(RUNNER_TEMP=str(base),GITHUB_REPOSITORY='stanleykosi/pactloom',
                      GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1',GITHUB_OUTPUT=str(output))
@@ -178,6 +180,9 @@ class LaunchTests(unittest.TestCase):
         self.assertLess(launcher.index(discovery),launcher.index('exec python3'))
         self.assertIn('set -euo pipefail',launcher)
         self.assertNotIn('|| true',launcher)
+        workflow=(HERE.parent/'.github/workflows/durable-native-linux.yml').read_text()
+        self.assertEqual(workflow.count(discovery),1)
+        self.assertLess(workflow.index(discovery),workflow.index('scripts/ci-financial-supervisor.py build'))
 
     def candidate(self,**changes):
         value=dict(schema=1,profile=S.P.C.EXTERNAL_PROFILE,native_oracle_verified=True,
@@ -241,9 +246,10 @@ class LaunchTests(unittest.TestCase):
         self.assertIn('"$mode" == financial-ui',workflow)
         self.assertIn("steps.mode.outputs.gate != 'financial-ui'",workflow)
         self.assertIn("always() && (steps.mode.outputs.gate == 'financial-ui' || steps.mode.outputs.gate == 'financial-semantic')",workflow)
-        self.assertEqual(workflow.count('run: bash scripts/ci-financial-linux.sh'),1)
+        self.assertEqual(workflow.count('python3 -I -B scripts/ci-financial-supervisor.py build'),1)
+        self.assertEqual(workflow.count('python3 -I -B scripts/ci-financial-supervisor.py run-built'),1)
         self.assertEqual(workflow.count('run: bash scripts/ci-ui-linux.sh'),1)
-        self.assertIn("always() && (steps.mode.outputs.gate == 'financial-ui' || steps.mode.outputs.gate == 'financial-semantic') && steps.financial.outputs.artifact_bundle_ready == 'true'",workflow)
+        self.assertIn("success() && (steps.mode.outputs.gate == 'financial-ui' || steps.mode.outputs.gate == 'financial-semantic') && steps.financial_build.outcome == 'success' && steps.financial_build.outputs.artifact_bundle_ready == 'true'",workflow)
         self.assertIn('wholepact-financial-build-${{ github.run_id }}-${{ github.run_attempt }}/build.tar',workflow)
 
 if __name__=='__main__':unittest.main()

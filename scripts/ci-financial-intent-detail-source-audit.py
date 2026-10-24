@@ -27,6 +27,9 @@ IDENTITY_CONVERSIONS = [
  'self.database_identity.check_current(&tx).map_err(JournalError::from)',
 ]
 
+# Exact cfg(test)-only pure projection alias; no production policy change.
+TEST_PROJECTION_EXPORT = '\n// Test-only access to pure data projections; no authority constructors.\n#[cfg(all(test, feature = "coordinated-financial-workflow-v1", feature = "durable-proposal", feature = "pending-birth-owner-signing", feature = "native-ui", target_os = "linux"))]\npub(crate) use financial_continuation_v1::project_return_display;\n'
+
 def main():
  p=argparse.ArgumentParser();p.add_argument('--source',type=Path,required=True);root=p.parse_args().source.resolve()
  spec=importlib.util.spec_from_file_location('prior',root/'scripts/ci-financial-admit-read-source-audit.py')
@@ -34,6 +37,9 @@ def main():
  evidence=[];counts={}
  for relative,expected in BASE_TOKEN_HASHES.items():
   raw=(root/relative).read_text();restored=raw.replace(TEST_FOOTER,'')
+  if relative == 'crates/wholepact-signer/src/authority_bridge/mod.rs':
+   assert restored.count(TEST_PROJECTION_EXPORT)==1
+   restored=restored.replace(TEST_PROJECTION_EXPORT,'',1)
   if relative.endswith('/coordinated_v1.rs'):
    assert restored.count(COMPACT_DISPLAY)==1
    restored=restored.replace(COMPACT_DISPLAY,PRETTY_DISPLAY)

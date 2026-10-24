@@ -273,3 +273,7 @@ pub(crate) mod durable_proposal_v1;
 
 #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
 pub(crate) use runtime::durable_delivery_v3::VerifiedImportV3;
+
+// Test-only access to pure data projections; no authority constructors.
+#[cfg(all(test, feature = "coordinated-financial-workflow-v1", feature = "durable-proposal", feature = "pending-birth-owner-signing", feature = "native-ui", target_os = "linux"))]
+pub(crate) use runtime::{project_continue_presentation, project_return_read_facts, project_return_exact_facts};

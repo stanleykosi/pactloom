@@ -359,32 +359,11 @@ impl BoundCoordinatedContinueReviewV1 {
                 &final_read,
             )?;
         final_read.check_current()?;
-        let request_json =
-            serde_json::to_string(prepared.request()).map_err(|_| Error::InvalidData)?;
-        let display = serde_json::to_string_pretty(&serde_json::json!({
-            "purpose": "save_one_exact_local_financial_continuation",
-            "notice": "This Continue saves the exact local request only. Witness review and a separate fresh Admit are still required. No owner mutation, wallet access, signature or return is authorized.",
-            "selected_root": context.source.original_root(),
-            "source_identity_digest": context.source.identity_digest(),
-            "original_journal_digest": journal_digest,
-            "owner_certificate_digest": certificate,
-            "completed_read_presentation_digest": completed_read.presentation_digest,
-            "owner_selection_digest": completed_read.facts.owner_selection_digest,
-            "authenticated_history_digest": history_digest,
-            "authenticated_snapshot": history_snapshot,
-            "review": review,
-            "exact_request": prepared.request(),
-        })).map_err(|_| Error::InvalidData)?;
-        let mut presentation = SignerContinuePresentationV1 {
-            review,
-            display,
-            request_digest: SignerContinuePresentationV1::calculate_request_digest(&request_json),
-            request_json,
-            prepared_digest: prepared.prepared_digest().to_owned(),
-            presentation_digest: String::new(),
-        };
-        presentation.presentation_digest = presentation.calculate_presentation_digest()?;
-        presentation.validate()?;
+        let presentation = project_continue_presentation(
+            prepared.request(), prepared.prepared_digest(), review,
+            context.source.original_root(), context.source.identity_digest(),
+            &journal_digest, &certificate, &completed_read, &history_digest, &history_snapshot,
+        )?;
         final_read.check_current()?;
         let presented = prepared.freeze_presentation_v1(&presentation)?;
         check_context(&context, Some(&final_read))?;
@@ -621,4 +600,47 @@ mod tests {
             );
         }
     }
+}
+
+// Pure complete display projection; no permission, source access or effect.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn project_continue_presentation(
+    request: &wholepact_authority::OwnerControlRequest,
+    prepared_digest: &str,
+    review: SignerContinueReviewDataV1,
+    selected_root: &std::path::Path,
+    source_identity: &str,
+    journal_digest: &str,
+    certificate: &str,
+    completed_read: &SignerFinancialReadPresentationV1,
+    history_digest: &str,
+    history_snapshot: &serde_json::Value,
+) -> Result<SignerContinuePresentationV1> {
+    let request_json =
+        serde_json::to_string(request).map_err(|_| Error::InvalidData)?;
+    let display = serde_json::to_string_pretty(&serde_json::json!({
+        "purpose": "save_one_exact_local_financial_continuation",
+        "notice": "This Continue saves the exact local request only. Witness review and a separate fresh Admit are still required. No owner mutation, wallet access, signature or return is authorized.",
+        "selected_root": selected_root,
+        "source_identity_digest": source_identity,
+        "original_journal_digest": journal_digest,
+        "owner_certificate_digest": certificate,
+        "completed_read_presentation_digest": completed_read.presentation_digest,
+        "owner_selection_digest": completed_read.facts.owner_selection_digest,
+        "authenticated_history_digest": history_digest,
+        "authenticated_snapshot": history_snapshot,
+        "review": review,
+        "exact_request": request,
+    })).map_err(|_| Error::InvalidData)?;
+    let mut presentation = SignerContinuePresentationV1 {
+        review,
+        display,
+        request_digest: SignerContinuePresentationV1::calculate_request_digest(&request_json),
+        request_json,
+        prepared_digest: prepared_digest.to_owned(),
+        presentation_digest: String::new(),
+    };
+    presentation.presentation_digest = presentation.calculate_presentation_digest()?;
+    presentation.validate()?;
+    Ok(presentation)
 }

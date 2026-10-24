@@ -7689,3 +7689,7 @@ mod durable_flow_poller_tests {
         assert!(report.incomplete());
     }
 }
+
+// Test-only access to pure data projections; no authority constructors.
+#[cfg(all(test, feature = "coordinated-financial-workflow-v1", feature = "durable-proposal", feature = "pending-birth-owner-signing", feature = "native-ui", target_os = "linux"))]
+pub(crate) use financial_v1::{project_continue_presentation, project_return_read_facts, project_return_exact_facts};
