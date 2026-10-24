@@ -208,7 +208,7 @@ class IntentValidationExecutionPreflightTests(unittest.TestCase):
  def test_intent_feature_union_is_exact_and_does_not_replace_old_target(self):
   self.assertEqual(set(C.INTENT_FEATURES),set(C.SIGNER_FEATURES)|{'synthetic-qualification'})
   self.assertEqual(len(C.HANDOFF_SECURITY_TESTS),50)
-  self.assertEqual(len(C.INTENT_VALIDATION_TESTS),13)
+  self.assertEqual(len(C.INTENT_VALIDATION_TESTS),15)
   self.assertTrue(set(C.INTENT_VALIDATION_TESTS).isdisjoint(C.HANDOFF_SECURITY_TESTS))
   rows=copy.deepcopy(self.rows);rows[-1]['features']=list(C.SIGNER_FEATURES)
   with self.assertRaises(AssertionError):self.check(rows)
@@ -224,3 +224,25 @@ class IntentTimingEvidenceTests(unittest.TestCase):
   for now in (99,460.001,float('nan'),float('inf')):
    with mock.patch.object(C.time,'monotonic',return_value=now):
     with self.assertRaises(AssertionError):C.intent_elapsed_ms(100)
+
+class PrimaryCompilerDiagnosticTests(unittest.TestCase):
+ def record(self,text,level='error'):
+  return json.dumps(dict(reason='compiler-message',message=dict(level=level,rendered=text))).encode()+b'\n'
+ def check_bound(self,value):
+  self.assertLessEqual(len(value['primary_compiler_errors'].encode())+len(value['combined_stdout_stderr_tail'].encode()),C.S.BUILD_LOG_LIMIT)
+ def test_early_primary_errors_survive_large_warning_tail(self):
+  raw=self.record('error[E0277]: first\n --> source.rs:42:7')+self.record('error[E0277]: second\n --> source.rs:91:9')+self.record('warning only','warning')+b'warnings\n'*100000
+  v=C.preflight_failure_output(raw)
+  self.assertEqual(v['primary_error_records'],2)
+  self.assertIn('source.rs:42:7',v['primary_compiler_errors']);self.assertIn('source.rs:91:9',v['primary_compiler_errors'])
+  self.assertNotIn('warning only',v['primary_compiler_errors']);self.assertEqual(v['captured_output_bytes'],len(raw));self.check_bound(v)
+ def test_malformed_or_nonerror_records_do_not_become_primary(self):
+  raw=b'{invalid\n[]\n'+json.dumps(dict(reason='compiler-message',message=[])).encode()+b'\n'+self.record('not an error','warning')
+  v=C.preflight_failure_output(raw);self.assertEqual(v['primary_error_records'],0);self.assertEqual(v['primary_compiler_errors'],'');self.check_bound(v)
+ def test_missing_rendered_preserves_structured_span(self):
+  raw=json.dumps(dict(reason='compiler-message',message=dict(level='error',message='bound missing',code=dict(code='E0277'),spans=[dict(file_name='source.rs',line_start=42)]))).encode()
+  v=C.preflight_failure_output(raw);self.assertIn('E0277',v['primary_compiler_errors']);self.assertIn('line_start',v['primary_compiler_errors']);self.check_bound(v)
+ def test_oversized_unicode_and_secrets_stay_bounded_sanitized(self):
+  raw=self.record('ghp_secret123 bearer ABC123 password=private\x1b '+('界'*100000))+b'tail\n'*20000
+  v=C.preflight_failure_output(raw);self.check_bound(v)
+  self.assertNotIn('ghp_secret123',v['primary_compiler_errors']);self.assertNotIn('ABC123',v['primary_compiler_errors']);self.assertNotIn('password=private',v['primary_compiler_errors']);self.assertNotIn('\x1b',v['primary_compiler_errors'])

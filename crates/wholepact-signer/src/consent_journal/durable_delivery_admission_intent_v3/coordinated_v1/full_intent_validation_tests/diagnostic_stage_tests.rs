@@ -133,3 +133,70 @@ fn actual_validator_first_detail_survives_outer_fallback_and_restores_scope() {
     assert_eq!(admit_read_detail_for_test(), None);
     assert!(before == c.total_changes());
 }
+
+// The original caller's `?` already performed this exact conversion. The
+// diagnostic must classify the Journal wrapper, not require a new blanket
+// classifier for raw storage-security errors.
+fn implicit_identity_check(
+    identity: &wholepact_storage_security::DatabaseFileIdentity,
+    connection: &Connection,
+) -> Result<()> {
+    identity.check_current(connection)?;
+    Ok(())
+}
+#[track_caller]
+fn identity_conversion_matches_original(
+    identity: &wholepact_storage_security::DatabaseFileIdentity,
+    connection: &Connection,
+    changed: bool,
+) {
+    let original = implicit_identity_check(identity, connection);
+    assert_eq!(admit_read_detail_for_test(), None);
+    {
+        let _observation = AdmitReadObservation::enter();
+        let mut calls = 0;
+        let observed: Result<()> = actor_admit_read_detail_result!(AdmitReadIntentJournalIdentity, {
+            calls += 1;
+            identity.check_current(connection).map_err(JournalError::from)
+        });
+        assert_eq!(calls, 1);
+        if changed {
+            assert!(matches!(original, Err(JournalError::Storage(
+                wholepact_storage_security::StorageSecurityError::SourceChanged))));
+            assert!(matches!(observed, Err(JournalError::Storage(
+                wholepact_storage_security::StorageSecurityError::SourceChanged))));
+            assert_eq!(admit_read_detail_for_test(), Some((
+                DriverStage::AdmitReadIntentJournalIdentity, Class::JournalStorage)));
+        } else {
+            assert!(matches!(original, Ok(())));
+            assert!(matches!(observed, Ok(())));
+            assert_eq!(admit_read_detail_for_test(), None);
+        }
+    }
+    assert_eq!(admit_read_detail_for_test(), None);
+}
+
+#[test]
+fn actual_connection_identity_error_keeps_original_journal_conversion() {
+    let original = MaterialFixture::coordinated();
+    let other = MaterialFixture::coordinated();
+    let connection = checked(original.journal().connection.lock());
+    let before = connection.total_changes();
+    identity_conversion_matches_original(&original.journal().database_identity, &connection, false);
+    identity_conversion_matches_original(&other.journal().database_identity, &connection, true);
+    assert!(before == connection.total_changes());
+}
+
+#[test]
+fn actual_transaction_identity_error_keeps_original_journal_conversion() {
+    let original = MaterialFixture::coordinated();
+    let other = MaterialFixture::coordinated();
+    let mut connection = checked(original.journal().connection.lock());
+    let before = connection.total_changes();
+    {
+        let transaction = checked(connection.transaction_with_behavior(TransactionBehavior::Deferred));
+        identity_conversion_matches_original(&original.journal().database_identity, &transaction, false);
+        identity_conversion_matches_original(&other.journal().database_identity, &transaction, true);
+    }
+    assert!(before == connection.total_changes());
+}

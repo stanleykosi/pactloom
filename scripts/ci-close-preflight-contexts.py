@@ -285,6 +285,8 @@ INTENT_VALIDATION_TESTS=(
     'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::diagnostic_stage_tests::actual_complete_review_or_groups_select_ceiling_binding_and_material_detail',
     'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::diagnostic_stage_tests::actual_original_row_failures_select_exact_lineage_stage_and_original_class',
     'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::diagnostic_stage_tests::actual_validator_first_detail_survives_outer_fallback_and_restores_scope',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::diagnostic_stage_tests::actual_connection_identity_error_keeps_original_journal_conversion',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::diagnostic_stage_tests::actual_transaction_identity_error_keeps_original_journal_conversion',
 )
 def intent_test_executable(raw,target):
     rows=[json.loads(line) for line in raw.splitlines() if line.startswith(b'{')]
@@ -343,6 +345,40 @@ def run_intent_validation_tests(root,env):
         print('CI_INTENT_VALIDATION_TEST '+json.dumps(dict(name=name,passed=True,ignored=0,elapsed_ms=intent_elapsed_ms(test_started)),sort_keys=True))
     print('CI_INTENT_VALIDATION_TESTS '+json.dumps(dict(actual_maintained_tests=len(INTENT_VALIDATION_TESTS),elapsed_ms=intent_elapsed_ms(started),passed=True,genuine_pair_or_final_fixture=False,fullflow=False),sort_keys=True))
     return len(INTENT_VALIDATION_TESTS)
+def preflight_failure_output(raw):
+    """Pre-credential Cargo errors first; same combined 64 KiB text ceiling.
+
+    The command already bounds capture to 32 MiB. Never use this projection for
+    runtime output. Only Cargo error records contribute primary diagnostics;
+    dependency warnings and malformed JSON cannot displace the first errors.
+    """
+    budget=S.BUILD_LOG_LIMIT//2
+    primary=bytearray();errors=0;primary_total=0
+    for line in raw.splitlines():
+        if not line.startswith(b'{'):continue
+        try:row=json.loads(line)
+        except (ValueError,UnicodeError):continue
+        if type(row) is not dict or row.get('reason')!='compiler-message':continue
+        message=row.get('message')
+        if type(message) is not dict or message.get('level')!='error':continue
+        errors+=1
+        rendered=message.get('rendered')
+        if type(rendered) is not str:
+            # Structured rustc spans remain useful if rendered text is absent.
+            rendered=json.dumps({k:message[k] for k in ('message','code','spans') if k in message},ensure_ascii=True)
+        encoded=(rendered+'\n').encode('utf-8');primary_total+=len(encoded)
+        if len(primary)<budget:
+            primary.extend(encoded[:budget-len(primary)])
+    clean=S.build_failure_tail(bytes(primary))['combined_stdout_stderr_tail']
+    clean=clean.encode('utf-8')[:budget].decode('utf-8',errors='ignore')
+    remaining=S.BUILD_LOG_LIMIT-len(clean.encode('utf-8'))
+    tail=S.build_failure_tail(raw[-remaining:])['combined_stdout_stderr_tail']
+    tail=tail.encode('utf-8')[-remaining:].decode('utf-8',errors='ignore')
+    return dict(primary_compiler_errors=clean,primary_error_records=errors,
+        primary_diagnostic_bytes=len(clean.encode('utf-8')),primary_diagnostics_truncated=primary_total>budget,
+        combined_stdout_stderr_tail=tail,tail_bytes=len(tail.encode('utf-8')),
+        captured_output_bytes=len(raw),tail_truncated=len(raw)>remaining)
+
 def main():
     root=pathlib.Path(os.environ['PREFLIGHT_ROOT']).resolve();assert root.is_dir()
     env=dict(PATH=os.environ['PATH'],HOME=str(root/'home'),CARGO_HOME=str(root/'cargo'),CARGO_TARGET_DIR=str(root/'target-shared'),CARGO_BUILD_JOBS='3',CARGO_INCREMENTAL='0',RUSTUP_HOME=os.environ['RUSTUP_HOME'],GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL='/dev/null',GIT_TERMINAL_PROMPT='0')
@@ -358,7 +394,10 @@ def main():
         print('CI_CLOSE_PREFLIGHT_CONTEXTS '+json.dumps(dict(schema_version=2,actual_test_contexts=list(PACKAGES),actual_semantic_script_crates=list(SCRIPTS),typecheck_passed=True,signer_observed_api_absent_profiles=absence,selected_maintained_tests_executed=executed,intent_validation_tests_executed=intent_executed,fixture_lifetime_maintained_tests_executed=fixture_executed,full_native_execution=False,fullflow=False),sort_keys=True))
     except S.Failure as error:
         # Pre-credential compiler text only; same bounded sanitizer as fresh build.
-        print('CI_CLOSE_PREFLIGHT_FAILURE '+json.dumps(dict(stage=error.stage,check=error.check,**S.build_failure_tail(error.output)),sort_keys=True))
+        try:
+            print('CI_CLOSE_PREFLIGHT_FAILURE '+json.dumps(dict(stage=error.stage,check=error.check,**preflight_failure_output(error.output)),sort_keys=True))
+        except BaseException:
+            pass # Best-effort diagnostics never replace the original failure.
         raise
     finally:
         # This exact temporary prefix was created exclusively above; never a source path.

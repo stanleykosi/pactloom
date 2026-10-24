@@ -586,7 +586,7 @@ impl SignerConsentJournal {
             actor_admit_read_detail_result!(AdmitReadIntentAction, action.check_current()).map_err(invalid)?;
             let mut c = self.connection.lock().map_err(|_| JournalError::Database)?;
             actor_admit_read_detail_result!(AdmitReadIntentAction, action.check_current()).map_err(invalid)?;
-            actor_admit_read_detail_result!(AdmitReadIntentJournalIdentity, self.database_identity.check_current(&c))?;
+            actor_admit_read_detail_result!(AdmitReadIntentJournalIdentity, self.database_identity.check_current(&c).map_err(JournalError::from))?;
             let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
             actor_admit_read_detail_result!(AdmitReadIntentAction, action.check_current()).map_err(invalid)?;
             actor_admit_read_detail_result!(AdmitReadIntentJournalSchema, storage::verify_schema(&tx))?;
@@ -595,7 +595,7 @@ impl SignerConsentJournal {
             if !actor_admit_read_detail_result!(AdmitReadIntentFinancialRows, financial_admission_intents::read_all(&tx))?.is_empty() {
                 return Err(JournalError::Conflict);
             }
-            actor_admit_read_detail_result!(AdmitReadIntentJournalIdentity, self.database_identity.check_current(&tx))?;
+            actor_admit_read_detail_result!(AdmitReadIntentJournalIdentity, self.database_identity.check_current(&tx).map_err(JournalError::from))?;
             actor_admit_read_detail_result!(AdmitReadIntentAction, action.check_current()).map_err(invalid)?;
             tx.commit()?;
             account

@@ -1,14 +1,14 @@
 name: Admission intent finite boundary diagnostic preflight only
 on:
   push:
-    branches: [checkpoint/intent-boundary-preflight-p55]
+    branches: [checkpoint/intent-boundary-preflight-p55b]
 permissions: {}
 concurrency:
-  group: intent-boundary-preflight-p55
+  group: intent-boundary-preflight-p55b
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/intent-boundary-preflight-p55' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/intent-boundary-preflight-p55b' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -171,7 +171,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/intent-boundary-preflight-p55' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/intent-boundary-preflight-p55b' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
