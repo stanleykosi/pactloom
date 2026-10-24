@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed P54 test-only investigation and selected maintained synthetic tests; no fullflow or artifact export."""
+"""Fixed P55 finite intent diagnostics and selected maintained synthetic tests; no fullflow or artifact export."""
 import importlib.util,json,os,pathlib,shutil,time
 HERE=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('preflight_supervisor',HERE/'ci-financial-supervisor.py');S=importlib.util.module_from_spec(spec);spec.loader.exec_module(S)
@@ -280,6 +280,11 @@ INTENT_VALIDATION_TESTS=(
     'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::complete_intent_original_rows_reject_valid_envelope_wrong_source_lineage',
     'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::complete_intent_rejects_legacy_generation_rows_without_relabeling',
     'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::complete_intent_encrypted_retained_reader_binds_canonical_row_columns',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::diagnostic_stage_tests::actual_complete_review_and_original_rows_success_leave_no_detail',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::diagnostic_stage_tests::actual_complete_review_nested_and_shape_failures_select_finite_detail',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::diagnostic_stage_tests::actual_complete_review_or_groups_select_ceiling_binding_and_material_detail',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::diagnostic_stage_tests::actual_original_row_failures_select_exact_lineage_stage_and_original_class',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::diagnostic_stage_tests::actual_validator_first_detail_survives_outer_fallback_and_restores_scope',
 )
 def intent_test_executable(raw,target):
     rows=[json.loads(line) for line in raw.splitlines() if line.startswith(b'{')]
@@ -312,13 +317,18 @@ def intent_test_executable(raw,target):
         out=pathlib.Path(row['out_dir']);assert out.is_dir() and not out.is_symlink() and out.resolve().is_relative_to(target.resolve());seen.add(package)
     assert seen==set(packages)
     return executables[0]
+def intent_elapsed_ms(started):
+    # Harness monotonic execution interval only; never a native authority clock.
+    elapsed=time.monotonic()-started
+    assert 0<=elapsed<=360
+    return int(elapsed*1000)
 def run_intent_validation_tests(root,env):
     assert INTENT_VALIDATION_TESTS and len(set(INTENT_VALIDATION_TESTS))==len(INTENT_VALIDATION_TESTS)
     selected=S.select_build_environment(env,'coordinator-observed',S.A.SEMANTIC_PROFILE)
     args=['rustup','run','1.99.0','cargo','test','--locked','--lib','--no-run','--no-default-features','--message-format=json','-p','wholepact-signer','--features','wholepact-signer/coordinated-financial-workflow-v1,wholepact-signer/synthetic-qualification']
     raw=S.checked(args,'compile',env=selected,seconds=900,limit=32*1024*1024)
     executable=intent_test_executable(raw,root/'target-shared')
-    deadline=time.monotonic()+360
+    started=time.monotonic();deadline=started+360
     def fixed(args):
         remaining=deadline-time.monotonic();assert remaining>0
         return S.checked(args,'compile',env=selected,seconds=min(60,remaining),limit=1024*1024).decode('utf-8',errors='strict')
@@ -327,10 +337,11 @@ def run_intent_validation_tests(root,env):
         listing=fixed([str(executable),'--list','--exact',name])
         assert [line for line in listing.splitlines() if line.endswith(': test')]==[name+': test']
     for name in INTENT_VALIDATION_TESTS:
+        test_started=time.monotonic()
         output=fixed([str(executable),'--exact',name,'--test-threads=1'])
         assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in output
-        print('CI_INTENT_VALIDATION_TEST '+json.dumps(dict(name=name,passed=True,ignored=0),sort_keys=True))
-    print('CI_INTENT_VALIDATION_TESTS '+json.dumps(dict(actual_maintained_tests=len(INTENT_VALIDATION_TESTS),passed=True,genuine_pair_or_final_fixture=False,fullflow=False),sort_keys=True))
+        print('CI_INTENT_VALIDATION_TEST '+json.dumps(dict(name=name,passed=True,ignored=0,elapsed_ms=intent_elapsed_ms(test_started)),sort_keys=True))
+    print('CI_INTENT_VALIDATION_TESTS '+json.dumps(dict(actual_maintained_tests=len(INTENT_VALIDATION_TESTS),elapsed_ms=intent_elapsed_ms(started),passed=True,genuine_pair_or_final_fixture=False,fullflow=False),sort_keys=True))
     return len(INTENT_VALIDATION_TESTS)
 def main():
     root=pathlib.Path(os.environ['PREFLIGHT_ROOT']).resolve();assert root.is_dir()

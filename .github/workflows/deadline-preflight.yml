@@ -1,14 +1,14 @@
-name: Complete admission intent validator investigation only
+name: Admission intent finite boundary diagnostic preflight only
 on:
   push:
-    branches: [checkpoint/intent-validator-preflight-p54]
+    branches: [checkpoint/intent-boundary-preflight-p55]
 permissions: {}
 concurrency:
-  group: intent-validator-preflight-p54
+  group: intent-boundary-preflight-p55
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/intent-validator-preflight-p54' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/intent-boundary-preflight-p55' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -45,6 +45,7 @@ jobs:
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B -m unittest discover -s scripts/financial-runtime-reuse -p 'test_*.py'
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B scripts/ci-financial-handoff-source-audit.py --source "$PWD"
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B scripts/ci-financial-admit-read-source-audit.py --source "$PWD"
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B scripts/ci-financial-intent-detail-source-audit.py --source "$PWD"
       - name: Pinned compiler, API fences and focused deadline regressions
         shell: bash
         working-directory: source
@@ -170,7 +171,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/intent-validator-preflight-p54' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/intent-boundary-preflight-p55' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

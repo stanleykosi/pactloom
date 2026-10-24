@@ -134,16 +134,16 @@ impl CoordinatedAdmissionIntentV1 {
         )
     }
     fn validate_review(&self) -> Result<()> {
-        self.disclosure.validate().map_err(invalid)?;
-        let scope = &record(&self.request)?.scope;
-        record(&self.request)?
+        actor_admit_read_detail_result!(AdmitReadIntentReviewNested, self.disclosure.validate().map_err(invalid))?;
+        let scope = &actor_admit_read_detail_result!(AdmitReadIntentReviewNested, record(&self.request))?.scope;
+        actor_admit_read_detail_result!(AdmitReadIntentReviewNested, actor_admit_read_detail_result!(AdmitReadIntentReviewNested, record(&self.request))?
             .validate_request(&self.request, &self.disclosure)
-            .map_err(invalid)?;
+            .map_err(invalid))?;
         let r = &self.recipient_intent;
-        r.validate().map_err(invalid)?;
+        actor_admit_read_detail_result!(AdmitReadIntentReviewNested, r.validate().map_err(invalid))?;
         let fixed: wholepact_authority::durable_payment_v1::DurableFixedCandidateBindingV1 =
-            serde_json::from_slice(&serde_json::to_vec(&r.fixed).map_err(invalid)?)
-                .map_err(invalid)?;
+            actor_admit_read_detail_result!(AdmitReadIntentReviewNested, serde_json::from_slice(&actor_admit_read_detail_result!(AdmitReadIntentReviewNested, serde_json::to_vec(&r.fixed).map_err(invalid))?)
+                .map_err(invalid))?;
         for value in [
             &self.owner_certificate_digest,
             &self.enrollment_ref,
@@ -156,9 +156,9 @@ impl CoordinatedAdmissionIntentV1 {
             &self.read.prepare_read_presentation_digest,
             &self.read.receive_presentation_digest,
         ] {
-            hash(value)?;
+            actor_admit_read_detail_result!(AdmitReadIntentReviewShape, hash(value))?;
         }
-        id(&self.read.principal_id)?;
+        actor_admit_read_detail_result!(AdmitReadIntentReviewShape, id(&self.read.principal_id))?;
         for value in [
             &self.admit_read.presentation_digest,
             &self.admit_read.source_identity_digest,
@@ -167,7 +167,7 @@ impl CoordinatedAdmissionIntentV1 {
             &self.admit_read.owner_service_digest,
             &self.admit_read.authenticated_history_digest,
         ] {
-            hash(value)?;
+            actor_admit_read_detail_result!(AdmitReadIntentReviewShape, hash(value))?;
         }
         let service = self.ceilings.original_owner_service_expires_at_ms;
         if service == 0
@@ -184,13 +184,13 @@ impl CoordinatedAdmissionIntentV1 {
             || self.admit_read.source_identity_digest != self.read.source_identity_digest
             || self.admit_read.owner_selection_digest != self.read.owner_selection_digest
             || self.admit_read.owner_service_digest != self.read.owner_service_digest
-            || self.admit_read.recipient_intent_digest != r.digest().map_err(invalid)?
+            || self.admit_read.recipient_intent_digest != actor_admit_read_detail_result!(AdmitReadIntentReviewCeilings, r.digest().map_err(invalid))?
             || self.admit_read.approved_at_ms < self.read.approved_at_ms
             || self.admit_read.expires_at_ms <= self.admit_read.approved_at_ms
             || self.admit_read.expires_at_ms - self.admit_read.approved_at_ms > 120_000
             || self.admit_read.expires_at_ms > service
         {
-            return Err(JournalError::InvalidBinding);
+            return actor_admit_read_detail_result!(AdmitReadIntentReviewCeilings, Err(JournalError::InvalidBinding));
         }
 
         if self.version != 4
@@ -211,23 +211,23 @@ impl CoordinatedAdmissionIntentV1 {
             || self.read.expires_at_ms <= self.read.approved_at_ms
             || self.read.expires_at_ms - self.read.approved_at_ms > 120_000
         {
-            return Err(JournalError::InvalidBinding);
+            return actor_admit_read_detail_result!(AdmitReadIntentReviewBinding, Err(JournalError::InvalidBinding));
         }
         for material in &r.material_scopes {
-            let from = material
+            let from = actor_admit_read_detail_result!(AdmitReadIntentReviewMaterial, material
                 .valid_from_unix_seconds
                 .checked_mul(1000)
-                .ok_or(JournalError::InvalidBinding)?;
-            let until = material
+                .ok_or(JournalError::InvalidBinding))?;
+            let until = actor_admit_read_detail_result!(AdmitReadIntentReviewMaterial, material
                 .valid_until_unix_seconds
                 .checked_mul(1000)
-                .ok_or(JournalError::InvalidBinding)?;
+                .ok_or(JournalError::InvalidBinding))?;
             if self.read.approved_at_ms < from
                 || self.read.expires_at_ms > until
                 || self.admit_read.approved_at_ms < from
                 || self.admit_read.expires_at_ms > until
             {
-                return Err(JournalError::InvalidBinding);
+                return actor_admit_read_detail_result!(AdmitReadIntentReviewMaterial, Err(JournalError::InvalidBinding));
             }
         }
         Ok(())
@@ -255,8 +255,8 @@ impl CoordinatedAdmissionIntentV1 {
 }
 
 fn validate_original_rows(c: &Connection, intent: &CoordinatedAdmissionIntentV1) -> Result<()> {
-    intent.validate_review()?;
-    super::validate_original_row_links(
+    actor_admit_read_detail_result!(AdmitReadIntentReview, intent.validate_review())?;
+    actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalLinks, super::validate_original_row_links(
         c,
         &intent.request,
         &intent.disclosure,
@@ -265,34 +265,34 @@ fn validate_original_rows(c: &Connection, intent: &CoordinatedAdmissionIntentV1)
         &intent.manifest_ref,
         &intent.recipient_intent.participant_id,
         &intent.read.principal_id,
-    )?;
+    ))?;
     let recipient = &intent.recipient_intent;
-    let original = disclosure_row(c, &recipient.request.own_disclosure)?;
+    let original = actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalDisclosure, disclosure_row(c, &recipient.request.own_disclosure))?;
     if original.redisclosure().is_some() {
-        return Err(JournalError::InvalidBinding);
+        return actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalDisclosure, Err(JournalError::InvalidBinding));
     }
     // Coordinated entry requires a new current-session redisclosure. It cannot
     // inherit the historical row's transport or use legacy generation + 1.
-    let current = disclosure_row(
+    let current = actor_admit_read_detail_result!(AdmitReadIntentRowsCurrentDisclosure, disclosure_row(
         c,
-        recipient
+        actor_admit_read_detail_result!(AdmitReadIntentRowsCurrentDisclosure, recipient
             .request
             .current_disclosure
             .as_ref()
-            .ok_or(JournalError::InvalidBinding)?,
-    )?;
-    current
+            .ok_or(JournalError::InvalidBinding))?,
+    ))?;
+    actor_admit_read_detail_result!(AdmitReadIntentRowsCurrentDisclosure, current
         .validate_redisclosure_of(&original)
-        .map_err(invalid)?;
+        .map_err(invalid))?;
     let enrollment =
-        storage::read_enrollment(c, &intent.enrollment_ref)?.ok_or(JournalError::NotFound)?;
+        actor_admit_read_detail_result!(AdmitReadIntentRowsSession, storage::read_enrollment(c, &intent.enrollment_ref))?.ok_or(JournalError::NotFound)?;
     // These comparisons validate only retained provenance. Live preparation
     // and publication additionally need the actual same-session nonce map.
     if current.recipient_transport() != enrollment.transport()
         || enrollment.receipt().trusted_launch_measurement() != intent.read.measurement
         || enrollment.receipt().permission_generation != 1
     {
-        return Err(JournalError::InvalidBinding);
+        return actor_admit_read_detail_result!(AdmitReadIntentRowsSession, Err(JournalError::InvalidBinding));
     }
     let TransportIdentityBinding::LocalProcess {
         process_instance,
@@ -304,7 +304,7 @@ fn validate_original_rows(c: &Connection, intent: &CoordinatedAdmissionIntentV1)
         ..
     } = current.recipient_transport()
     else {
-        return Err(JournalError::InvalidBinding);
+        return actor_admit_read_detail_result!(AdmitReadIntentRowsTransport, Err(JournalError::InvalidBinding));
     };
     if process_instance != &recipient.authorized_host_process_instance
         || *signer_generation != recipient.source_generation
@@ -313,29 +313,29 @@ fn validate_original_rows(c: &Connection, intent: &CoordinatedAdmissionIntentV1)
         || participant_id != &recipient.participant_id
         || manifest_digest != &recipient.manifest_digest
     {
-        return Err(JournalError::InvalidBinding);
+        return actor_admit_read_detail_result!(AdmitReadIntentRowsTransport, Err(JournalError::InvalidBinding));
     }
     let scope = &original.request().scope;
-    let material = recipient
+    let material = actor_admit_read_detail_result!(AdmitReadIntentRowsMaterial, recipient
         .material_scopes
         .iter()
         .find(|m| m.account_id == recipient.account_id)
-        .ok_or(JournalError::InvalidBinding)?;
+        .ok_or(JournalError::InvalidBinding))?;
     if current.request().enrollment_ref != intent.enrollment_ref
         || current.request().accepted_manifest_ref != intent.manifest_ref
         || scope.account_id != recipient.account_id
         || scope.participant_id != recipient.participant_id
         || original.request().material.fvk_digest()
-            != record(&intent.request)?
+            != actor_admit_read_detail_result!(AdmitReadIntentRowsMaterial, record(&intent.request))?
                 .scope
                 .authorization
                 .identity
                 .full_viewing_key_digest
-        || scope.digest().map_err(invalid)? != material.original_scope_digest
+        || actor_admit_read_detail_result!(AdmitReadIntentRowsMaterial, scope.digest().map_err(invalid))? != material.original_scope_digest
         || scope.valid_from_unix_seconds != material.valid_from_unix_seconds
         || scope.valid_until_unix_seconds != material.valid_until_unix_seconds
     {
-        return Err(JournalError::InvalidBinding);
+        return actor_admit_read_detail_result!(AdmitReadIntentRowsMaterial, Err(JournalError::InvalidBinding));
     }
     Ok(())
 }
@@ -519,15 +519,15 @@ impl SignerConsentJournal {
         recipient: &CoordinatedRecipientIntentV1,
         history: &wholepact_authority::ReconciledAuthorityHistory,
     ) -> Result<PreparedCoordinatedAdmissionIntentV1> {
-        source
-            .require_admission_journal(self, action)
+        actor_admit_read_detail_result!(AdmitReadIntentSourceJournal, source
+            .require_admission_journal(self, action))
             .map_err(invalid)?;
-        let scope = source
-            .admission_scope(action, economics, recipient, history)
+        let scope = actor_admit_read_detail_result!(AdmitReadIntentScope, source
+            .admission_scope(action, economics, recipient, history))
             .map_err(invalid)?;
-        let request = wholepact_authority::durable_delivery_admission_v2::prepare_durable_delivery_admission_request_v2(scope, history).map_err(invalid)?;
-        let read = source
-            .admission_read_presentation(action)
+        let request = actor_admit_read_detail_result!(AdmitReadIntentAuthorityRequest, wholepact_authority::durable_delivery_admission_v2::prepare_durable_delivery_admission_request_v2(scope, history)).map_err(invalid)?;
+        let read = actor_admit_read_detail_result!(AdmitReadIntentReadPresentation, source
+            .admission_read_presentation(action))
             .map_err(invalid)?;
         let facts = action.facts();
         let intent = CoordinatedAdmissionIntentV1 {
@@ -556,7 +556,7 @@ impl SignerConsentJournal {
                 recipient_intent_digest: facts.received.recipient_intent_digest.clone(),
                 owner_selection_digest: facts.owner_selection_digest.clone(),
                 owner_service_digest: facts.received.owner_service_digest.clone(),
-                authenticated_history_digest: history.history_digest().map_err(invalid)?,
+                authenticated_history_digest: actor_admit_read_detail_result!(AdmitReadIntentHistoryDigest, history.history_digest()).map_err(invalid)?,
                 approved_at_ms: facts.reviewed_at_ms,
                 expires_at_ms: facts.expires_at_ms,
             },
@@ -577,33 +577,33 @@ impl SignerConsentJournal {
                 expires_at_ms: 0,
             },
         };
-        intent.validate_review()?;
+        actor_admit_read_detail_result!(AdmitReadIntentReview, intent.validate_review())?;
         let account = {
             let _fence = self
                 .authority_fence
                 .read()
                 .map_err(|_| JournalError::Permission)?;
-            action.check_current().map_err(invalid)?;
+            actor_admit_read_detail_result!(AdmitReadIntentAction, action.check_current()).map_err(invalid)?;
             let mut c = self.connection.lock().map_err(|_| JournalError::Database)?;
-            action.check_current().map_err(invalid)?;
-            self.database_identity.check_current(&c)?;
+            actor_admit_read_detail_result!(AdmitReadIntentAction, action.check_current()).map_err(invalid)?;
+            actor_admit_read_detail_result!(AdmitReadIntentJournalIdentity, self.database_identity.check_current(&c))?;
             let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
-            action.check_current().map_err(invalid)?;
-            storage::verify_schema(&tx)?;
-            let account = storage::read_account(&tx)?;
-            coordinated_current_rows(&tx, &intent)?;
-            if !financial_admission_intents::read_all(&tx)?.is_empty() {
+            actor_admit_read_detail_result!(AdmitReadIntentAction, action.check_current()).map_err(invalid)?;
+            actor_admit_read_detail_result!(AdmitReadIntentJournalSchema, storage::verify_schema(&tx))?;
+            let account = actor_admit_read_detail_result!(AdmitReadIntentJournalAccount, storage::read_account(&tx))?;
+            actor_admit_read_detail_result!(AdmitReadIntentCurrentRows, coordinated_current_rows(&tx, &intent))?;
+            if !actor_admit_read_detail_result!(AdmitReadIntentFinancialRows, financial_admission_intents::read_all(&tx))?.is_empty() {
                 return Err(JournalError::Conflict);
             }
-            self.database_identity.check_current(&tx)?;
-            action.check_current().map_err(invalid)?;
+            actor_admit_read_detail_result!(AdmitReadIntentJournalIdentity, self.database_identity.check_current(&tx))?;
+            actor_admit_read_detail_result!(AdmitReadIntentAction, action.check_current()).map_err(invalid)?;
             tx.commit()?;
             account
         };
-        source
-            .require_admission_journal(self, action)
+        actor_admit_read_detail_result!(AdmitReadIntentSourceJournal, source
+            .require_admission_journal(self, action))
             .map_err(invalid)?;
-        let review_digest = intent.review_digest()?;
+        let review_digest = actor_admit_read_detail_result!(AdmitReadIntentReviewDigest, intent.review_digest())?;
         Ok(PreparedCoordinatedAdmissionIntentV1 {
             journal: self.binding(),
             account,
@@ -615,9 +615,9 @@ impl SignerConsentJournal {
 }
 
 fn coordinated_current_rows(c: &Connection, intent: &CoordinatedAdmissionIntentV1) -> Result<()> {
-    validate_original_rows(c, intent)?;
-    let account = storage::read_account(c)?;
-    let original = account_use_storage::inspect(c, &account.account_id)?;
+    actor_admit_read_detail_result!(AdmitReadIntentOriginalRows, validate_original_rows(c, intent))?;
+    let account = actor_admit_read_detail_result!(AdmitReadIntentRowsAccountUse, storage::read_account(c))?;
+    let original = actor_admit_read_detail_result!(AdmitReadIntentRowsAccountUse, account_use_storage::inspect(c, &account.account_id))?;
     if account.recovery_required {
         return Err(JournalError::RecoveryRequired);
     }
@@ -627,8 +627,8 @@ fn coordinated_current_rows(c: &Connection, intent: &CoordinatedAdmissionIntentV
     {
         return Err(JournalError::Permission);
     }
-    let scope = &record(&intent.request)?.scope;
-    let now = now_ms()?;
+    let scope = &actor_admit_read_detail_result!(AdmitReadIntentRowsAccountUse, record(&intent.request))?.scope;
+    let now = actor_admit_read_detail_result!(AdmitReadIntentRowsAccountUse, now_ms())?;
     if now < scope.authorization.valid_from_ms
         || now >= scope.authorization.valid_until_ms
         || now < scope.delivery.valid_from_ms

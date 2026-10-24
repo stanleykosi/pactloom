@@ -159,26 +159,26 @@ fn validate_original_row_links(
     participant_id: &str,
     principal_id: &str,
 ) -> Result<()> {
-    let terms = &record(request)?.scope.authorization;
-    let account = storage::read_account(c)?;
-    let stored = account_use_storage::inspect(c, &account.account_id)?;
-    let genesis = stored.genesis().ok_or(JournalError::InvalidBinding)?;
-    let enrollment = storage::read_enrollment(c, enrollment_ref)?.ok_or(JournalError::NotFound)?;
-    let manifest = storage::read_manifest(c, manifest_ref)?.ok_or(JournalError::NotFound)?;
-    let proposal = manifest.proposal()?;
-    if record(request)?.scope.accepted_manifest_ref != manifest_ref
-        || record(request)?.scope.original_writer_epoch != request.writer_epoch
-        || &record(request)?.scope.witness != disclosure
+    let terms = &actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalLinks, record(request))?.scope.authorization;
+    let account = actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalLinks, storage::read_account(c))?;
+    let stored = actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalLinks, account_use_storage::inspect(c, &account.account_id))?;
+    let genesis = actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalLinks, stored.genesis().ok_or(JournalError::InvalidBinding))?;
+    let enrollment = actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalLinks, storage::read_enrollment(c, enrollment_ref))?.ok_or(JournalError::NotFound)?;
+    let manifest = actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalLinks, storage::read_manifest(c, manifest_ref))?.ok_or(JournalError::NotFound)?;
+    let proposal = actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalLinks, manifest.proposal())?;
+    if actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalLinks, record(request))?.scope.accepted_manifest_ref != manifest_ref
+        || actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalLinks, record(request))?.scope.original_writer_epoch != request.writer_epoch
+        || &actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalLinks, record(request))?.scope.witness != disclosure
         || account.account_id != request.account_id
         || request.writer_epoch > account.writer_epoch
         || genesis.identity.account_id != terms.identity.account_id
         || genesis.identity.full_viewing_key_digest != terms.identity.full_viewing_key_digest
         || genesis.identity.network_profile_id != terms.identity.network_profile_id
         || genesis.identity.derivation_domain != terms.identity.derivation_domain
-        || genesis.digest().map_err(invalid)? != terms.original_genesis_digest
+        || actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalLinks, genesis.digest().map_err(invalid))? != terms.original_genesis_digest
         || genesis.owner_certificate_digest != owner_certificate_digest
         || genesis.witness_id != disclosure.witness_id
-        || genesis.witness_origin_digest != account_use_witness_origin_digest(disclosure).map_err(invalid)?
+        || genesis.witness_origin_digest != actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalLinks, account_use_witness_origin_digest(disclosure).map_err(invalid))?
         || enrollment.account_id() != request.account_id
         || enrollment.account_fvk_digest() != terms.identity.full_viewing_key_digest
         || enrollment.terms.network_profile_id != request.network_profile_id
@@ -193,8 +193,8 @@ fn validate_original_row_links(
         || proposal.proposal_digest() != terms.fixed.proposal_digest
         || proposal.manifest_digest() != terms.fixed.manifest_digest
         || !storage::same_native_origin(enrollment.receipt(), manifest.receipt())
-    { return Err(JournalError::InvalidBinding); }
-    enrollment.transport().validate_scope(enrollment.account_id(), enrollment.agreement_id(), enrollment.participant_id(), Some(proposal.manifest_digest()))?;
+    { return actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalLinks, Err(JournalError::InvalidBinding)); }
+    actor_admit_read_detail_result!(AdmitReadIntentRowsOriginalLinks, enrollment.transport().validate_scope(enrollment.account_id(), enrollment.agreement_id(), enrollment.participant_id(), Some(proposal.manifest_digest())))?;
     Ok(())
 }
 

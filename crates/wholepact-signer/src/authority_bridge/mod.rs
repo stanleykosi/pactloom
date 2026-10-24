@@ -700,21 +700,21 @@ pub(crate) fn validate_prepared_delivery_policy_v3(
     outputs: &[wholepact_protocol::construction::OutputActionMapping],
 ) -> Result<String> {
     let binding =
-        crate::consent_journal::DurableBornPolicyBindingV1::from_original_stable_source_v2(
+        actor_admit_read_detail_result!(AdmitReadScopePolicyBinding, crate::consent_journal::DurableBornPolicyBindingV1::from_original_stable_source_v2(
             record,
             enrollment,
             manifest,
             fixed.identity(),
             original,
-        )?;
-    durable_delivery_stable_returns_v2::verify_stable_returns_v2(
+        ))?;
+    actor_admit_read_detail_result!(AdmitReadScopePolicyReturns, durable_delivery_stable_returns_v2::verify_stable_returns_v2(
         fixed,
         inputs,
         outputs,
-        &account.fvk().map_err(|_| BridgeError::Binding)?,
-        &account.account_id().map_err(|_| BridgeError::Binding)?,
-        &binding.stable_return_requirements_v2(manifest)?,
-    )?;
+        &actor_admit_read_detail_result!(AdmitReadScopePolicyReturns, account.fvk().map_err(|_| BridgeError::Binding))?,
+        &actor_admit_read_detail_result!(AdmitReadScopePolicyReturns, account.account_id().map_err(|_| BridgeError::Binding))?,
+        &actor_admit_read_detail_result!(AdmitReadScopePolicyReturns, binding.stable_return_requirements_v2(manifest))?,
+    ))?;
     // The export is validated original history. Its private preimage never
     // leaves this signer; only its committed policy digest goes to the witness.
     #[derive(serde::Deserialize)]
@@ -725,18 +725,18 @@ pub(crate) fn validate_prepared_delivery_policy_v3(
         original_birth_commit: wholepact_authority::pending_birth::PendingBirthCommitRecord,
     }
     let exact: OriginalPolicy =
-        serde_json::from_value(serde_json::to_value(&original).map_err(|_| BridgeError::Binding)?)
-            .map_err(|_| BridgeError::Binding)?;
+        actor_admit_read_detail_result!(AdmitReadScopePolicyExport, serde_json::from_value(actor_admit_read_detail_result!(AdmitReadScopePolicyExport, serde_json::to_value(&original).map_err(|_| BridgeError::Binding))?)
+            .map_err(|_| BridgeError::Binding))?;
     if exact.version != 2
         || exact.original_birth_commit.request.native_birth_digest != exact.anchor.birth_digest
     {
-        return Err(BridgeError::Binding);
+        return actor_admit_read_detail_result!(AdmitReadScopePolicyExport, Err(BridgeError::Binding));
     }
-    exact
+    actor_admit_read_detail_result!(AdmitReadScopePolicyExport, exact
         .anchor
         .recipient_policy
         .digest()
-        .map_err(|_| BridgeError::Binding)
+        .map_err(|_| BridgeError::Binding))
 }
 
 #[cfg(all(feature = "durable-proposal", target_os = "linux"))]

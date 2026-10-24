@@ -119,34 +119,34 @@ impl CoordinatedPreparedDeliverySourceV1 {
     ) -> Result<wholepact_authority::durable_delivery_scope_v2::DurableDeliveryScopeV2> {
         use crate::native_ui::durable_proposal_v1::admission_scope_data_v1 as data;
         self.check_admit_read_source(action)?;
-        if intent.digest().map_err(|_| Error::ReviewMismatch)?
+        if actor_admit_read_detail_result!(AdmitReadScopeRecipient, intent.digest().map_err(|_| Error::ReviewMismatch))?
             != action.facts().received.recipient_intent_digest
             || economics.verified().identity() != &intent.fixed
         {
-            return Err(Error::ReviewMismatch);
+            return actor_admit_read_detail_result!(AdmitReadScopeRecipient, Err(Error::ReviewMismatch));
         }
         let ready = &self.custody.staged.source.ready;
         let source = &ready.pairing.source;
-        let lease = ready.session.acquire_construction_records(
+        let lease = actor_admit_read_detail_result!(AdmitReadScopeAcquire, ready.session.acquire_construction_records(
             &source.journal,
             ready.enrollment.reference(),
             ready.manifest.reference(),
             &ready.accepted,
-            CoordinatedConstructionActionV1::AdmitRead(action, self.purpose_binding(action)?),
-        )?;
-        action.check_current()?;
+            CoordinatedConstructionActionV1::AdmitRead(action, actor_admit_read_detail_result!(AdmitReadScopeAcquire, self.purpose_binding(action))?),
+        ))?;
+        actor_admit_read_detail_result!(AdmitReadScopePermission, action.check_current())?;
         let record = &source.retained.record;
-        let extension = record.extension()?;
+        let extension = actor_admit_read_detail_result!(AdmitReadScopeOriginal, record.extension())?;
         let account = source.retained.account.account();
-        let account_id = account.account_id()?;
-        let original = original(&source.retained.account)?;
-        original.validate_at_rest(account)?;
-        action.check_current()?;
-        let policy = crate::account::birth::recipient_policy_v2::OriginalRecipientPolicyExportV2::from_retained(original)?;
-        policy.validate()?;
-        action.check_current()?;
+        let account_id = actor_admit_read_detail_result!(AdmitReadScopeOriginal, account.account_id())?;
+        let original = actor_admit_read_detail_result!(AdmitReadScopeOriginal, original(&source.retained.account))?;
+        actor_admit_read_detail_result!(AdmitReadScopeOriginal, original.validate_at_rest(account))?;
+        actor_admit_read_detail_result!(AdmitReadScopePermission, action.check_current())?;
+        let policy = actor_admit_read_detail_result!(AdmitReadScopeOriginal, crate::account::birth::recipient_policy_v2::OriginalRecipientPolicyExportV2::from_retained(original))?;
+        actor_admit_read_detail_result!(AdmitReadScopeOriginal, policy.validate())?;
+        actor_admit_read_detail_result!(AdmitReadScopePermission, action.check_current())?;
         let recipient_policy_digest =
-            crate::authority_bridge::validate_prepared_delivery_policy_v3(
+            actor_admit_read_detail_result!(AdmitReadScopePolicy, crate::authority_bridge::validate_prepared_delivery_policy_v3(
                 record,
                 &policy,
                 account,
@@ -155,33 +155,33 @@ impl CoordinatedPreparedDeliverySourceV1 {
                 economics.verified(),
                 economics.input_actions(),
                 economics.output_actions(),
-            )
+            ))
             .map_err(|_| Error::ReviewMismatch)?;
-        let (fixed, inputs) = data::fixed_inputs(economics, &account_id)?;
-        let terms = data::terms(
+        let (fixed, inputs) = actor_admit_read_detail_result!(AdmitReadScopeFixedInputs, data::fixed_inputs(economics, &account_id))?;
+        let terms = actor_admit_read_detail_result!(AdmitReadScopeTerms, data::terms(
             &extension,
             economics,
             &account_id,
-            record
+            actor_admit_read_detail_result!(AdmitReadScopeTerms, record
                 .account_record
                 .genesis
                 .digest()
-                .map_err(|_| Error::ReviewMismatch)?,
+                .map_err(|_| Error::ReviewMismatch))?,
             recipient_policy_digest,
             &fixed,
             &inputs,
             &intent.delivery,
-        )?;
+        ))?;
         if history.disclosure() != &source.witness
-            || history
+            || actor_admit_read_detail_result!(AdmitReadScopeHistory, history
                 .account_policy()
                 .policy_digest()
-                .map_err(|_| Error::ReviewMismatch)?
+                .map_err(|_| Error::ReviewMismatch))?
                 != record.account_record.terms.original_policy_digest
         {
-            return Err(Error::Authentication);
+            return actor_admit_read_detail_result!(AdmitReadScopeHistory, Err(Error::Authentication));
         }
-        let scope = data::scope(
+        let scope = actor_admit_read_detail_result!(AdmitReadScopeClaims, data::scope(
             terms,
             &extension,
             history,
@@ -192,9 +192,9 @@ impl CoordinatedPreparedDeliverySourceV1 {
             &source.witness,
             &intent.delivery,
             &intent.material_scopes,
-        )?;
-        lease.require_admit_read(action)?;
-        action.check_current()?;
+        ))?;
+        actor_admit_read_detail_result!(AdmitReadScopePermission, lease.require_admit_read(action))?;
+        actor_admit_read_detail_result!(AdmitReadScopePermission, action.check_current())?;
         drop(lease);
         self.check_admit_read_source(action)?;
         Ok(scope)

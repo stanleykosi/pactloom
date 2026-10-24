@@ -208,8 +208,19 @@ class IntentValidationExecutionPreflightTests(unittest.TestCase):
  def test_intent_feature_union_is_exact_and_does_not_replace_old_target(self):
   self.assertEqual(set(C.INTENT_FEATURES),set(C.SIGNER_FEATURES)|{'synthetic-qualification'})
   self.assertEqual(len(C.HANDOFF_SECURITY_TESTS),50)
-  self.assertEqual(len(C.INTENT_VALIDATION_TESTS),8)
+  self.assertEqual(len(C.INTENT_VALIDATION_TESTS),13)
   self.assertTrue(set(C.INTENT_VALIDATION_TESTS).isdisjoint(C.HANDOFF_SECURITY_TESTS))
   rows=copy.deepcopy(self.rows);rows[-1]['features']=list(C.SIGNER_FEATURES)
   with self.assertRaises(AssertionError):self.check(rows)
   with self.assertRaises(AssertionError):C.signer_test_executable(b'\n'.join(json.dumps(x).encode() for x in self.rows),self.target)
+
+class IntentTimingEvidenceTests(unittest.TestCase):
+ def test_harness_interval_is_bounded_integer_not_runtime_time(self):
+  from unittest import mock
+  for now,expected in [(100,0),(101.5,1500),(460,360000)]:
+   with mock.patch.object(C.time,'monotonic',return_value=now):
+    self.assertEqual(C.intent_elapsed_ms(100),expected)
+    self.assertIs(type(C.intent_elapsed_ms(100)),int)
+  for now in (99,460.001,float('nan'),float('inf')):
+   with mock.patch.object(C.time,'monotonic',return_value=now):
+    with self.assertRaises(AssertionError):C.intent_elapsed_ms(100)

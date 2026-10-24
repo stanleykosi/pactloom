@@ -236,3 +236,9 @@ mod admit_read_observation_tests {
         assert_eq!(wholepact_authority::AuthorityError::SessionPending.finite_class(), Class::AuthoritySessionPending);
     }
 }
+
+// Test-only finite observation; cannot set metadata or mint native authority.
+#[cfg(test)]
+pub(crate) fn admit_read_detail_for_test() -> Option<(DriverStage, Class)> {
+    ADMIT_READ_DETAIL.with(|slot| slot.get().flatten())
+}

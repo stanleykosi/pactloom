@@ -415,3 +415,7 @@ fn complete_intent_encrypted_retained_reader_binds_canonical_row_columns() {
     let before = c.total_changes(); assert!(read(&c, authorization).is_err());
     assert!(before == c.total_changes());
 }
+
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+#[path = "full_intent_validation_tests/diagnostic_stage_tests.rs"]
+mod diagnostic_stage_tests;
