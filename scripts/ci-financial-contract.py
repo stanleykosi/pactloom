@@ -597,13 +597,16 @@ def validate_input_diagnostic(value):
     return value
 
 
+# Closed native single-review source order. No paired or subflow routes.
+REVIEW_ROUTES={'V3PairReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3Pair'), 'V3EnrollmentReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3Enrollment'), 'V3ManifestReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3Manifest'), 'V3RedisclosureReadReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3RedisclosureRead'), 'V3RediscloseReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3Redisclose'), 'V3PrepareReadReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3PrepareRead'), 'V3ReceiveReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3Receive'), 'V3AdmitReadReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3AdmitRead'), 'V3AdmitReview': ('ReviewBody', 'ReviewAcknowledgement', 'ArmV3Admit'), 'V3AdmitReady': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3Admit'), 'V3AuditReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3Audit'), 'HistorySetupReview': ('ReviewBody', 'ReviewAcknowledgement', 'SetupHistory'), 'HistoryReview': ('ReviewBody', 'ReviewAcknowledgement', 'ServeHistory'), 'SetupReview': ('ReviewBody', 'ReviewAcknowledgement', 'Setup'), 'ActivateReadReview': ('ReviewBody', 'ReviewAcknowledgement', 'ActivateRead'), 'ActivateReview': ('ReviewBody', 'ReviewAcknowledgement', 'ActivateArm'), 'ActivateReady': ('ReviewBody', 'ReviewAcknowledgement', 'ActivateFinal'), 'WalletPrepareReview': ('ReviewBody', 'ReviewAcknowledgement', 'WalletPrepare'), 'WalletObserveReview': ('ReviewBody', 'ReviewAcknowledgement', 'WalletObserve'), 'SignReadReview': ('ReviewBody', 'ReviewAcknowledgement', 'SignRead'), 'SignExactReview': ('ReviewBody', 'ReviewAcknowledgement', 'SignExact'), 'ReturnReadReview': ('ReviewBody', 'ReviewAcknowledgement', 'ReturnRead'), 'ReturnExactReview': ('ReviewBody', 'ReviewAcknowledgement', 'ReturnExact'), 'NormalFinishReview': ('ReviewBody', 'ReviewAcknowledgement', 'NormalFinish'), 'V3Review': ('ReviewBody', None, 'ConfirmV3'), 'EntryReview': ('ReviewBody', None, 'EntryConfirm'), 'ReadReview': ('ReviewBody', None, 'ReadConfirm'), 'ContinueReview': ('ReviewBody', None, 'ContinueConfirm'), 'V3Confirm': ('ReviewBody', 'ReviewAcknowledgement', 'PasswordV3'), 'EntryConfirm': ('ReviewBody', 'ReviewAcknowledgement', 'EnterPassword'), 'ReadConfirm': ('ReviewBody', 'ReviewAcknowledgement', 'Read'), 'ContinueConfirm': ('ReviewBody', 'ReviewAcknowledgement', 'ArmContinue')}
+
 # Failure-only last validated controller review observation, never native authority.
 def validate_review_diagnostic(value):
     exact(value,('version','semantics','phase','subphase','owner','generation','widgets','seek_counts',
                  'scroll_counts','attempted','owed_wheel','last_seek','operation','boundary','operation_generation','anchor','point_inside'))
-    require(type(value['version']) is int and value['version']==1)
-    require(value['semantics']=='LastValidatedReview' and value['phase']=='V3AdmitReview' and value['subphase']=='None')
-    require(value['owner'] in ('Signer1','Signer2') and integer(value['generation'],1))
+    require(type(value['version']) is int and value['version']==2)
+    require(value['semantics']=='LastValidatedReview' and type(value['phase']) is str and value['phase'] in REVIEW_ROUTES and value['subphase']=='None')
+    require((value['owner'] in ('Signer1','Signer2') or (value['owner'] is None and value['phase']=='NormalFinishReview')) and integer(value['generation'],1))
     ws=value['widgets'];require(type(ws) is list and len(ws)==3)
     for pair in ws:
         require(type(pair) is list and len(pair)==2 and all(type(v) is bool for v in pair) and (pair[0] or not pair[1]))
@@ -611,13 +614,16 @@ def validate_review_diagnostic(value):
         a=value[key];require(type(a) is list and len(a)==3 and all(integer(v,0,limit) for v in a))
     require(type(value['attempted']) is list and len(value['attempted'])==2 and all(type(v) is bool for v in value['attempted']))
     require(type(value['owed_wheel']) is bool)
-    require(value['last_seek'] in ('None','Body','Ack','Arm'))
-    require(value['operation'] in ('None','AckPress','ArmPress','OtherPress','BodyDown','OuterUp','OuterDown','OtherScroll'))
-    require(value['boundary'] in ('None','Requested','Returned') and value['anchor'] in ('None','Body','Outer','Ack','Arm'))
+    if REVIEW_ROUTES[value['phase']][1] is None:
+        require(value['widgets'][1]==[False,False] and value['seek_counts'][1]==0 and not value['attempted'][0])
+        require(value['last_seek']!='Ack' and value['operation']!='AckPress')
+    require(value['last_seek'] in ('None','Body','Ack','Action'))
+    require(value['operation'] in ('None','AckPress','ActionPress','OtherPress','BodyDown','OuterUp','OuterDown','OtherScroll'))
+    require(value['boundary'] in ('None','Requested','Returned') and value['anchor'] in ('None','Body','Outer','Ack','Action'))
     require(value['point_inside'] is None or type(value['point_inside']) is bool)
     require((value['operation']=='None')==(value['boundary']=='None'))
     require(value['operation_generation'] is None if value['operation']=='None' else integer(value['operation_generation'],1,value['generation']))
-    expected_anchor={'None':'None','AckPress':'Ack','ArmPress':'Arm','OtherPress':'None','BodyDown':'Body','OuterUp':'Outer','OuterDown':'Outer','OtherScroll':'None'}
+    expected_anchor={'None':'None','AckPress':'Ack','ActionPress':'Action','OtherPress':'None','BodyDown':'Body','OuterUp':'Outer','OuterDown':'Outer','OtherScroll':'None'}
     require(value['anchor']==expected_anchor[value['operation']])
     require(value['point_inside'] is None if value['anchor']=='None' else type(value['point_inside']) is bool)
     require(len(json.dumps(value,separators=(',',':')).encode())<=2048)

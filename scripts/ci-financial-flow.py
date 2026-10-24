@@ -102,29 +102,30 @@ class FullFlow:
         # Best-effort projection only. No reads, clocks, input, or control checks.
         # The last validated review frame is retained across terminal/reset frames.
         try:
-            if (s['phase'],s['subphase'])!=('V3AdmitReview','None') or s['owner'] not in ('Signer1','Signer2'):return
-            owner=s['owner'];tags=('ReviewBody','ReviewAcknowledgement','ArmV3Admit')
+            if s['subphase']!='None' or s['phase'] not in C.REVIEW_ROUTES:return
+            phase=s['phase'];owner=s['owner'];tags=C.REVIEW_ROUTES[phase]
+            if owner not in ('Signer1','Signer2') and not(owner is None and phase=='NormalFinishReview'):return
             old=self._review_observed
-            same=old is not None and old['owner']==owner
-            value=dict(version=1,semantics='LastValidatedReview',phase='V3AdmitReview',subphase='None',
+            same=old is not None and old['owner']==owner and old['phase']==phase
+            value=dict(version=2,semantics='LastValidatedReview',phase=phase,subphase='None',
                 owner=owner,generation=s['view_generation'],widgets=[],
-                seek_counts=[self.scrolls.get(('V3AdmitReview','None','seek',t,owner),0) for t in tags],
-                scroll_counts=[self.scrolls.get(('V3AdmitReview','None',t,o,d),0) for t,o,d in
+                seek_counts=[0 if t is None else self.scrolls.get((phase,'None','seek',t,owner),0) for t in tags],
+                scroll_counts=[self.scrolls.get((phase,'None',t,o,d),0) for t,o,d in
                     (('ScrollRegion',None,'up'),('ScrollRegion',None,'down'),('ReviewBody',owner,'down'))],
-                attempted=[self.used(s,t,owner) for t in tags[1:]],
-                owed_wheel=('V3AdmitReview','None','review-scroll-pending','ArmV3Admit',owner,'ReviewBody') in self.scrolls,
+                attempted=[False if t is None else self.used(s,t,owner) for t in tags[1:]],
+                owed_wheel=(phase,'None','review-scroll-pending',tags[2],owner,'ReviewBody') in self.scrolls,
                 last_seek=old['last_seek'] if same else 'None',
                 operation=old['operation'] if same else 'None',boundary=old['boundary'] if same else 'None',
                 operation_generation=old['operation_generation'] if same else None,
                 anchor=old['anchor'] if same else 'None',point_inside=old['point_inside'] if same else None)
             for tag in tags:
                 w=self.find(s,tag,owner);value['widgets'].append([w is not None,False if w is None else w['enabled']])
-            if seek is not None:value['last_seek']={'ReviewBody':'Body','ReviewAcknowledgement':'Ack','ArmV3Admit':'Arm'}.get(seek,'None')
+            if seek is not None:value['last_seek']={tags[0]:'Body',tags[1]:'Ack',tags[2]:'Action'}.get(seek,'None')
             # Operation geometry belongs to this pre-effect observation, not a
             # later cached widget frame. Returned means call+wait returned only.
             if operation is not None:value.update(operation=operation,boundary=boundary,anchor=anchor,point_inside=None,operation_generation=s['view_generation'])
-            if point is not None and anchor in ('Body','Outer','Ack','Arm'):
-                tag,who={'Body':('ReviewBody',owner),'Outer':('ScrollRegion',None),'Ack':('ReviewAcknowledgement',owner),'Arm':('ArmV3Admit',owner)}[anchor]
+            if point is not None and anchor in ('Body','Outer','Ack','Action'):
+                tag,who={'Body':('ReviewBody',owner),'Outer':('ScrollRegion',None),'Ack':('ReviewAcknowledgement',owner),'Action':(tags[2],owner)}[anchor]
                 w=self.find(s,tag,who)
                 if w is not None:
                     x0,y0,x1,y1=w['rect'];scale=s['pixels_per_point'];x,y=point
@@ -199,9 +200,9 @@ class FullFlow:
         self.note_review_observation(latest)
         C.input_budget(self.actions<=512,'actions',self.actions)
         point=self.native.point(latest,tag,owner)
-        self.note_review_observation(latest,operation='AckPress' if tag=='ReviewAcknowledgement' else 'ArmPress' if tag=='ArmV3Admit' else 'OtherPress',boundary='Requested',anchor='Ack' if tag=='ReviewAcknowledgement' else 'Arm' if tag=='ArmV3Admit' else 'None',point=point)
+        self.note_review_observation(latest,operation='AckPress' if tag=='ReviewAcknowledgement' else 'ActionPress' if tag==C.REVIEW_ROUTES.get(s['phase'],(None,None,None))[2] else 'OtherPress',boundary='Requested',anchor='Ack' if tag=='ReviewAcknowledgement' else 'Action' if tag==C.REVIEW_ROUTES.get(s['phase'],(None,None,None))[2] else 'None',point=point)
         self.controller.click(*point);self.controller.wait_render_progress()
-        self.note_review_observation(latest,operation='AckPress' if tag=='ReviewAcknowledgement' else 'ArmPress' if tag=='ArmV3Admit' else 'OtherPress',boundary='Returned',anchor='Ack' if tag=='ReviewAcknowledgement' else 'Arm' if tag=='ArmV3Admit' else 'None',point=point)
+        self.note_review_observation(latest,operation='AckPress' if tag=='ReviewAcknowledgement' else 'ActionPress' if tag==C.REVIEW_ROUTES.get(s['phase'],(None,None,None))[2] else 'OtherPress',boundary='Returned',anchor='Ack' if tag=='ReviewAcknowledgement' else 'Action' if tag==C.REVIEW_ROUTES.get(s['phase'],(None,None,None))[2] else 'None',point=point)
     def selection_handoff_pending(self,s):
         if self.pending_selection is None:return False
         key=(s['phase'],s['subphase'],s['owner'])
@@ -236,7 +237,15 @@ class FullFlow:
         action(*point);self.controller.wait_render_progress()
         self.note_review_observation(s,operation=operation,boundary='Returned',anchor=anchor,point=point)
         return True
+    def review_seek(self,s,tag,owner,action,ack,body):
+        order=C.REVIEW_ROUTES.get(s['phase'])
+        if s['subphase']=='None' and order==(body,ack,action):
+            return self._seek(s,tag,owner,tuple(t for t in order if t is not None))
+        return self.seek(s,tag,owner) # Paired/subflow/nonreview policy is unchanged.
     def seek(self,s,tag,owner):
+        order=('ReviewBody','ReviewAcknowledgement','ArmV3Admit') if s['phase']=='V3AdmitReview' and s['subphase']=='None' else None
+        return self._seek(s,tag,owner,order)
+    def _seek(self,s,tag,owner,order):
         self.note_review_observation(s,seek=tag)
         if self.find(s,tag,owner) is not None:return True
         # Ordinary native wheel search only; no click on an invented rectangle.
@@ -245,19 +254,18 @@ class FullFlow:
         self.note_review_observation(s,seek=tag)
         C.require(count<64,'input_widget')
         direction='up' if count<24 else 'down'
-        if s['phase']=='V3AdmitReview' and s['subphase']=='None' and tag in ('ReviewBody','ReviewAcknowledgement','ArmV3Admit'):
-            # Actual native order is body, acknowledgement, Arm. An owed body
+        if order is not None and tag in order:
+            # Exact native order is body, optional acknowledgement, action. An owed body
             # scroll must not turn downward after repeated action/body trips.
             latest=self.native.stable(s['phase'],s['owner'])
             self.note_review_observation(latest,seek=tag)
             h=latest['host_observation'];old=s['host_observation']
             C.require(latest['subphase']==s['subphase'] and owner==latest['owner']
-                      and owner in ('Signer1','Signer2'),'input_phase')
+                      and (owner in ('Signer1','Signer2') or (owner is None and s['phase']=='NormalFinishReview')),'input_phase')
             if (not h['context_valid'] or h['entry']!='Idle'
                     or self.pending_host is not None or self.host_prepared is not None
                     or (h['revision'],h['nonws_end'])!=(old['revision'],old['nonws_end'])):return False
             if self.find(latest,tag,owner) is not None:return False
-            order=('ReviewBody','ReviewAcknowledgement','ArmV3Admit')
             anchors=[w for w in latest['widgets'] if w['owner']==owner and w['tag'] in order]
             if anchors:
                 positions=[order.index(w['tag']) for w in anchors]
@@ -346,14 +354,14 @@ class FullFlow:
         if ack and not self.used(s,ack,owner):
             if checkbox is not None and checkbox['enabled']:
                 self.press(s,ack,owner);return True
-            if self.seek(s,ack,owner):return False
+            if self.review_seek(s,ack,owner,action,ack,body):return False
             return True
         pending=(s['phase'],s['subphase'],'review-scroll-pending',action,owner,body)
         if pending not in self.scrolls:
             button=self.find(s,action,owner)
             if button is not None and button['enabled']:
                 self.press(s,action,owner);return True
-            if button is None:return not self.seek(s,action,owner)
+            if button is None:return not self.review_seek(s,action,owner,action,ack,body)
             self.scrolls[pending]=1
             self.note_review_observation(s)
         # Remember only an owed ordinary wheel gesture, not read completion.
@@ -365,7 +373,7 @@ class FullFlow:
             del self.scrolls[pending]
             self.note_review_observation(s)
             return True
-        return not self.seek(s,body,owner)
+        return not self.review_seek(s,body,owner,action,ack,body)
     def paired_admission(self,s,owner):
         # Native paired_approved requires BOTH complete reviews and BOTH
         # acknowledgements before EITHER separate one-use arm is enabled.
