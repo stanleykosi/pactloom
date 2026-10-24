@@ -202,3 +202,15 @@ mod tests {
         let (returned,_)=run(&ctx,Mode::Visible);assert_eq!(returned.len(),1);assert!(returned[0].1);
     }
 }
+
+// Test-only readback of the existing content-free observer; no runtime emitter.
+#[cfg(test)]
+pub(super) fn take_layout_test_snapshot() -> Value {
+    FRAME.with(|cell| {
+        let mut f = cell.borrow_mut();
+        assert!(!f.failed, "layout observer rejected actual geometry");
+        let mut facts = f.facts.take().expect("layout frame began");
+        facts["widgets"] = Value::Array(std::mem::take(&mut f.widgets));
+        facts
+    })
+}

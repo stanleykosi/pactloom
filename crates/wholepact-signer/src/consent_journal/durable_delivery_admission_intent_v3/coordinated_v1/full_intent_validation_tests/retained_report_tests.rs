@@ -186,3 +186,67 @@ fn complete_prepared_display_reproduces_retained_and_admit_size_boundaries() {
     assert_eq!(after.1 - before.1, delta, "only input-ID length changes compact display");
     assert_eq!(after.2 - before.2, delta, "only input-ID length changes actual request JSON");
 }
+
+/// Fixed D-only export to a hosted private temporary path. This is the same
+/// actual encrypted mathematical fixture and immutable getter path as the P58
+/// report regression. The output is a public DTO, never native authority.
+#[test]
+#[ignore = "requires fixed D-only temporary public DTO output path"]
+fn export_actual_material_admit_layout_dto() {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = MaterialFixture::coordinated();
+    let mut i = complete(&f);
+    let ids = f.rows()[0].request().material.input_ids().collect::<Vec<_>>();
+    assert_eq!(ids.len(), 1);
+    let actual_id = ids[0];
+    assert!(actual_id.starts_with("ironwood:") && actual_id.len() >= 75);
+    scope_mut(&mut i).authorization.inputs[0].input_id = actual_id.into();
+    rebind_request(&mut i); retain(&mut i);
+    assert!(i.validate().is_ok(), "complete public DTO fixture");
+    i.admission = AdmissionProvenanceV1 {
+        read_session_digest: String::new(), admit_read_presentation_digest: String::new(),
+        final_presentation_digest: String::new(), authenticated_ready_digest: String::new(),
+        reviewed_digest: String::new(), reviewed_at_ms: 0, retained_at_ms: 0, expires_at_ms: 0,
+    };
+    assert!(i.validate_review().is_ok(), "actual complete review fixture");
+    {
+        let c = checked(f.journal().connection.lock()); let before = c.total_changes();
+        assert!(storage::verify_schema(&c).is_ok(), "real encrypted fixture schema");
+        assert!(validate_original_rows(&c, &i).is_ok(), "actual original row joins");
+        assert_eq!(before, c.total_changes());
+    }
+    let prepared = PreparedCoordinatedAdmissionIntentV1 {
+        journal: f.journal().binding(), account: checked(f.journal().account_state()),
+        source_identity: i.read.source_identity_digest.clone(),
+        review_digest: checked(i.review_digest()), intent: i.clone(),
+    };
+    let display = checked(prepared.display());
+    let request = prepared.request();
+    let report = SignerV3AdmitReadRetainedV1 {
+        admit_read_presentation_digest: i.admit_read.presentation_digest.clone(),
+        source_identity_digest: i.admit_read.source_identity_digest.clone(),
+        owner_service_digest: i.admit_read.owner_service_digest.clone(),
+        recipient_intent_digest: checked(i.recipient_intent.digest()),
+        authenticated_history_digest: i.admit_read.authenticated_history_digest.clone(),
+        admission_request_digest: checked(prepared.request_digest()),
+        admission_review_digest: prepared.review_digest().into(),
+        operation_id: request.operation_id.clone(), expected_head_sequence: request.expected_head.sequence,
+        expected_head_digest: request.expected_head.digest.clone(), display,
+    };
+    assert!(report.validate().is_ok(), "actual retained DTO");
+    let p = presentation(facts(&i, report));
+    assert!(p.validate().is_ok(), "complete actual material-derived Admit DTO");
+    let bytes = checked(serde_json::to_vec(&p));
+    assert!(bytes.len() <= 60 * 1024 && packet_bytes(&p) <= 65_536);
+    let path = std::path::PathBuf::from(std::env::var_os("WHOLEPACT_CI_EGUI_ADMIT_FIXTURE")
+        .expect("fixed D-only output path required"));
+    assert!(path.is_absolute(), "absolute temporary path required");
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+        .open(&path).expect("exclusive private temporary public DTO output");
+    file.write_all(&bytes).expect("bounded public DTO write");
+    file.sync_all().expect("public DTO fixture flush");
+    eprintln!("EGUI_ADMIT_FIXTURE_V1 {}", serde_json::json!({
+        "bytes": bytes.len(), "material_input_id_bytes": actual_id.len(), "public_dto_valid": true
+    }));
+}

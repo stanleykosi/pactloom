@@ -100,6 +100,8 @@ macro_rules! ci_panel {
             let output = egui::ScrollArea::vertical().id_salt("financial-ci-full-panel")
                 .auto_shrink([false,false]).show($ui, $content);
             crate::financial_ci::rect($ui, output.inner_rect, $ui.is_enabled(), "ScrollRegion", None);
+            #[cfg(test)]
+            egui_layout_tests::record_outer_geometry(&output);
             output.inner
         }
         #[cfg(not(wholepact_financial_ci))] { ($content)($ui) }
@@ -7340,9 +7342,13 @@ fn review_display_tagged(ui: &mut egui::Ui, display: &str, eligible: bool, _ci_t
             ui.monospace(display);
             let end = ui.label("End of the complete authenticated review");
             end_visible = eligible && ui.is_rect_visible(end.rect);
+            #[cfg(all(test, wholepact_financial_ci))]
+            egui_layout_tests::record_end_geometry(end.rect, end_visible);
         });
     #[cfg(wholepact_financial_ci)]
     crate::financial_ci::rect(ui, _ci_scroll.inner_rect, ui.is_enabled(), _ci_tag, crate::financial_ci::owner());
+    #[cfg(all(test, wholepact_financial_ci))]
+    egui_layout_tests::record_review_geometry(&_ci_scroll);
     end_visible
 }
 fn index(role: Role) -> usize {
@@ -9543,3 +9549,7 @@ mod normal_finish_tail_tests {
         }
     }
 }
+
+#[cfg(all(test, wholepact_financial_ci))]
+#[path = "financial_source_ui/egui_layout_tests.rs"]
+mod egui_layout_tests;

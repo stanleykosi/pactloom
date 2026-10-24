@@ -1,0 +1,59 @@
+name: Exact material-backed headless egui review experiment
+on:
+  push:
+    branches: [checkpoint/egui-layout-d62]
+permissions: {}
+concurrency:
+  group: egui-layout-d62
+  cancel-in-progress: false
+jobs:
+  diagnostic:
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/egui-layout-d62' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Fetch exact public diagnostic source without credentials
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          umask 022
+          public_git() {
+            env -i PATH="$PATH" HOME="$RUNNER_TEMP/egui-fetch-home" \
+              GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+              git -c credential.helper= -c http.extraheader= "$@"
+          }
+          public_git init source
+          public_git -C source fetch --no-tags --depth=1 https://github.com/stanleykosi/pactloom.git "$SOURCE_COMMIT"
+          public_git -C source checkout --detach FETCH_HEAD
+          test "$(public_git -C source rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test -z "$(public_git -C source status --porcelain --untracked-files=all)"
+      - name: Fixed layout source bindings and bridge boundary tests before compilation
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python3 -I -B scripts/ci-financial-egui-layout-audit.py --source "$PWD"
+          python3 -I -B -m unittest discover -s scripts/tests -p 'test_ci_financial_scenario.py'
+          python3 -I -B -m unittest discover -s scripts/tests -p 'test_ci_financial_egui_layout.py'
+          python3 -I -B -m unittest discover -s scripts/tests -p 'test_ci_financial_egui_preflight.py'
+      - name: Compile two selected test binaries and execute material export then real egui review
+        shell: bash
+        working-directory: source
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/egui-preflight/home" "$RUNNER_TEMP/egui-preflight/cargo" "$RUNNER_TEMP/egui-preflight/target-shared"
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/egui-preflight/home" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" rustup toolchain install 1.99.0 --profile minimal --no-self-update
+          test "$(env -i PATH="$PATH" HOME="$RUNNER_TEMP/egui-preflight/home" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" rustup run 1.99.0 rustc --version)" = 'rustc 1.99.0 (b940084d7 2026-09-28)'
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/egui-preflight/home" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" PREFLIGHT_ROOT="$RUNNER_TEMP/egui-preflight" SOURCE_COMMIT="$SOURCE_COMMIT" python3 -I -B scripts/ci-financial-egui-preflight.py
+      - name: Always remove exact job-owned diagnostic data and test build directory
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf -- "$RUNNER_TEMP/egui-preflight"
+          test ! -e "$RUNNER_TEMP/egui-preflight"
