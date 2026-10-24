@@ -106,13 +106,26 @@ class NativeScenario:
             self.controller.scroll_down(*self.point(s,body,owner))
             self.controller.wait_render_progress()
         raise C.Rejected('input_disabled')
-    def protected_input(self,phase,owner,tag,secret,host_context=None):
+    def protected_input(self,phase,owner,tag,secret,host_context=None,*,source_context=None):
         """Closed disposable fixture passwords only, never capture during input."""
         C.require(type(secret) is F.SyntheticSecret and tag in ('HostEditor','SourcePassword'),'fixture_secret')
+        if source_context is not None:
+            C.require(tag=='SourcePassword' and phase in ('Password','V3Password')
+                      and owner in ('Signer1','Signer2') and type(source_context) is tuple
+                      and len(source_context)==2 and all(C.integer(v) for v in source_context),'input_phase')
         s=self.stable(phase,owner,protected=True)
         C.require(s['host_input'] if tag=='HostEditor' else s['secret_input'],'input_phase')
+        if source_context is not None:
+            h=s['host_observation']
+            C.require(s['subphase']=='None' and not s['host_input'] and h['context_valid']
+                      and h['entry']=='Idle' and h['view'] is None
+                      and (h['revision'],h['nonws_end'])==source_context,'input_phase')
         if tag=='HostEditor':self.check_host_editor(s,host_context)
-        point=self.point(s,tag,None if tag=='HostEditor' else owner);self._protected=True
+        point=self.point(s,tag,None if tag=='HostEditor' else owner)
+        if source_context is not None:
+            a,b,c,d=self.widget(s,tag,owner)['rect'];scale=s['pixels_per_point']
+            C.require(a<point[0]/scale<c and b<point[1]/scale<d,'input_widget')
+        self._protected=True
         try:
             def native(value):
                 # Convert only fixed synthetic bytes, preflight then emit evdev.
