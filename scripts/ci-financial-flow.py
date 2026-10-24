@@ -38,6 +38,9 @@ DIRECT={'HistorySetupNeeded':'PrepareHistory','HistoryReady':'BeginContinue','Se
         'SignedRetired':'ParkFinancial','ReturnCompleted':'ParkFinancial'}
 FORMS={'V3Configuring':('v3','BeginV3'),'V3OwnerConfiguring':('owner','SelectV3Owner'),
        'FinancialSetupConfiguring':('financial','SelectFinancialSetup'),'Configuring':('witness','Begin')}
+WITNESS_FIELDS=tuple('Field:'+name for name in ('Endpoint','ServerName','WitnessId',
+ 'PinnedServerCertificate','NetworkProfile','AccountId','OwnerCertificateDerHex','StorageKey',
+ 'ServerCertificate','ServerPrivateKey','TrustedClientRoot'))
 SELECT=('ReviewV3Pair','ReviewV3Enrollment','ReviewV3Manifest','ReviewV3RedisclosureRead',
         'ReviewV3Redisclose','ConfigureV3Owner','ReviewV3PrepareRead','ReviewV3Receive',
         'ReviewV3AdmitRead','ReviewV3Admit','ReviewV3Audit','ConfigureFinancialSetup','Configure','ConfigureV3')
@@ -189,7 +192,42 @@ class FullFlow:
         key=(s['phase'],s['subphase'],'seek',tag,owner)
         count=self.scrolls.get(key,0);self.scrolls[key]=count+1
         C.require(count<64,'input_widget')
-        self.scroll(s,'ScrollRegion',None,'up' if count<24 else 'down');return False
+        direction='up' if count<24 else 'down'
+        if s['phase']=='Configuring' and s['subphase']=='None' and tag in WITNESS_FIELDS:
+            # Witness selectors live in their own native ScrollArea. Wheel over
+            # an actual visible field, never an invented inner-region rectangle.
+            latest=self.native.stable(s['phase'],s['owner'])
+            h=latest['host_observation'];old=s['host_observation']
+            C.require(latest['subphase']==s['subphase'] and owner==latest['owner']
+                      and owner in ('Signer1','Signer2'),'input_phase')
+            if (not h['context_valid'] or h['entry']!='Idle'
+                    or self.pending_host is not None or self.host_prepared is not None
+                    or (h['revision'],h['nonws_end'])!=(old['revision'],old['nonws_end'])):return False
+            if self.find(latest,tag,owner) is not None:return False
+            anchors=[]
+            for w in latest['widgets']:
+                if w['tag'] not in WITNESS_FIELDS or w['owner']!=owner or not w['enabled']:continue
+                x0,y0,x1,y1=w['rect'];scale=latest['pixels_per_point']
+                x,y=self.native.point(latest,w['tag'],owner)
+                if x0*scale<x<x1*scale and y0*scale<y<y1*scale:anchors.append(w)
+            anchor=max(anchors,key=lambda w:(w['rect'][2]-w['rect'][0])*(w['rect'][3]-w['rect'][1]),default=None)
+            if anchor is not None:
+                # Exact native declaration order tells which side of the visible
+                # selector lies the clipped target; do not restart an up-sweep
+                # for each of the eleven fields and consume the shared budget.
+                direction='down' if WITNESS_FIELDS.index(tag)>WITNESS_FIELDS.index(anchor['tag']) else 'up'
+                # Charge the original shared outer-navigation counter even
+                # though the actual wheel pointer targets this inner control.
+                key=(latest['phase'],latest['subphase'],'ScrollRegion',None,direction)
+                steps=self.scrolls.get(key,0);C.input_budget(steps<128,'scroll',steps)
+                self.scrolls[key]=steps+1
+                wheel=self.controller.scroll_up if direction=='up' else self.controller.scroll_down
+                wheel(*self.native.point(latest,anchor['tag'],owner));self.controller.wait_render_progress()
+            elif not any(w['tag'] in WITNESS_FIELDS and w['owner']==owner for w in latest['widgets']):
+                self.scroll(latest,'ScrollRegion',None,direction)
+            # Visible but disabled/subpixel-only selectors do not authorize a wheel.
+            return False
+        self.scroll(s,'ScrollRegion',None,direction);return False
     def idle_scan(self,s):
         # Clipped/tagged geometry can stay identical while untagged content
         # moves. Never treat that equality as proof of a scroll boundary.

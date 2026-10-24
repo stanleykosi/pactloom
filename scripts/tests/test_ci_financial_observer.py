@@ -3231,3 +3231,131 @@ class PreparationReadinessHostStageTests(unittest.TestCase):
   for stage in expected:O.C.validate_host_failure_facts(dict(version=1,stage=stage,**{'class':'FrameInvalidBudget'},relay=None))
   for stage in ('PreparationReadinessOther','PreparationReadiness',True,'PreparationReadinessFrame raw'):
    with self.assertRaises(O.C.Rejected):O.C.validate_host_failure_facts(dict(version=1,stage=stage,**{'class':'Permission'},relay=None))
+
+class WitnessSelectorNavigationTests(unittest.TestCase):
+ def model(self):
+  from unittest import mock
+  state={'generation':0,'inner':0,'outer':0}
+  tags=('Endpoint','ServerName','WitnessId','PinnedServerCertificate','NetworkProfile','AccountId','OwnerCertificateDerHex','StorageKey','ServerCertificate','ServerPrivateKey','TrustedClientRoot')
+  class Observer:
+   expected_profile=F.C.SEMANTIC_PROFILE
+   host_view=mock.Mock()
+   def read(self):return []
+   def next_snapshot(self,deadline):
+    state['generation']+=1
+    widgets=[dict(tag='ScrollRegion',owner=None,enabled=True,rect=[0,0,1280,800])]
+    for i,t in enumerate(tags[state['inner']:state['inner']+5]):widgets.append(dict(tag='Field:'+t,owner='Signer1',enabled=True,rect=[20,200+i*45,500,225+i*45]))
+    return dict(phase='Configuring',subphase='None',owner='Signer1',view_generation=state['generation'],focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=widgets,host_view_id=None,host_observation=dict(revision=1,nonws_end=0,context_valid=True,entry='Idle',editor=None,view=None))
+  fixture=mock.Mock(deadline_ns=time.monotonic_ns()+F.C.ORIGINAL_NS);controller=mock.Mock();observer=Observer()
+  def wheel(direction,x,y):
+   # Native nested selector viewport consumes wheel over a visible field;
+   # the separate outer scrollbar edge cannot move its inner content.
+   if 20<=x<=500 and 200<=y<=425:state['inner']=max(0,min(6,state['inner']+direction))
+   else:state['outer']+=1
+  controller.scroll_up.side_effect=lambda x,y:wheel(-1,x,y)
+  controller.scroll_down.side_effect=lambda x,y:wheel(1,x,y)
+  f=F.FullFlow(controller,fixture,observer,None)
+  return f,controller,state,tags
+ def test_actual_seek_reaches_inner_clipped_selector_without_input(self):
+  f,c,state,tags=self.model()
+  for _ in range(65):
+   s=f.native.snapshot()
+   if f.seek(s,'Field:TrustedClientRoot','Signer1'):break
+  else:self.fail('original finite seek exhausted')
+  self.assertGreater(state['inner'],0);self.assertEqual(state['outer'],0)
+  c.click.assert_not_called();c.clear_field.assert_not_called();c.type_ascii.assert_not_called();c.observe.assert_not_called()
+  self.assertLessEqual(c.scroll_up.call_count+c.scroll_down.call_count,64)
+ def test_model_is_bound_to_actual_nested_native_selector_and_closed_tags(self):
+  source=(ROOT.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
+  body=source.split('fn draw_selectors(',1)[1].split('\nfn history_inputs(',1)[0]
+  self.assertIn('.id_salt("ordinary-witness-selectors")',body);self.assertIn('.max_height(470.0)',body)
+  f,c,state,tags=self.model()
+  import re
+  self.assertEqual(tuple(re.findall(r'"(Field:[A-Za-z]+)"',body)),F.WITNESS_FIELDS)
+  self.assertEqual(tuple('Field:'+tag for tag in tags),F.WITNESS_FIELDS)
+  self.assertNotIn('"ScrollRegion"',body)
+ def test_fresh_transitions_and_host_guards_emit_no_wheel_or_input(self):
+  from unittest import mock
+  for change in ({'phase':'Waiting'},{'subphase':'SetupNeeded'},{'owner':'Signer2'},{'focused':False},{'secret_input':True},{'host_input':True}, {'host_observation':dict(revision=2,nonws_end=1,context_valid=True,entry='Idle',editor=None,view=None)}, {'host_observation':dict(revision=1,nonws_end=0,context_valid=False,entry='Idle',editor=None,view=None)}):
+   with self.subTest(change=change):
+    f,c,state,tags=self.model();s=f.native.snapshot();original=f.native.next_snapshot
+    f.native.next_snapshot=lambda deadline:original(deadline)|change
+    try:f.seek(s,'Field:TrustedClientRoot','Signer1')
+    except F.C.Rejected:pass
+    c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();c.click.assert_not_called();c.type_ascii.assert_not_called()
+  for attr in ('pending_host','host_prepared'):
+   f,c,state,tags=self.model();s=f.native.snapshot();setattr(f,attr,('pending',))
+   self.assertFalse(f.seek(s,'Field:TrustedClientRoot','Signer1'));c.scroll_up.assert_not_called();c.scroll_down.assert_not_called()
+ def test_original_seek_scroll_and_deadline_ceilings_are_not_reset(self):
+  for case in ('seek','scroll','deadline'):
+   with self.subTest(case=case):
+    f,c,state,tags=self.model();s=f.native.snapshot()
+    if case=='seek':f.scrolls[('Configuring','None','seek','Field:TrustedClientRoot','Signer1')]=64
+    if case=='scroll':f.scrolls[('Configuring','None','ScrollRegion',None,'down')]=128
+    if case=='deadline':f.fixture.deadline_ns=time.monotonic_ns()-1
+    with self.assertRaises(F.C.Rejected):f.seek(s,'Field:TrustedClientRoot','Signer1')
+    c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();c.click.assert_not_called();c.type_ascii.assert_not_called()
+ def test_appearing_target_defers_to_outer_fresh_observation_without_wheel(self):
+  f,c,state,tags=self.model();s=f.native.snapshot();state['inner']=6
+  self.assertFalse(f.seek(s,'Field:TrustedClientRoot','Signer1'))
+  c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();c.click.assert_not_called()
+ def test_no_inner_anchor_uses_only_original_bounded_outer_navigation(self):
+  f,c,state,tags=self.model();s=f.native.snapshot();original=f.native.next_snapshot
+  def snapshot(deadline):
+   v=original(deadline);v['widgets']=[w for w in v['widgets'] if w['tag']=='ScrollRegion'];return v
+  f.native.next_snapshot=snapshot
+  self.assertFalse(f.seek(s,'Field:TrustedClientRoot','Signer1'));self.assertEqual(state['outer'],1);self.assertEqual(state['inner'],0)
+  c.click.assert_not_called();c.type_ascii.assert_not_called()
+ def test_actual_fullflow_fills_all_inner_fields_once_then_original_submit(self):
+  class Submitted(Exception):pass
+  f,c,state,tags=self.model();original=f.native.next_snapshot
+  f.startup_index=13;f.startup_focus_seen=True;f.commands_instruction_observed=True;f._startup_ceiling=None
+  f.fixture.form.return_value={tag:'synthetic-'+tag for tag in tags}
+  def snapshot(deadline):
+   if state.get('submitted'):raise Submitted()
+   v=original(deadline);v['widgets'].append(dict(tag='Begin',owner='Signer1',enabled=True,rect=[20,700,400,730]));return v
+  f.native.next_snapshot=snapshot
+  c.click.side_effect=lambda x,y:state.update(submitted=True) if y==715 else None
+  with self.assertRaises(Submitted):f.run()
+  self.assertEqual([call.args[0] for call in c.type_ascii.call_args_list],['synthetic-'+tag for tag in tags])
+  self.assertEqual(c.clear_field.call_count,11);self.assertEqual(c.click.call_count,12)
+  self.assertEqual(f.actions,1);self.assertEqual(state['outer'],0)
+ def test_subpixel_clipped_field_is_not_used_as_wheel_anchor(self):
+  f,c,state,tags=self.model();s=f.native.snapshot();original=f.native.next_snapshot
+  def snapshot(deadline):
+   v=original(deadline)
+   for w in v['widgets']:
+    if w['tag']=='Field:Endpoint':w['rect']=[20.1,200.1,20.2,200.2]
+   return v
+  f.native.next_snapshot=snapshot
+  self.assertFalse(f.seek(s,'Field:TrustedClientRoot','Signer1'))
+  self.assertEqual(c.scroll_down.call_args.args,(260,257));c.click.assert_not_called()
+ def test_changing_inner_anchor_debits_original_shared_scroll_counter(self):
+  f,c,state,tags=self.model();key=('Configuring','None','ScrollRegion',None,'down');f.scrolls[key]=127
+  self.assertFalse(f.seek(f.native.snapshot(),'Field:TrustedClientRoot','Signer1'))
+  self.assertEqual(f.scrolls[key],128);self.assertEqual(state['inner'],1)
+  with self.assertRaises(F.C.Rejected):f.seek(f.native.snapshot(),'Field:TrustedClientRoot','Signer1')
+  self.assertEqual(c.scroll_down.call_count,1)
+  self.assertFalse(any(k[2].startswith('Field:') for k in f.scrolls))
+ def test_duplicate_widget_is_rejected_by_actual_snapshot_validator(self):
+  f,c,state,tags=self.model();s=f.native.snapshot();original=f.native.next_snapshot
+  def snapshot(deadline):
+   v=original(deadline);v['widgets'].append(dict(v['widgets'][1]));return v
+  f.native.next_snapshot=snapshot
+  with self.assertRaises(F.C.Rejected):f.seek(s,'Field:TrustedClientRoot','Signer1')
+  c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();c.click.assert_not_called()
+ def test_disabled_anchor_and_disabled_target_never_emit_wheel_or_input(self):
+  for target_visible in (False,True):
+   f,c,state,tags=self.model()
+   if target_visible:state['inner']=6
+   original=f.native.next_snapshot
+   def snapshot(deadline):
+    v=original(deadline)
+    for w in v['widgets']:
+     if w['tag'].startswith('Field:'):w['enabled']=False
+    return v
+   f.native.next_snapshot=snapshot;s=f.native.snapshot()
+   if target_visible:
+    with self.assertRaises(F.C.Rejected):f.field(s,'Field:TrustedClientRoot','Signer1','synthetic')
+   else:self.assertFalse(f.seek(s,'Field:TrustedClientRoot','Signer1'))
+   c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();c.click.assert_not_called();c.clear_field.assert_not_called();c.type_ascii.assert_not_called()
