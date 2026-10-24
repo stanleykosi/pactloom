@@ -3514,7 +3514,14 @@ class SameBatchValidationTests(unittest.TestCase):
   def node(name):return ast.parse(textwrap.dedent(inspect.getsource(getattr(O.C,name)))).body[0]
   n=node('native_failure_sequence');k=node('_native_failure_sequence_validated');n.body=n.body[:-1]+k.body
   self.assertEqual(hashlib.sha256(ast.dump(n,include_attributes=False).encode()).hexdigest(),'74a84768ea9b7a2c9a01535264fd3a0b313fa990a83bf317e6038fbf7b569049')
-  n=node('join_host_views');k=node('_join_host_views_validated');n.body=n.body[:-1]+k.body
+  n=node('join_host_views');k=node('_join_host_views_validated')
+  # Reconstruct the default strict public route, not the observer-only receipt.
+  selections=[x for x in ast.walk(k) if isinstance(x,ast.IfExp) and isinstance(x.body,ast.Name) and x.body.id=='_match_host_view_validated']
+  self.assertEqual(len(selections),1)
+  self.assertEqual(ast.dump(selections[0],include_attributes=False),ast.dump(ast.parse('_match_host_view_validated if _shape_receipt is True else match_host_view',mode='eval').body,include_attributes=False))
+  class PublicRoute(ast.NodeTransformer):
+   def visit_IfExp(self,value):return value.orelse if value is selections[0] else self.generic_visit(value)
+  k=PublicRoute().visit(k);n.body=n.body[:-1]+k.body
   loop=next(x for x in n.body if isinstance(x,ast.For));loop.body.insert(0,ast.parse('validate_record(record,SEMANTIC_PROFILE)').body[0])
   self.assertEqual(hashlib.sha256(ast.dump(n,include_attributes=False).encode()).hexdigest(),'c5d82bfd641b5752a1fcc060e9a8586f56f5ff1a4affb2cc2546ae60da6a0b1a')
  def test_public_raw_validation_and_competing_error_order_preserved(self):
@@ -3816,7 +3823,7 @@ class ExactPrefixValidationTests(unittest.TestCase):
  def test_full_reads_and_json_parses_remain_fresh_but_only_new_shapes_validate(self):
   import copy
   p,r,o=self.fixture()
-  with mock.patch.object(O.C,'loads',wraps=O.C.loads) as loads,mock.patch.object(O.C,'validate_record',wraps=O.C.validate_record) as validate:
+  with mock.patch.object(O.json,'loads',wraps=O.json.loads) as loads,mock.patch.object(O.C,'validate_record',wraps=O.C.validate_record) as validate:
    first=o.read();self.assertEqual((loads.call_count,validate.call_count),(4,4))
    first[-1]['facts']['widgets'].append({'caller':'mutation'})
    self.assertEqual(o.read(),r);self.assertEqual((loads.call_count,validate.call_count),(8,4))
@@ -3929,3 +3936,87 @@ class ReviewCostDiagnosticTests(unittest.TestCase):
    p.write_bytes(raw+b'{}\n')
    with self.assertRaises(O.C.Rejected):o.read()
    self.assertEqual(o.collection_diagnostic()['source_records'],1)
+
+class StrictPrefixParseReceiptTests(unittest.TestCase):
+ fixture=ExactPrefixValidationTests.fixture
+ def test_only_strict_known_bytes_bypass_hook_and_profile_failure_keeps_receipt_bound(self):
+  p,r,o=self.fixture()
+  with mock.patch.object(O.C,'loads',wraps=O.C.loads) as strict,mock.patch.object(O.json,'loads',wraps=O.json.loads) as parses:
+   o.read();self.assertEqual((strict.call_count,parses.call_count),(4,4))
+   o.read();self.assertEqual((strict.call_count,parses.call_count),(4,8))
+   o.expected_profile=O.C.PROFILE
+   with self.assertRaises(O.C.Rejected):o.read()
+   self.assertEqual((strict.call_count,parses.call_count),(5,9))
+   o.expected_profile=O.C.SEMANTIC_PROFILE;self.assertEqual(o.read(),r)
+   self.assertEqual((strict.call_count,parses.call_count),(5,13))
+   extra=dict(r[-1],sequence=5,elapsed_ns=5,facts=dict(r[-1]['facts'],view_generation=4))
+   with p.open('ab') as f:f.write(json.dumps(extra).encode()+b'\n')
+   self.assertEqual(o.read(),r+[extra]);self.assertEqual((strict.call_count,parses.call_count),(6,18))
+ def test_unvalidated_suffix_duplicate_constant_unicode_and_limits_reject_repeatedly(self):
+  for suffix,code in ((b'{"schema":1,"schema":1}\n','record_shape'),(b'{"schema":NaN}\n','record_shape'),(b'{"schema":Infinity}\n','record_shape'),(b'{"schema":-Infinity}\n','record_shape'),(b'\xff\n','record_shape'),(b'{}\n','record_shape'),(b' '*32769+b'\n','record_limit')):
+   with self.subTest(suffix=suffix[:32]):
+    p,r,o=self.fixture();o.read()
+    with p.open('ab') as f:f.write(suffix[:-1])
+    if len(suffix)-1<=O.C.MAX_RECORD_BYTES:self.assertEqual(o.read(),r)
+    with p.open('ab') as f:f.write(b'\n')
+    for _ in range(2):
+     with self.assertRaises(O.C.Rejected) as got:o.read()
+     self.assertEqual(got.exception.code,code)
+ def test_known_prefix_mutable_nested_results_are_never_shared(self):
+  p,r,o=self.fixture();a=o.read();b=o.read()
+  def mutable_ids(value):
+   if type(value) is dict:return {id(value)}.union(*(mutable_ids(v) for v in value.values()))
+   if type(value) is list:return {id(value)}.union(*(mutable_ids(v) for v in value))
+   return set()
+  self.assertFalse(mutable_ids(a)&mutable_ids(b));a[-1]['facts']['host_observation']['revision']=999
+  a[-1]['facts']['viewport'][0]=1;a[-1]['facts']['widgets'].append({'mutation':True})
+  self.assertEqual(o.read(),r)
+
+class SameBatchHostMatchReceiptTests(unittest.TestCase):
+ def fixture(self):
+  f=SemanticHostObserverTests();f.setUp();self.addCleanup(f.tearDown);return f
+ def test_public_match_reconstructs_exact_original_validation_order_and_linkage(self):
+  import ast,hashlib,inspect,textwrap
+  def node(name):return ast.parse(textwrap.dedent(inspect.getsource(getattr(O.C,name)))).body[0]
+  public=node('match_host_view');private=node('_match_host_view_validated');public.body=public.body[:-1]+private.body
+  self.assertEqual(hashlib.sha256(ast.dump(public,include_attributes=False).encode()).hexdigest(),'8f987788529e333b2f8793c0a96dd343f08b5218b130cbedaacf15736ca38be7')
+ def test_public_lazy_join_revalidates_mutated_pending_and_active_view(self):
+  for active in (False,True):
+   f=self.fixture();rows=f.records()
+   if active:rows.append(f.record('UiSnapshot',dict(f.copy(f.snapshot),view_generation=2),4))
+   def records():
+    for i,row in enumerate(rows):
+     if i==(3 if active else 2):rows[1]['facts']['text']='\t' # linkage unchanged, now invalid text
+     yield row
+    yield {} # earlier snapshot failure must retain precedence over this shape error
+   with self.assertRaises(O.C.Rejected) as got:O.C.join_host_views(records())
+   self.assertEqual(got.exception.code,'snapshot')
+ def test_observer_receipt_avoids_only_repeat_shapes_and_keeps_host_view_public_match_strict(self):
+  f=self.fixture();f.write(f.records());f.o.read()
+  with mock.patch.object(O.C,'validate_snapshot',wraps=O.C.validate_snapshot) as snapshot,mock.patch.object(O.C,'validate_host_rendered_view',wraps=O.C.validate_host_rendered_view) as view,mock.patch.object(O.C,'match_host_view',wraps=O.C.match_host_view) as public,mock.patch.object(O.C,'_match_host_view_validated',wraps=O.C._match_host_view_validated) as linkage:
+   a=f.o.read();self.assertEqual((snapshot.call_count,view.call_count,public.call_count,linkage.call_count),(0,0,0,1))
+   a[1]['facts']['text']='\t';a[2]['facts']['host_observation']['view']['rect'][0]=500
+   self.assertEqual(f.o.read(),f.records());self.assertEqual(linkage.call_count,2)
+   self.assertEqual(f.o.host_view(f.snapshot),f.text)
+   self.assertEqual((snapshot.call_count,view.call_count,public.call_count,linkage.call_count),(1,1,1,3))
+ def test_private_linkage_keeps_every_predicate_and_default_route_remains_strict(self):
+  f=self.fixture()
+  for field,value in (('id',2),('view_generation',2),('revision',8),('nonws_end',f.view['nonws_end']+1),('view',dict(f.view['view'],rect=[11,10,600,230]))):
+   view=dict(f.copy(f.view),**{field:value});O.C.validate_host_rendered_view(view);O.C.validate_snapshot(f.snapshot,O.C.SEMANTIC_PROFILE)
+   for matcher in (O.C.match_host_view,O.C._match_host_view_validated):
+    with self.assertRaises(O.C.Rejected) as got:matcher(f.snapshot,view)
+    self.assertEqual(got.exception.code,'snapshot')
+  for receipt in (False,1,None):
+   with mock.patch.object(O.C,'match_host_view',wraps=O.C.match_host_view) as strict:
+    self.assertEqual(O.C._join_host_views_validated(f.records(),_shape_receipt=receipt),f.view);strict.assert_called_once()
+ def test_private_and_public_join_keep_current_sequence_pending_final_and_unavailable_checks(self):
+  f=self.fixture();base=f.records()
+  variants=[(base,False),(base,True),(base[:2],False),(base[:2],True),(base+[f.record('HostRenderedView',dict(f.copy(f.view),id=2,view_generation=2),4)],True)]
+  bad=f.copy(base);bad[-1]['sequence']=4;variants.append((bad,False))
+  bad=f.copy(base);bad[-1]['facts']['host_view_id']=None;variants.append((bad,False))
+  for rows,final in variants:
+   outcomes=[]
+   for receipt in (False,True):
+    try:outcomes.append(('ok',O.C._join_host_views_validated(rows,final=final,_shape_receipt=receipt)))
+    except O.C.Rejected as error:outcomes.append(('error',error.code))
+   self.assertEqual(*outcomes)

@@ -2,6 +2,7 @@
 """Bounded private append-only observer collection; observations grant nothing."""
 import copy
 import importlib.util
+import json
 import os
 import pathlib
 import re
@@ -82,14 +83,16 @@ class ObserverFiles:
             complete=raw[:raw.rfind(b'\n')+1]
             if final:C.require(raw==complete and len(raw)==before.st_size==after.st_size,'observer_failure')
             C.require(len(raw)-len(complete)<=C.MAX_RECORD_BYTES,'record_limit')
-            # The exact complete byte prefix was already shape-validated under
-            # this fixed profile and file identity. Still parse EVERY line into
-            # fresh objects; no parsed value or aggregate authority is cached.
+            # The exact complete byte prefix already passed strict JSON and
+            # shape validation under this profile/file identity. Parse EVERY
+            # line into fresh objects, but only new bytes need duplicate-key
+            # and constant rejection again. No parsed/aggregate cache is kept.
             prior_count=len(prior[1].splitlines()) if self._validation_profiles.get(name)==self.expected_profile else 0
             entries=[]
             for index,line in enumerate(complete.splitlines()):
                 C.require(len(records)+len(entries)<C.MAX_RECORDS,'record_limit')
-                entry=C.loads(line)
+                C.require(len(line)<=C.MAX_RECORD_BYTES,'record_limit')
+                entry=json.loads(line) if index<prior_count else C.loads(line)
                 if index>=prior_count:C.validate_record(entry,self.expected_profile)
                 entries.append(entry)
             if entries:
@@ -102,7 +105,7 @@ class ObserverFiles:
         C._native_failure_sequence_validated(records)
         C.validate_host_exit_cardinality(records)
         C.validate_actor_cardinality(records)
-        if self.expected_profile==C.SEMANTIC_PROFILE:self._set_host_view(C._join_host_views_validated(records))
+        if self.expected_profile==C.SEMANTIC_PROFILE:self._set_host_view(C._join_host_views_validated(records,_shape_receipt=True))
         return records
     @staticmethod
     def _unavailable_timing():

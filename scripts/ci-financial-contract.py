@@ -179,6 +179,10 @@ def validate_host_rendered_view(facts):
 
 def match_host_view(snapshot, view):
     validate_snapshot(snapshot,SEMANTIC_PROFILE);validate_host_rendered_view(view)
+    return _match_host_view_validated(snapshot,view)
+
+def _match_host_view_validated(snapshot, view):
+    # Private same-batch linkage only; caller owns both shape-validation receipts.
     h=snapshot['host_observation']
     require(snapshot['host_view_id']==view['id'] and view['view_generation']<=snapshot['view_generation']
             and view['revision']==h['revision'] and view['nonws_end']==h['nonws_end']
@@ -199,8 +203,10 @@ def _validated_host_records(records):
         validate_record(record,SEMANTIC_PROFILE)
         yield record
 
-def _join_host_views_validated(records, *, final=False):
-    # Private same-batch kernel: caller has validated each record already.
+def _join_host_views_validated(records, *, final=False, _shape_receipt=False):
+    # Only ObserverFiles' fresh, fully validated, unexposed plain-JSON list may
+    # use the receipt. Public lazy iteration retains strict matching: a caller
+    # can mutate earlier pending/active records between generator yields.
     # No persistence, authority, skipped linkage, or cross-read cache.
     active=None;pending=None;last_id=0;paired=0;sequence=0;generation=0
     for record in records:
@@ -218,7 +224,7 @@ def _join_host_views_validated(records, *, final=False):
                 require(pending is None,'snapshot');active=None
             else:
                 selected=pending if pending is not None else active
-                require(selected is not None,'snapshot');match_host_view(facts,selected)
+                require(selected is not None,'snapshot');(_match_host_view_validated if _shape_receipt is True else match_host_view)(facts,selected)
                 if pending is not None:
                     require(selected['view_generation']==generation,'snapshot');paired+=1
                 active=selected;pending=None

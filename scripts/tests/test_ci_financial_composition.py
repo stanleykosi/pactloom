@@ -1,4 +1,6 @@
 """Pure cross-feature checks: no product, compositor, or actual credentials."""
+import contextlib
+import io
 import json
 import pathlib
 import unittest
@@ -230,5 +232,127 @@ class ComposedStartupTests(unittest.TestCase):
             self.assertFalse((root/'coordinated-host-runtime-session.token').exists())
             self.assertEqual(len(fixture.secret_instances),2)
             self.assertTrue(all(not any(secret._bytes) for secret in fixture.secret_instances))
+
+
+class SemanticRuntimeCpuContractTests(unittest.TestCase):
+    """Fabricated Docker records only; no Docker, native process or fixture."""
+    def setUp(self):
+        self.S=F.load('ci-financial-supervisor')
+
+    def inspection(self,nano_cpus=4_000_000_000):
+        S=self.S
+        return [dict(Image='sha256:'+'a'*64,Mounts=[],Config=dict(
+            Labels={S.LABEL:'token',S.SOURCE_LABEL:'b'*40},Image='sha256:'+'a'*64,
+            User='0:0',Volumes=None,Entrypoint=['/usr/local/bin/python3','-I','-B','/opt/ci-financial/ci-financial-container.py'],
+            Cmd=[]),HostConfig=dict(NetworkMode='none',ReadonlyRootfs=True,Privileged=False,
+            CapDrop=['ALL'],CapAdd=['SETUID','SETGID'],SecurityOpt=['no-new-privileges:true'],
+            PidsLimit=128,Memory=2*1024**3,MemorySwap=2*1024**3,NanoCpus=nano_cpus,
+            Binds=None,Devices=[],DeviceRequests=None,Mounts=None,PidMode='',IpcMode='private',
+            UsernsMode='',CgroupnsMode='private',GroupAdd=None,Tmpfs=dict(S.TMPFS),
+            LogConfig={'Type':'none','Config':{}},RestartPolicy={'Name':'no','MaximumRetryCount':0},
+            AutoRemove=False,Ulimits=[{'Name':'core','Soft':0,'Hard':0},
+                                     {'Name':'nofile','Soft':512,'Hard':512}]))]
+
+    def check_inspection(self,profile,rows,expected_failure=None):
+        S=self.S;output=io.StringIO()
+        with mock.patch.object(S.I,'profile',return_value=profile), \
+             mock.patch.object(S,'docker',return_value=json.dumps(rows).encode()), \
+             contextlib.redirect_stdout(output):
+            if expected_failure is None:
+                S.inspect_isolation('name','token','external','sha256:'+'a'*64,'b'*40)
+                self.assertEqual(output.getvalue(),'')
+                return
+            with self.assertRaises(S.Failure) as caught:
+                S.inspect_isolation('name','token','external','sha256:'+'a'*64,'b'*40)
+        self.assertEqual(caught.exception.check,expected_failure)
+        record=json.loads(output.getvalue().split(' ',1)[1])
+        self.assertEqual(record['check'],expected_failure)
+        self.assertTrue(record['cleanup_pending'])
+        self.assertNotIn('PRIVATE_SENTINEL',output.getvalue())
+
+    def test_semantic_four_and_legacy_two_are_exact_not_minimum_limits(self):
+        S=self.S
+        for profile,expected,wrong in ((S.P.C.SEMANTIC_PROFILE,4_000_000_000,2_000_000_000),
+                                       (S.P.C.EXTERNAL_PROFILE,2_000_000_000,4_000_000_000)):
+            with self.subTest(profile=profile):
+                self.check_inspection(profile,self.inspection(expected))
+            for value in (None,False,True,0,-1,wrong,3_000_000_000,2**50,float(expected),str(expected),'PRIVATE_SENTINEL'):
+                with self.subTest(profile=profile,value=value):
+                    self.check_inspection(profile,self.inspection(value),'cpu_limit')
+            rows=self.inspection(expected);del rows[0]['HostConfig']['NanoCpus']
+            self.check_inspection(profile,rows,'cpu_limit')
+
+    def test_other_resource_caps_and_isolation_stay_fail_closed(self):
+        S=self.S
+        changes=(('PidsLimit',0,'pids_limit'),('PidsLimit',256,'pids_limit'),
+            ('Memory',0,'memory_limit'),('Memory',4*1024**3,'memory_limit'),
+            ('MemorySwap',-1,'swap_limit'),('MemorySwap',4*1024**3,'swap_limit'),
+            ('NetworkMode','host','network'),('ReadonlyRootfs',False,'readonly_root'),
+            ('Privileged',True,'privileged'),('CapDrop',[],'cap_drop'),
+            ('CapAdd',['SETUID','SETGID','SYS_ADMIN'],'cap_add'),
+            ('SecurityOpt',[],'no_new_privileges'),('PidMode','host','pid_namespace'),
+            ('IpcMode','host','ipc_namespace'),('UsernsMode','host','user_namespace'),
+            ('CgroupnsMode','host','cgroup_namespace'),('GroupAdd',[1],'supplementary_groups'),
+            ('Binds',['PRIVATE_SENTINEL'],'bind_mounts'),('Devices',['PRIVATE_SENTINEL'],'devices'),
+            ('DeviceRequests',['PRIVATE_SENTINEL'],'device_requests'),('Mounts',['PRIVATE_SENTINEL'],'extra_mounts'),
+            ('LogConfig',{'Type':'json-file','Config':{}},'log_driver'),
+            ('RestartPolicy',{'Name':'always','MaximumRetryCount':0},'restart_policy'),
+            ('AutoRemove',True,'auto_remove'),('Ulimits',[],'ulimits'))
+        for profile,cpus in ((S.P.C.SEMANTIC_PROFILE,4_000_000_000),(S.P.C.EXTERNAL_PROFILE,2_000_000_000)):
+            for field,value,check in changes:
+                with self.subTest(profile=profile,field=field,value=value):
+                    rows=self.inspection(cpus);rows[0]['HostConfig'][field]=value
+                    self.check_inspection(profile,rows,check)
+            rows=self.inspection(cpus);rows[0]['HostConfig']['Tmpfs']['/tmp']+=',exec'
+            self.check_inspection(profile,rows,'tmpfs_options')
+            rows=self.inspection(cpus);rows[0]['Config']['User']='10001:10001'
+            self.check_inspection(profile,rows,'setup_user')
+
+    def test_creation_uses_profile_quota_and_preserves_all_other_arguments(self):
+        S=self.S
+        tmpfs={
+            '/etc/wholepact':'rw,noexec,nosuid,nodev,size=64k,mode=0755',
+            '/run/ci-account':'rw,noexec,nosuid,nodev,size=64k,mode=0755',
+            '/ci-fixture':'rw,noexec,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700',
+            '/run/ci-financial-wayland':'rw,noexec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700',
+            '/ci-financial-evidence':'rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700',
+            '/ci-financial-control':'rw,noexec,nosuid,nodev,size=1m,uid=10001,gid=10001,mode=0700',
+            '/tmp':'rw,noexec,nosuid,nodev,size=64m,mode=1777',
+            '/dev/shm':'rw,noexec,nosuid,nodev,size=128m,mode=1777'}
+        self.assertEqual(S.TMPFS,tmpfs)
+        for profile,cpus in ((S.P.C.SEMANTIC_PROFILE,'4'),(S.P.C.EXTERNAL_PROFILE,'2')):
+            candidate=dict(schema=1,profile=profile,native_oracle_verified=True,
+                fixture_cleaned=True,display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)
+            def command(args,stage,**kwargs):
+                kwargs['on_line'](b'CI_FINANCIAL_CANDIDATE '+json.dumps(candidate).encode())
+                return 0,b''
+            with self.subTest(profile=profile),mock.patch.object(S.I,'profile',return_value=profile), \
+                 mock.patch.object(S,'names',return_value=[]),mock.patch.object(S,'docker') as docker, \
+                 mock.patch.object(S,'inspect_isolation') as inspect, \
+                 mock.patch.object(S,'docker_env',return_value={}), \
+                 mock.patch.object(S,'remove_container') as remove, \
+                 mock.patch.object(S,'command',side_effect=command) as start:
+                result,passed=S.run_case('external','sha256:'+'a'*64,'token','b'*40)
+            self.assertEqual(result,candidate);self.assertTrue(passed)
+            name='wp-financial-token-external'
+            expected=['create','--pull','never','--name',name,'--label',S.LABEL+'=token',
+                '--label',S.SOURCE_LABEL+'='+'b'*40,'--network','none','--read-only','--cap-drop','ALL',
+                '--cap-add','SETUID','--cap-add','SETGID','--security-opt','no-new-privileges:true',
+                '--pids-limit','128','--memory','2g','--memory-swap','2g','--cpus',cpus,
+                '--ipc','private','--cgroupns','private','--ulimit','core=0:0','--ulimit','nofile=512:512',
+                '--log-driver','none','--restart','no']
+            for path,options in tmpfs.items():expected+=['--tmpfs',path+':'+options]
+            docker.assert_called_once_with(expected+['sha256:'+'a'*64],'container',limit=4096)
+            inspect.assert_called_once_with(name,'token','external','sha256:'+'a'*64,'b'*40)
+            remove.assert_called_once_with(name,'token')
+            self.assertEqual(start.call_args.args,(['docker','start','--attach',name],'runtime'))
+            self.assertEqual(start.call_args.kwargs['seconds'],1830)
+            self.assertEqual(start.call_args.kwargs['limit'],16384)
+
+    def test_unknown_profile_does_not_select_a_quota(self):
+        with mock.patch.object(self.S.I,'profile',return_value='unreviewed-profile'):
+            with self.assertRaises(self.S.Failure) as caught:self.S.runtime_cpu_limit()
+        self.assertEqual(caught.exception.check,'artifact_profile')
+
 
 if __name__=='__main__':unittest.main()
