@@ -3474,7 +3474,7 @@ class ReviewFailureObservationTests(unittest.TestCase):
  def test_schema_rejects_extra_unknown_bool_counts_and_inconsistent_state(self):
   import copy
   f,c,state,s=self.flow();good=f.review_diagnostic();F.C.validate_review_diagnostic(good)
-  changes=[dict(extra='private'),dict(version=1),dict(version=3),dict(semantics='Current'),dict(phase='Finished'),dict(owner=None),dict(generation=True),dict(widgets=[[False,True],[False,False],[True,False]]),dict(seek_counts=[66,0,0]),dict(seek_counts=[True,0,0]),dict(scroll_counts=[129,0,0]),dict(last_seek='private'),dict(operation='private'),dict(boundary='Returned'),dict(anchor='None',point_inside=True),dict(attempted=[1,False]),dict(operation='BodyDown',boundary='Returned',operation_generation=1,anchor='Arm',point_inside=True),dict(operation='OuterUp',boundary='Requested',operation_generation=1,anchor='Outer',point_inside=None),dict(operation_generation=1)]
+  changes=[dict(extra='private'),dict(version=1),dict(version=2),dict(semantics='Current'),dict(phase='Finished'),dict(owner=None),dict(generation=True),dict(widgets=[[False,True],[False,False],[True,False]]),dict(seek_counts=[66,0,0]),dict(seek_counts=[True,0,0]),dict(scroll_counts=[129,0,0]),dict(last_seek='private'),dict(operation='private'),dict(boundary='Returned'),dict(anchor='None',point_inside=True),dict(attempted=[1,False]),dict(operation='BodyDown',boundary='Returned',operation_generation=1,anchor='Arm',point_inside=True),dict(operation='OuterUp',boundary='Requested',operation_generation=1,anchor='Outer',point_inside=None),dict(operation_generation=1)]
   for changeset in changes:
    with self.subTest(changeset=changeset):
     with self.assertRaises(F.C.Rejected):F.C.validate_review_diagnostic(copy.deepcopy(good)|changeset)
@@ -3881,3 +3881,51 @@ class ExactPrefixValidationTests(unittest.TestCase):
   with (fixture.directory/'100.jsonl').open('ab') as f:f.write(json.dumps(fixture.record('UiSnapshot',changed,4)).encode()+b'\n')
   with self.assertRaises(O.C.Rejected):fixture.o.read()
   self.assertIsNone(fixture.o._semantic_active);self.assertFalse(any(old))
+
+class ReviewCostDiagnosticTests(unittest.TestCase):
+ def test_exact_calls_durations_failures_and_clock_failure_never_change_effect(self):
+  f,c,state,s=ReviewFailureObservationTests().flow();events=[]
+  with mock.patch.object(F.time,'monotonic_ns',side_effect=[10,25,30,50]):
+   self.assertEqual(f._review_timed('WheelInput',lambda:events.append('wheel') or 7,frame=s),7)
+   error=RuntimeError('original')
+   def fail():events.append('wait');raise error
+   with self.assertRaises(RuntimeError) as got:f._review_timed('RenderWait',fail,frame=s)
+  self.assertIs(got.exception,error);self.assertEqual(events,['wheel','wait'])
+  d=F.C.validate_review_diagnostic(f.review_diagnostic());self.assertEqual(d['costs']['WheelInput'],dict(attempted=1,returned=1,failed=0,total_ns=15,max_ns=15));self.assertEqual(d['costs']['RenderWait']['failed'],1)
+  with mock.patch.object(F.time,'monotonic_ns',side_effect=RuntimeError('clock')):
+   with self.assertRaises(RuntimeError) as got:f._review_timed('RenderWait',fail,frame=s)
+  self.assertIs(got.exception,error);self.assertIsNone(f.review_diagnostic()['costs']);self.assertEqual(events,['wheel','wait','wait'])
+  f._review_observed=[]
+  with self.assertRaises(RuntimeError) as got:f._review_timed('RenderWait',fail,frame=s)
+  self.assertIs(got.exception,error);f._note_review_source_size(s)
+  f,c,state,s=ReviewFailureObservationTests().flow();f.native.snapshot=mock.Mock(return_value=s);f.observer.read=mock.Mock(return_value=[]);f.observer.collection_diagnostic=mock.Mock(return_value=dict(semantics='LastSuccessfulCompletePrefix',source_records=3,source_complete_bytes=1200))
+  with mock.patch.object(F.time,'monotonic_ns',side_effect=[100,130,150,190]):self.assertEqual(f.snapshot(),s)
+  d=F.C.validate_review_diagnostic(f.review_diagnostic());self.assertEqual(d['costs']['NativeSnapshot']['total_ns'],30);self.assertEqual(d['costs']['ProofRead']['total_ns'],40);self.assertEqual(d['source_size']['source_complete_bytes'],1200);f.native.snapshot.assert_called_once();f.observer.read.assert_called_once()
+
+ def test_cross_phase_reset_no_nonreview_measurement_and_strict_numeric_schema(self):
+  import copy
+  f,c,state,s=ReviewFailureObservationTests().flow();other=dict(s,phase='Finished',owner=None)
+  with mock.patch.object(F.time,'monotonic_ns',side_effect=[10,20]):f._review_timed('NativeSnapshot',lambda:other,snapshot_result=True)
+  self.assertEqual(f.review_diagnostic()['costs']['NativeSnapshot']['attempted'],0)
+  with mock.patch.object(F.time,'monotonic_ns',side_effect=AssertionError('nonreview clock')):f._review_timed('ProofRead',lambda:[],frame=other)
+  f.note_review_observation(dict(s,phase='EntryReview',view_generation=s['view_generation']+1));good=F.C.validate_review_diagnostic(f.review_diagnostic());self.assertTrue(all(v['attempted']==0 for v in good['costs'].values()))
+  for key,value in [('attempted',True),('total_ns',-1),('max_ns',2**63),('returned',1)]:
+   bad=copy.deepcopy(good);bad['costs']['WheelInput'][key]=value
+   with self.assertRaises(F.C.Rejected):F.C.validate_review_diagnostic(bad)
+  worst=copy.deepcopy(good)
+  for row in worst['costs'].values():row.update(attempted=2**63-1,returned=2**63-1,failed=0,total_ns=2**63-1,max_ns=2**63-1)
+  worst['generation']=2**63-1;worst['source_size']=dict(semantics='LastSuccessfulCompletePrefix',source_records=F.C.MAX_RECORDS,source_complete_bytes=64*1024*1024)
+  F.C.validate_review_diagnostic(worst);self.assertLessEqual(len(json.dumps(worst,separators=(',',':')).encode()),2048)
+  bad=copy.deepcopy(good);bad['costs']['Private']={}
+  with self.assertRaises(F.C.Rejected):F.C.validate_review_diagnostic(bad)
+  good['source_size']=dict(semantics='LastSuccessfulCompletePrefix',source_records=1,source_complete_bytes=42);F.C.validate_review_diagnostic(good)
+  for v in (True,-1,64*1024*1024+1):
+   bad=copy.deepcopy(good);bad['source_size']['source_complete_bytes']=v
+   with self.assertRaises(F.C.Rejected):F.C.validate_review_diagnostic(bad)
+ def test_collection_size_latches_only_success_and_returns_detached_metadata(self):
+  with tempfile.TemporaryDirectory() as td:
+   p=pathlib.Path(td)/'100.jsonl';record=dict(schema=1,profile=O.C.PROFILE,role='Coordinator',sequence=1,elapsed_ns=0,kind='Birth',facts=dict(pid=100,parent_pid=99,parent_role=None));raw=json.dumps(record).encode()+b'\n';p.write_bytes(raw);p.chmod(0o600)
+   o=O.ObserverFiles(td,time.monotonic_ns()+1_000_000_000);self.assertIsNone(o.collection_diagnostic());o.read();d=o.collection_diagnostic();self.assertEqual(d,dict(semantics='LastSuccessfulCompletePrefix',source_records=1,source_complete_bytes=len(raw)));d['source_records']=99
+   p.write_bytes(raw+b'{}\n')
+   with self.assertRaises(O.C.Rejected):o.read()
+   self.assertEqual(o.collection_diagnostic()['source_records'],1)

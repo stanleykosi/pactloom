@@ -601,10 +601,12 @@ def validate_input_diagnostic(value):
 REVIEW_ROUTES={'V3PairReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3Pair'), 'V3EnrollmentReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3Enrollment'), 'V3ManifestReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3Manifest'), 'V3RedisclosureReadReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3RedisclosureRead'), 'V3RediscloseReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3Redisclose'), 'V3PrepareReadReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3PrepareRead'), 'V3ReceiveReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3Receive'), 'V3AdmitReadReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3AdmitRead'), 'V3AdmitReview': ('ReviewBody', 'ReviewAcknowledgement', 'ArmV3Admit'), 'V3AdmitReady': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3Admit'), 'V3AuditReview': ('ReviewBody', 'ReviewAcknowledgement', 'FinalV3Audit'), 'HistorySetupReview': ('ReviewBody', 'ReviewAcknowledgement', 'SetupHistory'), 'HistoryReview': ('ReviewBody', 'ReviewAcknowledgement', 'ServeHistory'), 'SetupReview': ('ReviewBody', 'ReviewAcknowledgement', 'Setup'), 'ActivateReadReview': ('ReviewBody', 'ReviewAcknowledgement', 'ActivateRead'), 'ActivateReview': ('ReviewBody', 'ReviewAcknowledgement', 'ActivateArm'), 'ActivateReady': ('ReviewBody', 'ReviewAcknowledgement', 'ActivateFinal'), 'WalletPrepareReview': ('ReviewBody', 'ReviewAcknowledgement', 'WalletPrepare'), 'WalletObserveReview': ('ReviewBody', 'ReviewAcknowledgement', 'WalletObserve'), 'SignReadReview': ('ReviewBody', 'ReviewAcknowledgement', 'SignRead'), 'SignExactReview': ('ReviewBody', 'ReviewAcknowledgement', 'SignExact'), 'ReturnReadReview': ('ReviewBody', 'ReviewAcknowledgement', 'ReturnRead'), 'ReturnExactReview': ('ReviewBody', 'ReviewAcknowledgement', 'ReturnExact'), 'NormalFinishReview': ('ReviewBody', 'ReviewAcknowledgement', 'NormalFinish'), 'V3Review': ('ReviewBody', None, 'ConfirmV3'), 'EntryReview': ('ReviewBody', None, 'EntryConfirm'), 'ReadReview': ('ReviewBody', None, 'ReadConfirm'), 'ContinueReview': ('ReviewBody', None, 'ContinueConfirm'), 'V3Confirm': ('ReviewBody', 'ReviewAcknowledgement', 'PasswordV3'), 'EntryConfirm': ('ReviewBody', 'ReviewAcknowledgement', 'EnterPassword'), 'ReadConfirm': ('ReviewBody', 'ReviewAcknowledgement', 'Read'), 'ContinueConfirm': ('ReviewBody', 'ReviewAcknowledgement', 'ArmContinue')}
 
 # Failure-only last validated controller review observation, never native authority.
+REVIEW_COST_BUCKETS=('NativeSnapshot','ProofRead','StableFrames','WheelInput','RenderWait')
+
 def validate_review_diagnostic(value):
     exact(value,('version','semantics','phase','subphase','owner','generation','widgets','seek_counts',
-                 'scroll_counts','attempted','owed_wheel','last_seek','operation','boundary','operation_generation','anchor','point_inside'))
-    require(type(value['version']) is int and value['version']==2)
+                 'scroll_counts','attempted','owed_wheel','last_seek','operation','boundary','operation_generation','anchor','point_inside','costs','source_size'))
+    require(type(value['version']) is int and value['version']==3)
     require(value['semantics']=='LastValidatedReview' and type(value['phase']) is str and value['phase'] in REVIEW_ROUTES and value['subphase']=='None')
     require((value['owner'] in ('Signer1','Signer2') or (value['owner'] is None and value['phase']=='NormalFinishReview')) and integer(value['generation'],1))
     ws=value['widgets'];require(type(ws) is list and len(ws)==3)
@@ -626,5 +628,17 @@ def validate_review_diagnostic(value):
     expected_anchor={'None':'None','AckPress':'Ack','ActionPress':'Action','OtherPress':'None','BodyDown':'Body','OuterUp':'Outer','OuterDown':'Outer','OtherScroll':'None'}
     require(value['anchor']==expected_anchor[value['operation']])
     require(value['point_inside'] is None if value['anchor']=='None' else type(value['point_inside']) is bool)
+    costs=value['costs']
+    if costs is not None:
+        exact(costs,REVIEW_COST_BUCKETS)
+        for row in costs.values():
+            exact(row,('attempted','returned','failed','total_ns','max_ns'))
+            require(all(integer(v) for v in row.values()))
+            require(row['attempted']==row['returned']+row['failed'] and row['max_ns']<=row['total_ns'])
+            require(row['attempted']>0 or row['total_ns']==row['max_ns']==0)
+    size=value['source_size']
+    if size is not None:
+        exact(size,('semantics','source_records','source_complete_bytes'))
+        require(size['semantics']=='LastSuccessfulCompletePrefix' and integer(size['source_records'],0,MAX_RECORDS) and integer(size['source_complete_bytes'],0,64*1024*1024))
     require(len(json.dumps(value,separators=(',',':')).encode())<=2048)
     return value
