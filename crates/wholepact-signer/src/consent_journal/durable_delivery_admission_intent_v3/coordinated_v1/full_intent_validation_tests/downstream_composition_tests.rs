@@ -146,8 +146,8 @@ fn fixture()->Shared {
         maximum_debit_zatoshis:a.maximum_debit_zatoshis,fee_share_zatoshis:a.fee_share_zatoshis,
         transaction_fee_zatoshis:a.transaction_fee_zatoshis,aggregate_budget_limit_zatoshis:snapshot.aggregate_budget_zatoshis,
         transaction_expiry_height:fixed.expiry_height,
-        wallet_snapshot:WalletSnapshotBinding {tip_height:evidence.context.tip_height,tip_hash:hex::encode(evidence.context.tip_hash),
-            anchor_height:evidence.context.anchor_height,anchor_hash:hex::encode(evidence.context.anchor_hash),anchor_root:hex::encode(evidence.context.anchor_root)},
+        wallet_snapshot:WalletSnapshotBinding {tip_height:evidence.context.tip_height,tip_hash:hex::encode(evidence.context.tip_hash_protocol),
+            anchor_height:evidence.context.anchor_height,anchor_hash:hex::encode(evidence.context.anchor_hash_protocol),anchor_root:hex::encode(evidence.context.anchor_root)},
         wallet_key_use_policy:Some(wholepact_wallet::WalletKeyUsePolicy {
             confidence:wholepact_wallet::WalletKeyUseConfidence::TrustedSingleProviderSnapshot,
             source_id:scope.delivery.provider.source_id.clone(),endpoint:scope.delivery.provider.endpoint.clone(),

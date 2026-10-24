@@ -1,14 +1,14 @@
-name: Essential handoff composition and staged runtime preflight only
+name: Correct exact composition fixture fields preflight only
 on:
   push:
-    branches: [checkpoint/handoff-composition-preflight-p59]
+    branches: [checkpoint/handoff-composition-preflight-p59b]
 permissions: {}
 concurrency:
-  group: handoff-composition-preflight-p59
+  group: handoff-composition-preflight-p59b
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/handoff-composition-preflight-p59' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/handoff-composition-preflight-p59b' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -175,7 +175,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/handoff-composition-preflight-p59' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/handoff-composition-preflight-p59b' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
