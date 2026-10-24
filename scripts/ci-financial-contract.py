@@ -191,9 +191,19 @@ def join_host_views(records, *, final=False):
     Identical fresh IDs can follow an unobserved discarded/hidden pass. Only
     source occurrence positions, not view IDs, decide whether input is new.
     """
-    active=None;pending=None;last_id=0;paired=0;sequence=0;generation=0
+    return _join_host_views_validated(_validated_host_records(records),final=final)
+
+def _validated_host_records(records):
+    # Preserve public validation/check interleaving and first-error precedence.
     for record in records:
         validate_record(record,SEMANTIC_PROFILE)
+        yield record
+
+def _join_host_views_validated(records, *, final=False):
+    # Private same-batch kernel: caller has validated each record already.
+    # No persistence, authority, skipped linkage, or cross-read cache.
+    active=None;pending=None;last_id=0;paired=0;sequence=0;generation=0
+    for record in records:
         if record['role']!='Coordinator':continue
         require(record['sequence']==sequence+1,'order');sequence=record['sequence']
         kind=record['kind'];facts=record['facts']
@@ -408,6 +418,10 @@ def native_failure_sequence(records,expected_profile):
     require(expected_profile in (PROFILE,EXTERNAL_PROFILE,SEMANTIC_PROFILE),'record_shape')
     require(type(records) is list and len(records)<=MAX_RECORDS,'record_limit')
     for record in records:validate_record(record,expected_profile)
+    return _native_failure_sequence_validated(records)
+
+def _native_failure_sequence_validated(records):
+    # Private aggregate over this read's fully validated, bounded batch only.
     rows=[r for r in records if r['role']=='Coordinator']
     boundaries=[r for r in rows if r['kind']=='NativeFailureBoundary']
     if not boundaries:return None
@@ -580,4 +594,31 @@ def validate_input_diagnostic(value):
         for row in rows:
             require(type(row) is list and len(row)==len(INPUT_WIDGET_TAGS))
             require(all(integer(v,0,5) for v in row))
+    return value
+
+
+# Failure-only last validated controller review observation, never native authority.
+def validate_review_diagnostic(value):
+    exact(value,('version','semantics','phase','subphase','owner','generation','widgets','seek_counts',
+                 'scroll_counts','attempted','owed_wheel','last_seek','operation','boundary','operation_generation','anchor','point_inside'))
+    require(type(value['version']) is int and value['version']==1)
+    require(value['semantics']=='LastValidatedReview' and value['phase']=='V3AdmitReview' and value['subphase']=='None')
+    require(value['owner'] in ('Signer1','Signer2') and integer(value['generation'],1))
+    ws=value['widgets'];require(type(ws) is list and len(ws)==3)
+    for pair in ws:
+        require(type(pair) is list and len(pair)==2 and all(type(v) is bool for v in pair) and (pair[0] or not pair[1]))
+    for key,limit in (('seek_counts',65),('scroll_counts',128)):
+        a=value[key];require(type(a) is list and len(a)==3 and all(integer(v,0,limit) for v in a))
+    require(type(value['attempted']) is list and len(value['attempted'])==2 and all(type(v) is bool for v in value['attempted']))
+    require(type(value['owed_wheel']) is bool)
+    require(value['last_seek'] in ('None','Body','Ack','Arm'))
+    require(value['operation'] in ('None','AckPress','ArmPress','OtherPress','BodyDown','OuterUp','OuterDown','OtherScroll'))
+    require(value['boundary'] in ('None','Requested','Returned') and value['anchor'] in ('None','Body','Outer','Ack','Arm'))
+    require(value['point_inside'] is None or type(value['point_inside']) is bool)
+    require((value['operation']=='None')==(value['boundary']=='None'))
+    require(value['operation_generation'] is None if value['operation']=='None' else integer(value['operation_generation'],1,value['generation']))
+    expected_anchor={'None':'None','AckPress':'Ack','ArmPress':'Arm','OtherPress':'None','BodyDown':'Body','OuterUp':'Outer','OuterDown':'Outer','OtherScroll':'None'}
+    require(value['anchor']==expected_anchor[value['operation']])
+    require(value['point_inside'] is None if value['anchor']=='None' else type(value['point_inside']) is bool)
+    require(len(json.dumps(value,separators=(',',':')).encode())<=2048)
     return value

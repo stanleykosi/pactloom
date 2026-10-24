@@ -258,6 +258,16 @@ def emit_cached_host_failure(flow):
     except Exception:return # best effort; preserve original failure and cleanup
 
 
+def emit_cached_review_failure(flow):
+    if flow is None:return
+    try:
+        value=flow.review_diagnostic()
+        if value is None:return
+        encoded=json.dumps(C.validate_review_diagnostic(value),separators=(',',':'))
+        print('CI_FINANCIAL_REVIEW_DIAGNOSTIC '+encoded,flush=True)
+    except Exception:return # No failure/result/cleanup replacement.
+
+
 def emit_cached_native_failure(flow):
     # No new read/clock/input here; unavailable cached evidence stays unavailable.
     if flow is None or flow.expected_profile!=C.SEMANTIC_PROFILE:return
@@ -339,6 +349,7 @@ def main():
         emit_cached_input_failure(flow,error)
         emit_cached_progress_failure(flow)
         emit_cached_host_failure(flow)
+        emit_cached_review_failure(flow)
         emit_cached_native_failure(flow)
         emit_cached_observation_timing_failure(flow)
         emit_cached_host_exit_failure(flow)

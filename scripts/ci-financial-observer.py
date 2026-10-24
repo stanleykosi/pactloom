@@ -86,10 +86,10 @@ class ObserverFiles:
                 C.require(self._roles.get(role,name)==name,'lineage');self._roles[role]=name
             self._files[name]=(identity,complete);records.extend(entries)
         C.require(not final or len(self._roles)==17,'observer_missing')
-        C.native_failure_sequence(records,self.expected_profile)
+        C._native_failure_sequence_validated(records)
         C.validate_host_exit_cardinality(records)
         C.validate_actor_cardinality(records)
-        if self.expected_profile==C.SEMANTIC_PROFILE:self._join_host_views(records)
+        if self.expected_profile==C.SEMANTIC_PROFILE:self._set_host_view(C._join_host_views_validated(records))
         return records
     @staticmethod
     def _unavailable_timing():
@@ -151,7 +151,8 @@ class ObserverFiles:
             self._semantic_active['text'][:]=b'\0'*len(self._semantic_active['text'])
         self._semantic_active=None
     def _join_host_views(self,records):
-        active=C.join_host_views(records)
+        self._set_host_view(C.join_host_views(records))
+    def _set_host_view(self,active):
         self._clear_host_view()
         if active is not None:
             self._semantic_active=copy.deepcopy(active)

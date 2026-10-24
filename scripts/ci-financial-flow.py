@@ -82,6 +82,7 @@ class FullFlow:
         else:
             self.native=S.NativeScenario(controller,fixture,observer.next_snapshot)
         self.done=set();self.filled=set();self.scrolls={};self.actions=0;self.host_lines=0
+        self._review_observed=None
         self.last_ocr=0;self.ocr_delay=1_000_000_000;self.last_capture=None;self.challenges=set();self.host_paths=set()
         self.reviewer_index=0;self.continue_index=0;self.result_index=0
         self.records=[];self.pending_host=None;self.location=None;self.pending_selection=None
@@ -97,6 +98,42 @@ class FullFlow:
         if self.expected_profile==C.SEMANTIC_PROFILE:
             self._startup_ceiling=min(self.fixture.deadline_ns,time.monotonic_ns()+C.ACTION_NS)
             S.K.Controller.install_wait_ceiling(controller,self.startup_wait_ceiling)
+    def note_review_observation(self,s,*,seek=None,operation=None,boundary=None,anchor=None,point=None):
+        # Best-effort projection only. No reads, clocks, input, or control checks.
+        # The last validated review frame is retained across terminal/reset frames.
+        try:
+            if (s['phase'],s['subphase'])!=('V3AdmitReview','None') or s['owner'] not in ('Signer1','Signer2'):return
+            owner=s['owner'];tags=('ReviewBody','ReviewAcknowledgement','ArmV3Admit')
+            old=self._review_observed
+            same=old is not None and old['owner']==owner
+            value=dict(version=1,semantics='LastValidatedReview',phase='V3AdmitReview',subphase='None',
+                owner=owner,generation=s['view_generation'],widgets=[],
+                seek_counts=[self.scrolls.get(('V3AdmitReview','None','seek',t,owner),0) for t in tags],
+                scroll_counts=[self.scrolls.get(('V3AdmitReview','None',t,o,d),0) for t,o,d in
+                    (('ScrollRegion',None,'up'),('ScrollRegion',None,'down'),('ReviewBody',owner,'down'))],
+                attempted=[self.used(s,t,owner) for t in tags[1:]],
+                owed_wheel=('V3AdmitReview','None','review-scroll-pending','ArmV3Admit',owner,'ReviewBody') in self.scrolls,
+                last_seek=old['last_seek'] if same else 'None',
+                operation=old['operation'] if same else 'None',boundary=old['boundary'] if same else 'None',
+                operation_generation=old['operation_generation'] if same else None,
+                anchor=old['anchor'] if same else 'None',point_inside=old['point_inside'] if same else None)
+            for tag in tags:
+                w=self.find(s,tag,owner);value['widgets'].append([w is not None,False if w is None else w['enabled']])
+            if seek is not None:value['last_seek']={'ReviewBody':'Body','ReviewAcknowledgement':'Ack','ArmV3Admit':'Arm'}.get(seek,'None')
+            # Operation geometry belongs to this pre-effect observation, not a
+            # later cached widget frame. Returned means call+wait returned only.
+            if operation is not None:value.update(operation=operation,boundary=boundary,anchor=anchor,point_inside=None,operation_generation=s['view_generation'])
+            if point is not None and anchor in ('Body','Outer','Ack','Arm'):
+                tag,who={'Body':('ReviewBody',owner),'Outer':('ScrollRegion',None),'Ack':('ReviewAcknowledgement',owner),'Arm':('ArmV3Admit',owner)}[anchor]
+                w=self.find(s,tag,who)
+                if w is not None:
+                    x0,y0,x1,y1=w['rect'];scale=s['pixels_per_point'];x,y=point
+                    value['point_inside']=x0*scale<x<x1*scale and y0*scale<y<y1*scale
+            self._review_observed=value
+        except Exception:pass # Diagnostic failure cannot alter original inputs or failure.
+    def review_diagnostic(self):
+        # Deep copy only; not current-at-failure state or proof of input acceptance.
+        return None if self._review_observed is None else json.loads(json.dumps(self._review_observed))
     def startup_wait_ceiling(self):
         # Read-only: observations, captures and navigation never renew this bound.
         return self._startup_ceiling
@@ -126,6 +163,7 @@ class FullFlow:
                 capture_context=capture_context))
     def snapshot(self):
         self.fixture.check();snapshot=self.native.snapshot()
+        self.note_review_observation(snapshot)
         self.cache_host_observation(snapshot['host_observation'])
         # next_snapshot may observe later records while awaiting a fresh frame.
         # Refresh AFTER that read: Finished is not normal-completion proof, and
@@ -154,10 +192,16 @@ class FullFlow:
         # Two real later frames before one effect. Repeated observations may wait;
         # an attempted effect is latched BEFORE send and never retried.
         latest=self.native.stable(s['phase'],s['owner'],protected=s['secret_input'] or s['host_input'])
+        self.note_review_observation(latest)
         C.require(latest['subphase']==s['subphase'],'input_phase')
         w=self.find(latest,tag,owner);C.require(w is not None and w['enabled'],'input_disabled')
-        self.done.add(key);self.actions+=1;C.input_budget(self.actions<=512,'actions',self.actions)
-        self.controller.click(*self.native.point(latest,tag,owner));self.controller.wait_render_progress()
+        self.done.add(key);self.actions+=1
+        self.note_review_observation(latest)
+        C.input_budget(self.actions<=512,'actions',self.actions)
+        point=self.native.point(latest,tag,owner)
+        self.note_review_observation(latest,operation='AckPress' if tag=='ReviewAcknowledgement' else 'ArmPress' if tag=='ArmV3Admit' else 'OtherPress',boundary='Requested',anchor='Ack' if tag=='ReviewAcknowledgement' else 'Arm' if tag=='ArmV3Admit' else 'None',point=point)
+        self.controller.click(*point);self.controller.wait_render_progress()
+        self.note_review_observation(latest,operation='AckPress' if tag=='ReviewAcknowledgement' else 'ArmPress' if tag=='ArmV3Admit' else 'OtherPress',boundary='Returned',anchor='Ack' if tag=='ReviewAcknowledgement' else 'Arm' if tag=='ArmV3Admit' else 'None',point=point)
     def selection_handoff_pending(self,s):
         if self.pending_selection is None:return False
         key=(s['phase'],s['subphase'],s['owner'])
@@ -177,6 +221,7 @@ class FullFlow:
         if w is None:return False
         key=(s['phase'],s['subphase'],body,owner,direction)
         count=self.scrolls.get(key,0);C.input_budget(count<128,'scroll',count);self.scrolls[key]=count+1
+        self.note_review_observation(s)
         action=self.controller.scroll_up if direction=='up' else self.controller.scroll_down
         point=self.native.point(s,body,owner)
         if body=='ScrollRegion':
@@ -185,18 +230,26 @@ class FullFlow:
             points=[(x1-3,y0+5+(y1-y0-10)*i/8) for i in range(9)]
             clear=next(((x,y) for x,y in points if not any(a<=x<=c and b<=y<=d for a,b,c,d in inners)),None)
             C.require(clear is not None,'input_widget');point=tuple(int(v*scale) for v in clear)
-        action(*point);self.controller.wait_render_progress();return True
+        operation='BodyDown' if body=='ReviewBody' and direction=='down' else 'OuterUp' if body=='ScrollRegion' and direction=='up' else 'OuterDown' if body=='ScrollRegion' else 'OtherScroll'
+        anchor='Body' if operation=='BodyDown' else 'Outer' if operation in ('OuterUp','OuterDown') else 'None'
+        self.note_review_observation(s,operation=operation,boundary='Requested',anchor=anchor,point=point)
+        action(*point);self.controller.wait_render_progress()
+        self.note_review_observation(s,operation=operation,boundary='Returned',anchor=anchor,point=point)
+        return True
     def seek(self,s,tag,owner):
+        self.note_review_observation(s,seek=tag)
         if self.find(s,tag,owner) is not None:return True
         # Ordinary native wheel search only; no click on an invented rectangle.
         key=(s['phase'],s['subphase'],'seek',tag,owner)
         count=self.scrolls.get(key,0);self.scrolls[key]=count+1
+        self.note_review_observation(s,seek=tag)
         C.require(count<64,'input_widget')
         direction='up' if count<24 else 'down'
         if s['phase']=='V3AdmitReview' and s['subphase']=='None' and tag in ('ReviewBody','ReviewAcknowledgement','ArmV3Admit'):
             # Actual native order is body, acknowledgement, Arm. An owed body
             # scroll must not turn downward after repeated action/body trips.
             latest=self.native.stable(s['phase'],s['owner'])
+            self.note_review_observation(latest,seek=tag)
             h=latest['host_observation'];old=s['host_observation']
             C.require(latest['subphase']==s['subphase'] and owner==latest['owner']
                       and owner in ('Signer1','Signer2'),'input_phase')
@@ -286,6 +339,7 @@ class FullFlow:
         self.controller.click(*self.native.point(latest,tag,owner));self.controller.clear_field()
         self.controller.type_ascii(value);return False
     def review(self,s,action,owner,*,ack='ReviewAcknowledgement',body='ReviewBody'):
+        self.note_review_observation(s)
         if s['secret_input'] or s['host_input']:return False
         if self.used(s,action,owner):return False
         checkbox=self.find(s,ack,owner) if ack else None
@@ -301,13 +355,16 @@ class FullFlow:
                 self.press(s,action,owner);return True
             if button is None:return not self.seek(s,action,owner)
             self.scrolls[pending]=1
+            self.note_review_observation(s)
         # Remember only an owed ordinary wheel gesture, not read completion.
         # The disabled action and review body may occupy disjoint viewports.
         # Re-seek the action only after the actual body scroll has completed.
         observed_body=self.find(s,body,owner)
         if observed_body is not None and not observed_body['enabled']:return False
         if self.scroll(s,body,owner):
-            del self.scrolls[pending];return True
+            del self.scrolls[pending]
+            self.note_review_observation(s)
+            return True
         return not self.seek(s,body,owner)
     def paired_admission(self,s,owner):
         # Native paired_approved requires BOTH complete reviews and BOTH

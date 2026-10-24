@@ -3437,3 +3437,123 @@ class AdmitReviewNavigationTests(unittest.TestCase):
    v=original(deadline);v['widgets']=v['widgets'][:1];return v
   f.native.next_snapshot=snapshot;s=f.native.snapshot()
   self.assertFalse(f.seek(s,'ArmV3Admit','Signer1'));self.assertEqual(c.scroll_up.call_count,1);c.scroll_down.assert_not_called();c.click.assert_not_called()
+
+class ReviewFailureObservationTests(unittest.TestCase):
+ def flow(self):
+  f,c,state=AdmitReviewNavigationTests().guarded_model();s=f.native.snapshot();f.note_review_observation(s);return f,c,state,s
+ def test_snapshot_is_cached_without_read_or_input_and_survives_other_phase(self):
+  f,c,state,s=self.flow();before=f.review_diagnostic();self.assertEqual(before['widgets'],[[False,False],[False,False],[True,False]])
+  f.scrolls={};f.note_review_observation(dict(s,phase='Finished',owner=None));self.assertEqual(f.review_diagnostic(),before)
+  f.native.snapshot=mock.Mock(side_effect=AssertionError('no read'));f.controller.reset_mock()
+  d=f.review_diagnostic();d['widgets'][2][1]=True
+  self.assertEqual(f.review_diagnostic(),before);self.assertEqual(c.mock_calls,[]);f.native.snapshot.assert_not_called()
+ def test_existing_counters_pending_and_attempted_are_exact_not_authority(self):
+  f,c,state,s=self.flow();owner='Signer1'
+  for tag,n in zip(('ReviewBody','ReviewAcknowledgement','ArmV3Admit'),(65,7,9)):f.scrolls[('V3AdmitReview','None','seek',tag,owner)]=n
+  for tag,o,d,n in (('ScrollRegion',None,'up',128),('ScrollRegion',None,'down',11),('ReviewBody',owner,'down',23)):f.scrolls[('V3AdmitReview','None',tag,o,d)]=n
+  f.scrolls[('V3AdmitReview','None','review-scroll-pending','ArmV3Admit',owner,'ReviewBody')]=1
+  f.done.add(('V3AdmitReview','None','ReviewAcknowledgement',owner,None));f.note_review_observation(s)
+  d=F.C.validate_review_diagnostic(f.review_diagnostic());self.assertEqual(d['seek_counts'],[65,7,9]);self.assertEqual(d['scroll_counts'],[128,11,23]);self.assertEqual(d['attempted'],[True,False]);self.assertTrue(d['owed_wheel'])
+  self.assertLess(len(json.dumps(d).encode()),2048)
+ def test_wheel_requested_vs_returned_and_integer_inside_is_only_observation(self):
+  f,c,state,s=self.flow();f.scroll(s,'ScrollRegion',None,'up');d=f.review_diagnostic()
+  self.assertEqual((d['operation'],d['boundary'],d['anchor'],d['point_inside']),('OuterUp','Returned','Outer',True))
+  operation_generation=d['operation_generation'];later=dict(s,view_generation=s['view_generation']+10,widgets=s['widgets'][:1]);f.note_review_observation(later)
+  self.assertEqual(f.review_diagnostic()['operation_generation'],operation_generation);self.assertEqual(f.review_diagnostic()['generation'],later['view_generation'])
+  original=RuntimeError('original');c.scroll_down.side_effect=original
+  with self.assertRaises(RuntimeError) as got:f.scroll(s,'ScrollRegion',None,'down')
+  self.assertIs(got.exception,original);self.assertEqual(f.review_diagnostic()['boundary'],'Requested')
+ def test_press_latch_and_request_remain_after_original_input_failure(self):
+  f,c,state,s=self.flow();original=f.native.next_snapshot
+  def snapshot(deadline):
+   v=original(deadline);v['widgets'].append(dict(tag='ReviewAcknowledgement',owner='Signer1',enabled=True,rect=[20,620,800,650]));return v
+  f.native.next_snapshot=snapshot;error=RuntimeError('original');c.click.side_effect=error
+  with self.assertRaises(RuntimeError) as got:f.press(s,'ReviewAcknowledgement','Signer1')
+  self.assertIs(got.exception,error);d=f.review_diagnostic();self.assertEqual(d['attempted'],[True,False]);self.assertEqual((d['operation'],d['boundary']),('AckPress','Requested'))
+ def test_schema_rejects_extra_unknown_bool_counts_and_inconsistent_state(self):
+  import copy
+  f,c,state,s=self.flow();good=f.review_diagnostic();F.C.validate_review_diagnostic(good)
+  changes=[dict(extra='private'),dict(version=2),dict(semantics='Current'),dict(phase='Finished'),dict(owner=None),dict(generation=True),dict(widgets=[[False,True],[False,False],[True,False]]),dict(seek_counts=[66,0,0]),dict(seek_counts=[True,0,0]),dict(scroll_counts=[129,0,0]),dict(last_seek='private'),dict(operation='private'),dict(boundary='Returned'),dict(anchor='None',point_inside=True),dict(attempted=[1,False]),dict(operation='BodyDown',boundary='Returned',operation_generation=1,anchor='Arm',point_inside=True),dict(operation='OuterUp',boundary='Requested',operation_generation=1,anchor='Outer',point_inside=None),dict(operation_generation=1)]
+  for changeset in changes:
+   with self.subTest(changeset=changeset):
+    with self.assertRaises(F.C.Rejected):F.C.validate_review_diagnostic(copy.deepcopy(good)|changeset)
+ def test_container_failure_output_has_no_payload_and_broken_stdout_is_best_effort(self):
+  import io,contextlib
+  f,c,state,s=self.flow();container=F.load('ci-financial-container');out=io.StringIO();f.native.snapshot=mock.Mock(side_effect=AssertionError('new read'))
+  with contextlib.redirect_stdout(out):container.emit_cached_review_failure(f)
+  line=out.getvalue();self.assertTrue(line.startswith('CI_FINANCIAL_REVIEW_DIAGNOSTIC '));F.C.validate_review_diagnostic(json.loads(line.split(' ',1)[1]))
+  for forbidden in ('rect','text','report','revision','nonws','deadline'):self.assertNotIn('"'+forbidden+'"',line)
+  with mock.patch('builtins.print',side_effect=BrokenPipeError):container.emit_cached_review_failure(f)
+  f.native.snapshot.assert_not_called()
+ def test_supervisor_holds_until_failure_rejects_duplicate_success_and_post_result(self):
+  import io,contextlib
+  f,c,state,s=self.flow();sup=F.load('ci-financial-supervisor');line=b'CI_FINANCIAL_REVIEW_DIAGNOSTIC '+json.dumps(f.review_diagnostic()).encode();records=sup.RuntimeRecords('external');out=io.StringIO()
+  with contextlib.redirect_stdout(out):records(line)
+  self.assertEqual(out.getvalue(),'')
+  with self.assertRaises(sup.Failure):records(line)
+  candidate=dict(schema=1,profile=sup.P.C.EXTERNAL_PROFILE,native_oracle_verified=True,fixture_cleaned=True,display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)
+  with self.assertRaises(sup.Failure):records(b'CI_FINANCIAL_CANDIDATE '+json.dumps(candidate).encode())
+  with contextlib.redirect_stdout(out):records(b'CI_FINANCIAL_RESULT '+json.dumps(sup.P.failure('observer_failure')).encode())
+  self.assertIn('REVIEW_DIAGNOSTIC',out.getvalue());self.assertIn('FAILURE',out.getvalue())
+  with self.assertRaises(sup.Failure):records(line)
+ def test_observation_exception_does_not_change_existing_input_decision(self):
+  f,c,state,s=self.flow();f._review_observed={'owner':'Signer1'}
+  self.assertTrue(f.scroll(s,'ScrollRegion',None,'up'));self.assertEqual(c.scroll_up.call_count,1)
+
+class SameBatchValidationTests(unittest.TestCase):
+ def records(self,n=3):
+  p=O.C.SEMANTIC_PROFILE
+  records=[dict(schema=1,profile=p,role='Coordinator',sequence=1,elapsed_ns=0,kind='Birth',facts=dict(pid=100,parent_pid=99,parent_role=None))]
+  for i in range(1,n+1):
+   facts=observed_snapshot(phase='V3AdmitReview',subphase='None',owner='Signer1',view_generation=i,focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=[],host_view_id=None)
+   records.append(dict(schema=1,profile=p,role='Coordinator',sequence=i+1,elapsed_ns=i,kind='UiSnapshot',facts=facts))
+  return records
+ def test_exact_original_public_algorithm_restored_from_private_kernels(self):
+  import ast,copy,hashlib,inspect,textwrap
+  def node(name):return ast.parse(textwrap.dedent(inspect.getsource(getattr(O.C,name)))).body[0]
+  n=node('native_failure_sequence');k=node('_native_failure_sequence_validated');n.body=n.body[:-1]+k.body
+  self.assertEqual(hashlib.sha256(ast.dump(n,include_attributes=False).encode()).hexdigest(),'74a84768ea9b7a2c9a01535264fd3a0b313fa990a83bf317e6038fbf7b569049')
+  n=node('join_host_views');k=node('_join_host_views_validated');n.body=n.body[:-1]+k.body
+  loop=next(x for x in n.body if isinstance(x,ast.For));loop.body.insert(0,ast.parse('validate_record(record,SEMANTIC_PROFILE)').body[0])
+  self.assertEqual(hashlib.sha256(ast.dump(n,include_attributes=False).encode()).hexdigest(),'c5d82bfd641b5752a1fcc060e9a8586f56f5ff1a4affb2cc2546ae60da6a0b1a')
+ def test_public_raw_validation_and_competing_error_order_preserved(self):
+  import copy
+  records=self.records();records[0]['sequence']=2;records.append({'malformed':True})
+  with self.assertRaises(O.C.Rejected) as e:O.C.join_host_views(records)
+  self.assertEqual(e.exception.code,'order')
+  with self.assertRaises(O.C.Rejected) as e:O.C.native_failure_sequence(records,O.C.SEMANTIC_PROFILE)
+  self.assertEqual(e.exception.code,'record_shape')
+  for records in ([{}],self.records()+[{}]):
+   with self.assertRaises(O.C.Rejected):O.C.join_host_views(records)
+   with self.assertRaises(O.C.Rejected):O.C.native_failure_sequence(records,O.C.SEMANTIC_PROFILE)
+ def test_private_kernels_equal_public_results_for_valid_batch(self):
+  r=self.records();self.assertEqual(O.C.native_failure_sequence(r,O.C.SEMANTIC_PROFILE),O.C._native_failure_sequence_validated(r))
+  self.assertEqual(O.C.join_host_views(r),O.C._join_host_views_validated(r))
+  for final in (False,True):
+   outcomes=[]
+   for fn in (O.C.join_host_views,O.C._join_host_views_validated):
+    try:outcomes.append(('ok',fn(r,final=final)))
+    except O.C.Rejected as e:outcomes.append(('error',e.code))
+   self.assertEqual(*outcomes)
+ def test_each_read_validates_every_record_once_and_returns_fresh_objects(self):
+  from unittest import mock
+  with tempfile.TemporaryDirectory() as td:
+   p=pathlib.Path(td)/'100.jsonl';r=self.records(100);p.write_bytes(b''.join(json.dumps(x).encode()+b'\n' for x in r));p.chmod(0o600)
+   o=O.ObserverFiles(td,time.monotonic_ns()+5_000_000_000,O.C.SEMANTIC_PROFILE)
+   with mock.patch.object(O.C,'validate_record',wraps=O.C.validate_record) as validate:
+    a=o.read();self.assertEqual(validate.call_count,len(r));a[1]['facts']['widgets'].append({'untrusted':'caller mutation'})
+    b=o.read();self.assertEqual(validate.call_count,2*len(r));self.assertEqual(b,r)
+   fixture=mock.Mock();fixture.deadline_ns=o.deadline_ns;flow=F.FullFlow(mock.Mock(),fixture,o,None)
+   with mock.patch.object(O.C,'validate_record',wraps=O.C.validate_record) as validate,mock.patch.object(o,'read',wraps=o.read) as reads:
+    self.assertEqual(flow.snapshot()['view_generation'],100)
+    self.assertEqual(reads.call_count,2);self.assertEqual(validate.call_count,2*len(r))
+   p.write_bytes(p.read_bytes().replace(b'"Signer1"',b'"Signer2"',1))
+   with self.assertRaises(O.C.Rejected):o.read()
+ def test_malformed_initial_batch_never_reaches_private_kernels(self):
+  from unittest import mock
+  with tempfile.TemporaryDirectory() as td:
+   p=pathlib.Path(td)/'100.jsonl';p.write_bytes(json.dumps(self.records()[0]).encode()+b'\n{}\n');p.chmod(0o600)
+   o=O.ObserverFiles(td,time.monotonic_ns()+5_000_000_000,O.C.SEMANTIC_PROFILE)
+   with mock.patch.object(O.C,'_native_failure_sequence_validated') as native,mock.patch.object(O.C,'_join_host_views_validated') as join:
+    with self.assertRaises(O.C.Rejected):o.read()
+    native.assert_not_called();join.assert_not_called();self.assertIsNone(o._semantic_active)

@@ -97,7 +97,7 @@ class CheckoutBoundaryTests(unittest.TestCase):
 
 
 class FixedPolicyTests(unittest.TestCase):
-    def test_only_two_exact_reviewed_harness_deltas_are_accepted(self):
+    def test_only_six_exact_reviewed_harness_deltas_are_accepted(self):
         producer = {name: 'a' * 64 for name in R.H_CHANGES}
         producer.update({'Cargo.lock': 'b' * 64, 'crates/native/src/lib.rs': 'c' * 64,
                          **{name: 'd' * 64 for name in R.A.BUILD_SCRIPTS}})
@@ -107,7 +107,7 @@ class FixedPolicyTests(unittest.TestCase):
                     {**harness, R.A.BUILD_SCRIPTS[0]: 'f' * 64},
                     {**harness, 'crates/native/src/lib.rs': 'f' * 64},
                     {**harness, 'new.py': 'f' * 64}, producer,
-                    {**harness, 'scripts/ci-financial-flow.py': 'f' * 64}):
+                    *({**harness, name: 'f' * 64} for name in R.H_CHANGES)):
             with self.subTest(paths=set(bad) - set(producer)):
                 with self.assertRaises(R.Rejected): R.equivalent(producer, bad)
 
@@ -138,8 +138,10 @@ class FixedPolicyTests(unittest.TestCase):
         self.assertEqual(R.PINS['artifact_id'], 12558673936)
         self.assertEqual(R.A.MANIFEST_VERSION, 2)
         self.assertEqual(R.A.recipe(R.PROFILE)['build_recipe_version'], 3)
-        self.assertEqual(set(R.H_CHANGES), {'scripts/ci-financial-flow.py',
-                                           'scripts/tests/test_ci_financial_observer.py'})
+        self.assertEqual(set(R.H_CHANGES), {
+            'scripts/ci-financial-container.py', 'scripts/ci-financial-contract.py',
+            'scripts/ci-financial-flow.py', 'scripts/ci-financial-observer.py',
+            'scripts/ci-financial-supervisor.py', 'scripts/tests/test_ci_financial_observer.py'})
         source = (HERE / 'ci-financial-p59b-reuse.py').read_text()
         self.assertNotIn('S.build_inputs(', source)
         self.assertNotIn('S.same_job_inputs(', source)
@@ -347,6 +349,17 @@ class CleanupChildTests(unittest.TestCase):
             finally:
                 for child in children:
                     if child.poll() is None: os.killpg(child.pid, signal.SIGKILL); child.wait(timeout=5)
+
+    def test_exact_cleanup_annex_rejects_mutation_before_snapshot_or_spawn(self):
+        sources = {name: b'financial-semantic\n' if name == 'qualification-gate-mode' else
+                   (HERE / name).read_bytes() for name in R.CLEANUP_PINS}
+        self.assertEqual(len(sources), 10)
+        for name in ('ci-financial-contract.py', 'ci-financial-supervisor.py'):
+            with self.subTest(name=name), \
+                 patch.object(R.tempfile, 'mkdtemp', side_effect=AssertionError('no snapshot before verification')), \
+                 patch.object(R, 'cleanup_process', side_effect=AssertionError('no child before verification')):
+                with self.assertRaisesRegex(R.Rejected, '^cleanup_closure$'):
+                    R.trusted_cleanup({**sources, name: sources[name] + b'# changed\n'})
 
     def test_pinned_cleanup_snapshot_and_child_environment_are_isolated(self):
         sources = {name: b'financial-semantic\n' if name == 'qualification-gate-mode' else
