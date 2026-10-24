@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed P51 typechecks and selected maintained synthetic tests; no fullflow or artifact export."""
+"""Fixed P52 typechecks and selected maintained synthetic tests; no fullflow or artifact export."""
 import importlib.util,json,os,pathlib,shutil,time
 HERE=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('preflight_supervisor',HERE/'ci-financial-supervisor.py');S=importlib.util.module_from_spec(spec);spec.loader.exec_module(S)
@@ -185,6 +185,85 @@ def run_handoff_security_tests(root,env):
         print('CI_HANDOFF_SECURITY_TEST '+json.dumps(dict(name=name,passed=True,ignored=0),sort_keys=True))
     print('CI_HANDOFF_SECURITY_TESTS '+json.dumps(dict(actual_maintained_tests=len(HANDOFF_SECURITY_TESTS),passed=True,genuine_pair_or_final_fixture=False,fullflow=False),sort_keys=True))
     return len(HANDOFF_SECURITY_TESTS)
+FIXTURE_TARGETS={
+    'authority':('wholepact-authority',('born-offline-witness-owner','default','native-witness-owner','offline-witness-owner','pending-birth-foundation','synthetic-qualification'),('wholepact-native-host','wholepact-signer'),(
+        'native_witness_owner::window::ephemeral_fixture_v1::coordinated_history_lifetime_v1::tests::fixed_service_survives_121_without_renewing_original_cutoff',
+        'native_witness_owner::window::ephemeral_fixture_v1::coordinated_history_lifetime_v1::tests::original_source_and_actual_policy_caps_only_narrow',
+        'native_witness_owner::window::ephemeral_fixture_v1::coordinated_history_lifetime_v1::tests::expired_zero_or_oversized_original_cutoff_is_refused',
+        'native_witness_owner::window::ephemeral_fixture_v1::coordinated_history_lifetime_v1::tests::wrong_owner_and_owner_drop_revoke_existing_scope',
+        'native_witness_owner::window::ephemeral_fixture_v1::coordinated_history_lifetime_v1::tests::wall_rollback_and_expiry_refuse_without_refresh',
+        'native_witness_owner::window::ephemeral_fixture_v1::coordinated_history_lifetime_v1::tests::later_stage_wall_drift_cannot_refresh_narrower_policy_cap',
+        'native_witness_owner::window::ephemeral_fixture_v1::coordinated_history_lifetime_v1::tests::late_stage_cannot_restart_expired_fixture_or_source',
+        'native_witness_owner::window::ephemeral_fixture_v1::acceptance_gate_tests::sealed_synthetic_server_gate_never_calls_accept_or_resumes',
+        'native_witness_owner::window::ephemeral_fixture_v1::acceptance_gate_tests::sealing_synthetic_server_gate_never_renews_expired_or_stopped_owner',
+    )),
+    'pristine-host':('wholepact-native-host',('durable-proposal','financial-runtime','manual-admission','synthetic-born-joined-qualification'),('wholepact-native-host','wholepact-signer'),(
+        'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::coordinated_external_witness_v1::request_selector_tests::exact_second_owner_selector_parses_without_creating_permission',
+        'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::coordinated_external_witness_v1::request_selector_tests::owner_one_request_cannot_be_relabelled_for_owner_two',
+        'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::coordinated_external_witness_v1::request_selector_tests::request_bytes_cannot_change_under_retained_commitment',
+        'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::coordinated_external_witness_v1::request_selector_tests::selector_rejects_wrong_profile_unknown_fields_and_oversize_request',
+        'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::coordinated_external_witness_v1::tests::request_selector_is_closed_and_is_not_a_permission',
+        'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::coordinated_external_witness_v1::tests::external_observation_has_no_request_or_grant_payload',
+        'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::coordinated_full_fixture_v1::tests::metadata_requires_original_hash_shape',
+        'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::coordinated_full_fixture_v1::tests::source_metadata_is_closed',
+    )),
+}
+def fixture_test_executable(raw,target,kind):
+    assert kind in FIXTURE_TARGETS
+    crate,features,scripts,_=FIXTURE_TARGETS[kind]
+    rows=[json.loads(line) for line in raw.splitlines() if line.startswith(b'{')]
+    packages={};executables=[]
+    for row in rows:
+        if row.get('reason')!='compiler-artifact':continue
+        t=row.get('target',{});manifest=row.get('manifest_path','')
+        if t.get('kind')==['custom-build'] and pathlib.Path(manifest).is_relative_to(S.REPO):
+            script_crate=pathlib.Path(manifest).parent.name
+            assert script_crate in scripts and script_crate not in packages.values()
+            assert t.get('name')=='build-script-build' and t.get('src_path')==str(S.REPO/'crates'/script_crate/'build.rs')
+            packages[row['package_id']]=script_crate
+        if manifest!=str(S.REPO/'crates'/crate/'Cargo.toml') or row.get('executable') is None:continue
+        assert row.get('profile',{}).get('test') is True
+        assert t.get('kind')==['lib'] and t.get('name')==crate.replace('-','_') and t.get('src_path')==str(S.REPO/'crates'/crate/'src/lib.rs')
+        assert sorted(row.get('features',[]))==list(features)
+        executable=pathlib.Path(row['executable'])
+        assert executable.is_file() and not executable.is_symlink() and executable.resolve().is_relative_to(target.resolve())
+        assert str(executable) in row.get('filenames',[])
+        executables.append(executable)
+    assert len(executables)==1 and set(packages.values())==set(scripts)
+    seen=set()
+    for row in rows:
+        if row.get('reason')!='build-script-executed':continue
+        package=row.get('package_id');cfgs=row.get('cfgs');assert type(cfgs) is list
+        if package not in packages:
+            assert not any(c.startswith('wholepact_financial_') for c in cfgs);continue
+        assert package not in seen and cfgs==[]
+        assert row.get('linked_libs')==[] and row.get('linked_paths')==[] and row.get('env')==[]
+        out=pathlib.Path(row['out_dir']);assert out.is_dir() and not out.is_symlink() and out.resolve().is_relative_to(target.resolve());seen.add(package)
+    assert seen==set(packages)
+    return executables[0]
+def run_fixture_lifetime_tests(root,env):
+    selected=S.select_build_environment(env,'pristine-setup',S.A.SEMANTIC_PROFILE)
+    for _,_,_,names in FIXTURE_TARGETS.values():
+        assert names and len(set(names))==len(names)
+    args=['rustup','run','1.99.0','cargo','test','--locked','--lib','--no-run','--no-default-features','--message-format=json','-p','wholepact-native-host','-p','wholepact-authority','--features','wholepact-native-host/durable-proposal,wholepact-native-host/synthetic-born-joined-qualification']
+    raw=S.checked(args,'compile',env=selected,seconds=900,limit=32*1024*1024)
+    executables={kind:fixture_test_executable(raw,root/'target-shared',kind) for kind in FIXTURE_TARGETS}
+    deadline=time.monotonic()+120
+    def fixed(args):
+        remaining=deadline-time.monotonic();assert remaining>0
+        return S.checked(args,'compile',env=selected,seconds=min(30,remaining),limit=1024*1024).decode('utf-8',errors='strict')
+    entries=[(kind,name) for kind,(_,_,_,names) in FIXTURE_TARGETS.items() for name in names]
+    # Both targets' full fixed selections must exist before any test execution.
+    for kind,name in entries:
+        listing=fixed([str(executables[kind]),'--list','--exact',name])
+        assert [line for line in listing.splitlines() if line.endswith(': test')]==[name+': test']
+    for kind,name in entries:
+        output=fixed([str(executables[kind]),'--exact',name,'--test-threads=1'])
+        assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in output
+        print('CI_SERVICE_LIFETIME_TEST '+json.dumps(dict(target=kind,name=name,passed=True,ignored=0),sort_keys=True))
+    for kind,(_,_,_,names) in FIXTURE_TARGETS.items():
+        print('CI_SERVICE_LIFETIME_TESTS '+json.dumps(dict(target=kind,actual_maintained_tests=len(names),passed=True,full_fixture_execution=False,fullflow=False),sort_keys=True))
+    return len(entries)
 def main():
     root=pathlib.Path(os.environ['PREFLIGHT_ROOT']).resolve();assert root.is_dir()
     env=dict(PATH=os.environ['PATH'],HOME=str(root/'home'),CARGO_HOME=str(root/'cargo'),CARGO_TARGET_DIR=str(root/'target-shared'),CARGO_BUILD_JOBS='3',CARGO_INCREMENTAL='0',RUSTUP_HOME=os.environ['RUSTUP_HOME'],GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL='/dev/null',GIT_TERMINAL_PROMPT='0')
@@ -196,8 +275,8 @@ def main():
         for package in PACKAGES:args+=['-p',package]
         args+=['--features',','.join(FEATURES)]
         raw=S.checked(args,'compile',env=selected,seconds=900,limit=32*1024*1024)
-        validate(raw,root/'target-shared');executed=run_handoff_security_tests(root,env);absence=check_signer_absence(root,env);S.exact_source(sha)
-        print('CI_CLOSE_PREFLIGHT_CONTEXTS '+json.dumps(dict(schema_version=2,actual_test_contexts=list(PACKAGES),actual_semantic_script_crates=list(SCRIPTS),typecheck_passed=True,signer_observed_api_absent_profiles=absence,selected_maintained_tests_executed=executed,full_native_execution=False,fullflow=False),sort_keys=True))
+        validate(raw,root/'target-shared');executed=run_handoff_security_tests(root,env);fixture_executed=run_fixture_lifetime_tests(root,env);absence=check_signer_absence(root,env);S.exact_source(sha)
+        print('CI_CLOSE_PREFLIGHT_CONTEXTS '+json.dumps(dict(schema_version=2,actual_test_contexts=list(PACKAGES),actual_semantic_script_crates=list(SCRIPTS),typecheck_passed=True,signer_observed_api_absent_profiles=absence,selected_maintained_tests_executed=executed,fixture_lifetime_maintained_tests_executed=fixture_executed,full_native_execution=False,fullflow=False),sort_keys=True))
     except S.Failure as error:
         # Pre-credential compiler text only; same bounded sanitizer as fresh build.
         print('CI_CLOSE_PREFLIGHT_FAILURE '+json.dumps(dict(stage=error.stage,check=error.check,**S.build_failure_tail(error.output)),sort_keys=True))

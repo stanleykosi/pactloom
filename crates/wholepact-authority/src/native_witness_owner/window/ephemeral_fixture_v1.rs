@@ -55,6 +55,10 @@ mod public_control_navigation_v1;
 #[path = "ephemeral_fixture_v1/roster_v3.rs"]
 mod roster_v3;
 pub use roster_v3::EphemeralRosterAttemptV2;
+#[path = "ephemeral_fixture_v1/coordinated_history_lifetime_v1.rs"]
+mod coordinated_history_lifetime_v1;
+pub use coordinated_history_lifetime_v1::EphemeralCoordinatedHistoryLifetimeV1;
+use coordinated_history_lifetime_v1::ScopedHistoryClockV1;
 #[cfg(feature = "born-offline-witness-owner")]
 #[path = "ephemeral_fixture_v1/born_offline_v1.rs"]
 mod born_offline_v1;
@@ -442,7 +446,32 @@ impl EphemeralNativeWitnessV1 {
         self.window.input.enrollment_input()
     }
 
+    /// Passive synthetic service restriction, not an action or journal grant.
+    /// The caller passes the original child cutoff and original source expiry,
+    /// once before READY; each served ledger independently narrows this bound.
+    pub fn coordinated_history_lifetime_v1(&self, original_cutoff: Instant,
+        original_source_expires_at_ms: u64) -> Result<EphemeralCoordinatedHistoryLifetimeV1> {
+        if !self.window.can_select() || self.durable_delivery.historical_only {
+            return Err(AuthorityError::Permission);
+        }
+        EphemeralCoordinatedHistoryLifetimeV1::capture_at(
+            self.construction_client_scope_revoked.clone(), original_cutoff,
+            original_source_expires_at_ms, Instant::now(), crate::now_ms()?)
+    }
+
     fn serve_exact_server(&self, server: AuthorityServer) -> Result<EphemeralHistoryServerV1> {
+        self.serve_exact_server_inner(server, None)
+    }
+    fn serve_exact_server_until(&self, server: AuthorityServer,
+        lifetime: &EphemeralCoordinatedHistoryLifetimeV1, policy_expires_at_ms: u64,
+    ) -> Result<EphemeralHistoryServerV1> {
+        let scope = lifetime.for_policy_at(&self.construction_client_scope_revoked,
+            policy_expires_at_ms, Instant::now(), crate::now_ms()?)?;
+        self.serve_exact_server_inner(server, Some(scope))
+    }
+    fn serve_exact_server_inner(&self, server: AuthorityServer,
+        mut scope: Option<ScopedHistoryClockV1>,
+    ) -> Result<EphemeralHistoryServerV1> {
         // Keep the original bound endpoint for later independently reviewed
         // phases. Dropping a finite server closes its journal, not this owner.
         let listener = self
@@ -458,7 +487,8 @@ impl EphemeralNativeWitnessV1 {
         let serving_accept_gate = accept_gate.clone();
         // Capture once before spawn; neither sealing nor a later caller can
         // restart this original finite serving lifetime.
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let started = Instant::now();
+        let deadline = scope.as_ref().map_or(started + Duration::from_secs(120), |v| v.deadline());
         let installation = self.installation.clone();
         let thread = std::thread::Builder::new()
             .name("synthetic-original-witness-history".into())
@@ -466,10 +496,12 @@ impl EphemeralNativeWitnessV1 {
                 let _server_stopped = SyntheticServerStopped(stopped.clone());
                 let _retained_installation = installation;
                 while !stopped.load(Ordering::Acquire) && Instant::now() < deadline {
+                    if scope.as_mut().is_some_and(|v| v.check_current().is_err()) { break; }
                     // The gate covers only nonblocking accept. It is released
                     // before the maintained bounded TLS/authority handler runs.
                     match accept_while_unsealed(&serving_accept_gate, || listener.accept()) {
                         Ok(Some(Ok((socket, _)))) => {
+                            if scope.as_mut().is_some_and(|v| v.check_current().is_err()) { break; }
                             let _ = server.serve_connection(socket);
                         }
                         Ok(None) => std::thread::sleep(Duration::from_millis(2)),
@@ -488,6 +520,7 @@ impl EphemeralNativeWitnessV1 {
         Ok(EphemeralHistoryServerV1 {
             stop,
             accept_gate,
+            started,
             deadline,
             thread: Some(thread),
             listener_owner: self.listener.server_handles.clone(),
@@ -638,6 +671,7 @@ impl Drop for SyntheticServerStopped {
 pub struct EphemeralHistoryServerV1 {
     stop: Arc<AtomicBool>,
     accept_gate: Arc<Mutex<bool>>,
+    started: Instant,
     deadline: Instant,
     thread: Option<std::thread::JoinHandle<()>>,
     listener_owner: Arc<AtomicUsize>,
@@ -647,15 +681,12 @@ impl EphemeralHistoryServerV1 {
     /// Independent synthetic handle observations, not a coherent readiness or
     /// accepting proof. Returns capped age/remaining microseconds, the existing
     /// stop flag, optional thread completion, and a clamped/unavailable marker.
-    /// The start is derived from the same original 120-second constructor
-    /// interval; no server lifetime, socket, source check or gate is touched.
+    /// Uses the actual constructor start for either serving horizon; no server
+    /// lifetime, socket, source check or gate is touched.
     pub fn measurement_snapshot(&self) -> (Option<u64>, u64, bool, Option<bool>, bool) {
         const MAX_US: u128 = 600_000_000;
         let observed = Instant::now();
-        let age_us = self
-            .deadline
-            .checked_sub(Duration::from_secs(120))
-            .map(|started| observed.saturating_duration_since(started).as_micros());
+        let age_us = Some(observed.saturating_duration_since(self.started).as_micros());
         let remaining_us = self
             .deadline
             .saturating_duration_since(observed)

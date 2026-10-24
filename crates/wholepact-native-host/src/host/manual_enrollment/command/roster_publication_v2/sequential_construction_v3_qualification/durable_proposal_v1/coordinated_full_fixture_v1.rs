@@ -302,7 +302,7 @@ pub(super) fn preserve_completed_originals(
     let encoded = serde_json::to_vec(&control)?;
     write_new_private(&root.join(READY_FILE), &encoded)?;
     if let Some(witness) = live_witness.as_mut() {
-        super::coordinated_external_witness_v1::run(&terminal, witness, &account_ids, &root, cutoff)?;
+        super::coordinated_external_witness_v1::run(&terminal, witness, &account_ids, &root, cutoff, original.expiry_ms)?;
     } else {
         post_input_phase(&terminal, PostInputPhase::Ready)?;
         terminal.message("SYNTHETIC_COORDINATED_PRE_V3_ORIGINALS_READY=1\n")?;

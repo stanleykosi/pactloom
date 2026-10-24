@@ -128,3 +128,46 @@ class HandoffSecurityExecutionPreflightTests(unittest.TestCase):
      with self.assertRaises(AssertionError):C.run_handoff_security_tests(self.target,{})
     self.assertEqual(checked.call_args_list[0].kwargs['seconds'],900)
     for call in checked.call_args_list[1:]:self.assertLessEqual(call.kwargs['seconds'],30)
+
+class FixtureLifetimeExecutionPreflightTests(unittest.TestCase):
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.target=pathlib.Path(self.tmp.name);self.rows=[];self.executables={}
+  for crate in ('wholepact-native-host','wholepact-signer'):
+   package='path+file:///reviewed/'+crate+'#'+crate+'@0.1.0';out=self.target/crate;out.mkdir()
+   self.rows.extend([dict(reason='compiler-artifact',package_id=package,manifest_path=str(C.S.REPO/'crates'/crate/'Cargo.toml'),target=dict(kind=['custom-build'],name='build-script-build',src_path=str(C.S.REPO/'crates'/crate/'build.rs'))),dict(reason='build-script-executed',package_id=package,cfgs=[],linked_libs=[],linked_paths=[],env=[],out_dir=str(out))])
+  for kind,(crate,features,_,_) in C.FIXTURE_TARGETS.items():
+   exe=self.target/(crate+'-test');exe.write_bytes(b'not executed');self.executables[kind]=exe
+   self.rows.append(dict(reason='compiler-artifact',manifest_path=str(C.S.REPO/'crates'/crate/'Cargo.toml'),profile=dict(test=True),features=list(features),executable=str(exe),filenames=[str(exe)],target=dict(kind=['lib'],name=crate.replace('-','_'),src_path=str(C.S.REPO/'crates'/crate/'src/lib.rs'))))
+ def check(self,rows,kind):return C.fixture_test_executable(b'\n'.join(json.dumps(x).encode() for x in rows),self.target,kind)
+ def test_exact_pristine_two_targets_and_empty_cfg(self):
+  for kind in C.FIXTURE_TARGETS:self.assertEqual(self.check(self.rows,kind),self.executables[kind])
+ def test_wrong_test_identity_features_or_executable_rejected(self):
+  for index,kind in [(4,'authority'),(5,'pristine-host')]:
+   for field,value in [('profile',dict(test=1)),('features',[]),('executable','/outside'),('filenames',[])]:
+    rows=copy.deepcopy(self.rows);rows[index][field]=value
+    with self.assertRaises(AssertionError):self.check(rows,kind)
+   for field,value in [('kind',['bin']),('name','incorrect'),('src_path','/outside.rs')]:
+    rows=copy.deepcopy(self.rows);rows[index]['target'][field]=value
+    with self.assertRaises(AssertionError):self.check(rows,kind)
+   with self.assertRaises(AssertionError):self.check(self.rows+[self.rows[index]],kind)
+ def test_semantic_cfg_extra_consumer_and_script_side_effect_rejected(self):
+  for field,value in [('cfgs',['wholepact_financial_ci']),('env',[['X','Y']]),('linked_libs',['x']),('out_dir','/')]:
+   rows=copy.deepcopy(self.rows);rows[1][field]=value
+   with self.assertRaises(AssertionError):self.check(rows,'authority')
+  rows=copy.deepcopy(self.rows);rows[0]['manifest_path']=str(C.S.REPO/'crates/wholepact-financial-coordinator-origin/Cargo.toml')
+  with self.assertRaises(AssertionError):self.check(rows,'pristine-host')
+ def test_all_selected_names_listed_before_any_execution_and_failure_closed(self):
+  from unittest import mock
+  import contextlib,io
+  selected={kind:(crate,features,scripts,(kind+'::fixed',)) for kind,(crate,features,scripts,_) in C.FIXTURE_TARGETS.items()}
+  for bad in (None,'listing','ignored'):
+   outputs=[b'compiler',b'authority::fixed: test\n',b'pristine-host::fixed: test\n',b'test result: ok. 1 passed; 0 failed; 0 ignored;',b'test result: ok. 1 passed; 0 failed; 0 ignored;']
+   if bad=='listing':outputs[2]=b''
+   if bad=='ignored':outputs[3]=b'test result: ok. 0 passed; 0 failed; 1 ignored;'
+   with mock.patch.object(C,'FIXTURE_TARGETS',selected),mock.patch.object(C.S,'select_build_environment',return_value={}),mock.patch.object(C,'fixture_test_executable',side_effect=lambda raw,target,kind:self.executables[kind]),mock.patch.object(C.S,'checked',side_effect=outputs) as checked,contextlib.redirect_stdout(io.StringIO()):
+    if bad:
+     with self.assertRaises(AssertionError):C.run_fixture_lifetime_tests(self.target,{})
+    else:self.assertEqual(C.run_fixture_lifetime_tests(self.target,{}),2)
+    self.assertEqual(checked.call_args_list[0].kwargs['seconds'],900)
+    if bad=='listing':self.assertEqual(checked.call_count,3)
+    for call in checked.call_args_list[1:]:self.assertLessEqual(call.kwargs['seconds'],30)

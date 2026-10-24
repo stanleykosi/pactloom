@@ -85,17 +85,18 @@ fn request(controls:&Controls,index:usize,account:&str)->Result<OwnerControlRequ
     }
 }
 
-pub(super) fn run(terminal:&crate::terminal::Terminal,witness:&mut EphemeralNativeWitnessV1,account_ids:&[String;2],_root:&Path,original_cutoff:Instant)->Result<()> {
+pub(super) fn run(terminal:&crate::terminal::Terminal,witness:&mut EphemeralNativeWitnessV1,account_ids:&[String;2],_root:&Path,original_cutoff:Instant,original_source_expires_at_ms:u64)->Result<()> {
     if account_ids[0]==account_ids[1]{return Err(Error::Authentication)}
     super::coordinated_full_fixture_v1::post_input_phase(terminal,
         super::coordinated_full_fixture_v1::PostInputPhase::ExternalControls)?;
     let mut controls=Controls::open(original_cutoff)?;
+    let lifetime=authority(witness.coordinated_history_lifetime_v1(original_cutoff,original_source_expires_at_ms))?;
     for index in 0..2 {
         if index==1 {controls.wait_command("v3-start-owner2",b"start\n")?;}
         controls.check()?;
         if index==0 { super::coordinated_full_fixture_v1::post_input_phase(terminal,
             super::coordinated_full_fixture_v1::PostInputPhase::ExternalBootstrap)?; }
-        let history=authority(witness.serve_original_delivery_bootstrap_history_v2(&account_ids[index]))?;
+        let history=authority(witness.serve_original_delivery_bootstrap_history_v2_until(&account_ids[index],&lifetime))?;
         controls.observe(index,Event::BootstrapServing)?;
         if index==0 {
             super::coordinated_full_fixture_v1::post_input_phase(terminal,
@@ -111,7 +112,7 @@ pub(super) fn run(terminal:&crate::terminal::Terminal,witness:&mut EphemeralNati
         controls.observe(index,Event::AdmissionCommitted)?;
         authority(witness.release_original_listener_when_idle_v1())?;
         controls.observe(index,Event::AdmissionDrained)?;
-        let history=authority(witness.serve_committed_durable_delivery_history_v2(&actual_request.operation_id))?;
+        let history=authority(witness.serve_committed_durable_delivery_history_v2_until(&actual_request.operation_id,&lifetime))?;
         controls.observe(index,Event::AuditServing)?;
         // Scheduling restriction only. The harness waits for the ACTUAL S
         // audited receipt; this file can never create that receipt or a grant.

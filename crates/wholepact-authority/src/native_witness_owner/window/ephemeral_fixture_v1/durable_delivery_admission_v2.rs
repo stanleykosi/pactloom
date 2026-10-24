@@ -262,6 +262,18 @@ impl EphemeralNativeWitnessV1 {
         &mut self,
         admission_operation_id: &str,
     ) -> Result<EphemeralHistoryServerV1> {
+        self.serve_committed_durable_delivery_history_v2_inner(admission_operation_id, None)
+    }
+    /// Same original read-only history, bounded by the once-captured live-full
+    /// fixture restriction. No native approval or mutation permission is issued.
+    pub fn serve_committed_durable_delivery_history_v2_until(
+        &mut self, admission_operation_id: &str, lifetime: &EphemeralCoordinatedHistoryLifetimeV1,
+    ) -> Result<EphemeralHistoryServerV1> {
+        self.serve_committed_durable_delivery_history_v2_inner(admission_operation_id, Some(lifetime))
+    }
+    fn serve_committed_durable_delivery_history_v2_inner(
+        &mut self, admission_operation_id: &str, lifetime: Option<&EphemeralCoordinatedHistoryLifetimeV1>,
+    ) -> Result<EphemeralHistoryServerV1> {
         let request = self
             .durable_delivery
             .committed
@@ -291,7 +303,7 @@ impl EphemeralNativeWitnessV1 {
             &self.server_certificate_digest,
             &self.listener.address.to_string(),
         )?;
-        {
+        let policy_expires_at_ms = {
             let connection = journal
                 .connection
                 .lock()
@@ -300,8 +312,13 @@ impl EphemeralNativeWitnessV1 {
             if ledger.selected_durable_delivery_admission_v2()? != Some(&request) {
                 return Err(AuthorityError::CorruptHistory);
             }
+            ledger.policy.policy_expires_at_ms
+        };
+        let server = AuthorityServer::new(Arc::new(journal), self.tls.clone());
+        match lifetime {
+            Some(lifetime) => self.serve_exact_server_until(server, lifetime, policy_expires_at_ms),
+            None => self.serve_exact_server(server),
         }
-        self.serve_exact_server(AuthorityServer::new(Arc::new(journal), self.tls.clone()))
     }
 }
 
@@ -623,6 +640,18 @@ impl EphemeralNativeWitnessV1 {
         &mut self,
         account_id: &str,
     ) -> Result<EphemeralHistoryServerV1> {
+        self.serve_original_delivery_bootstrap_history_v2_inner(account_id, None)
+    }
+    /// Same original read-only history, bounded by the once-captured live-full
+    /// fixture restriction. No native approval or mutation permission is issued.
+    pub fn serve_original_delivery_bootstrap_history_v2_until(
+        &mut self, account_id: &str, lifetime: &EphemeralCoordinatedHistoryLifetimeV1,
+    ) -> Result<EphemeralHistoryServerV1> {
+        self.serve_original_delivery_bootstrap_history_v2_inner(account_id, Some(lifetime))
+    }
+    fn serve_original_delivery_bootstrap_history_v2_inner(
+        &mut self, account_id: &str, lifetime: Option<&EphemeralCoordinatedHistoryLifetimeV1>,
+    ) -> Result<EphemeralHistoryServerV1> {
         if self.durable_delivery.historical_only
             || self.durable_delivery.pending.is_some()
             || self.durable_delivery.committed.contains_key(account_id)
@@ -638,7 +667,7 @@ impl EphemeralNativeWitnessV1 {
             &self.server_certificate_digest,
             &self.listener.address.to_string(),
         )?;
-        {
+        let policy_expires_at_ms = {
             let connection = journal
                 .connection
                 .lock()
@@ -652,8 +681,13 @@ impl EphemeralNativeWitnessV1 {
             {
                 return Err(AuthorityError::PolicyDenied);
             }
+            ledger.policy.policy_expires_at_ms
+        };
+        let server = AuthorityServer::new(Arc::new(journal), self.tls.clone());
+        match lifetime {
+            Some(lifetime) => self.serve_exact_server_until(server, lifetime, policy_expires_at_ms),
+            None => self.serve_exact_server(server),
         }
-        self.serve_exact_server(AuthorityServer::new(Arc::new(journal), self.tls.clone()))
     }
 
     fn rebind_original_delivery_listener_v2(&mut self) -> Result<()> {
