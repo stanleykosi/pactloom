@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed P59b binaries + exact H60 Python harness; never a general build cache.
+"""Fixed P59b binaries + exact H61 Python harness; never a general build cache.
 
 P is the native producer, H is the independently reviewed runtime harness, and
 L is this exact CI event checkout. Nothing rewrites or relaxes the same-job or
@@ -33,17 +33,17 @@ MODE=b'financial-semantic-p59b-reuse\n'
 PROFILE='coordinated-financial-rendered-host-semantic-v1'
 PRODUCER=dict(repository='stanleykosi/pactloom',source='6dab2eb6e4ef29b74f54b5678ac3815276b72490',
  source_tree='81a06e346ace5e8a97e4f8e106c6dded74a2665c',run_id=40089346941,attempt=1)
-# Independently published exact two-file H60 commit; native producer remains P59b.
-HARNESS=dict(repository='stanleykosi/pactloom',source='d7872b20bd6287685bdddb2d4cbf47a9f0f53036',source_tree='1a817767b44bccf657a93cdbcd3af45c2f49c503')
+# Independently published exact two-file H61 commit; native producer remains P59b.
+HARNESS=dict(repository='stanleykosi/pactloom',source='2fcb659ad2316c81585e76c9aa4208a9c15f2711',source_tree='b7e1e6c78987c25d475ade6d0a4aa6ff32cf427a')
 JOB_ID=120858653379
 EXPIRES_AT='2026-10-25T11:44:47Z'
 INVENTORY_SHA='a96e3cae9e4d6b568df905ce837884d8897d78c34323936dc6d7b6046f987342'
 # Inventory hashes bind the Git mode: SHA256(b'100644\0' + exact reviewed bytes).
-# Raw H file SHA256s are 35da40897d6f857c0f3a8ab4b7838b1b97d044ad3035804dd154a80a70111867
-# and 7be42666e88cf2838d0856b887a73301c1d2ae3edf19a4c4307e9a3c981ff02c respectively.
+# Raw H file SHA256s are 53897379193db82848366970474a095c11ce7553373e9a10e400b84dca2a0a67
+# and f56c106caf680fc223efb027cedd27606dd16a3de264a25a358b232bfb36aa77 respectively.
 H_CHANGES={
- 'scripts/ci-financial-flow.py':'11210a3577b34fd5695ba0334b618b21d65df2ba855805ffb7a5909c1cff99d1',
- 'scripts/tests/test_ci_financial_observer.py':'0d6632dfc7bfe0581c92fd3baa63a3a2bb9f469f9225bb43b00d4e7d48d61122'}
+ 'scripts/ci-financial-flow.py':'e5590ec04d6215eb20ce9e8c86bad1de88a3b0292709b808923e0a017f6a1de5',
+ 'scripts/tests/test_ci_financial_observer.py':'fef053d1e44edd210acd6af7a6b6473ee0c313afab1aace25ca56003c96305c0'}
 L_ADDED=frozenset(('scripts/ci-financial-p59b-reuse.py','scripts/tests/test_ci_financial_p59b_reuse.py'))
 L_CHANGED=frozenset(('.github/workflows/durable-native-linux.yml','scripts/qualification-gate-mode'))
 API_PINS={'run':'622a841b6852168a1f6b067f1fff9195cf979aa4e2f27e7e2456fdb7907288b6',
