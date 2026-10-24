@@ -3359,3 +3359,81 @@ class WitnessSelectorNavigationTests(unittest.TestCase):
     with self.assertRaises(F.C.Rejected):f.field(s,'Field:TrustedClientRoot','Signer1','synthetic')
    else:self.assertFalse(f.seek(s,'Field:TrustedClientRoot','Signer1'))
    c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();c.click.assert_not_called();c.clear_field.assert_not_called();c.type_ascii.assert_not_called()
+
+
+class Finished(Exception):pass
+def admit_navigation_model(required):
+ st=dict(outer=1,inner=0,generation=0,ack=False,armed=False,events=[],wrong=0)
+ class Observer:
+  expected_profile=F.C.SEMANTIC_PROFILE
+  host_view=mock.Mock()
+  def read(self):return []
+  def next_snapshot(self,deadline):
+   if st['armed']:raise Finished()
+   st['generation']+=1
+   ws=[dict(tag='ScrollRegion',owner=None,enabled=True,rect=[0,0,1280,800])]
+   if st['outer']==0:ws.append(dict(tag='ReviewBody',owner='Signer1',enabled=True,rect=[20,200,800,590]))
+   else:ws.extend([dict(tag='ReviewAcknowledgement',owner='Signer1',enabled=True,rect=[20,620,800,650]),dict(tag='ArmV3Admit',owner='Signer1',enabled=st['ack'] and st['inner']>=required,rect=[20,660,500,690])])
+   return dict(phase='V3AdmitReview',subphase='None',owner='Signer1',view_generation=st['generation'],focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=ws,host_view_id=None,host_observation=dict(revision=19,nonws_end=0,context_valid=True,entry='Idle',editor=None,view=None))
+ c=mock.Mock();fixture=mock.Mock(deadline_ns=time.monotonic_ns()+120_000_000_000);f=F.FullFlow(c,fixture,Observer(),None);f.startup_index=13;f.startup_focus_seen=True;f.commands_instruction_observed=True;f._startup_ceiling=None
+ def wheel(d,x,y):
+  if x<1000 and st['outer']==0:
+   assert d==1;st['inner']+=1;st['events'].append('inner_down')
+  else:
+   old=st['outer'];st['outer']=0 if d<0 else 1
+   st['events'].append('outer_up' if d<0 else 'outer_down')
+   if old==st['outer']:st['wrong']+=1
+ def click(x,y):
+  if y==635:st['ack']=True;st['events'].append('ack')
+  elif y==675:
+   assert st['inner']>=required and st['ack'];st['armed']=True;st['events'].append('arm')
+  else:raise AssertionError('unexpected click')
+ c.scroll_up.side_effect=lambda x,y:wheel(-1,x,y);c.scroll_down.side_effect=lambda x,y:wheel(1,x,y);c.click.side_effect=click
+ outcome=None
+ try:f.run()
+ except Finished:outcome='armed_only_after_native_enabled'
+ except F.C.Rejected as e:outcome=str(e)
+ return dict(required_inner_scrolls=required,actual_inner_scrolls=st['inner'],outer_up=st['events'].count('outer_up'),outer_down=st['events'].count('outer_down'),outer_noop_gestures=st['wrong'],frames=st['generation'],wait_progress=c.wait_render_progress.call_count,ack=st['events'].count('ack'),arm=st['events'].count('arm'),outcome=outcome,events=st['events'])
+class AdmitReviewNavigationTests(unittest.TestCase):
+ def test_complete_25_inner_reads_reach_exactly_one_enabled_arm(self):
+  r=admit_navigation_model(25)
+  self.assertEqual((r['outcome'],r['actual_inner_scrolls'],r['ack'],r['arm']),('armed_only_after_native_enabled',25,1,1))
+  self.assertEqual((r['outer_up'],r['outer_down'],r['outer_noop_gestures']),(25,25,0))
+ def test_moderate_review_has_no_wrong_direction_wheel_sweep(self):
+  r=admit_navigation_model(3)
+  self.assertEqual((r['actual_inner_scrolls'],r['outer_up'],r['outer_down'],r['outer_noop_gestures']),(3,3,3,0))
+  self.assertEqual(r['arm'],1)
+ def test_direction_order_is_bound_to_actual_native_layout_and_enable_predicate(self):
+  source=(ROOT.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
+  body=source.split('Phase::V3AdmitReadReview|Phase::V3AdmitReview|Phase::V3AdmitReady=>{',1)[1].split('Phase::V3AdmitReading=>',1)[0]
+  self.assertLess(body.index('review_display(ui,'),body.index('ui.checkbox('));self.assertLess(body.index('ui.checkbox('),body.index('egui::Button::new(label)'))
+  self.assertIn('self.read_to_end&&self.acknowledged&&later_frame',body)
+  self.assertIn('.max_height(390.0)',source.split('fn review_display_tagged(',1)[1].split('fn index(',1)[0])
+ def guarded_model(self):
+  f,c,state,tags=WitnessSelectorNavigationTests().model();original=f.native.next_snapshot
+  def snapshot(deadline):
+   v=original(deadline);v['phase']='V3AdmitReview';v['widgets']=[v['widgets'][0],dict(tag='ArmV3Admit',owner='Signer1',enabled=False,rect=[20,660,500,690])];return v
+  f.native.next_snapshot=snapshot
+  return f,c,state
+ def test_fresh_phase_owner_protected_context_changes_never_navigate(self):
+  for change in ({'phase':'Waiting'},{'subphase':'SetupNeeded'},{'owner':'Signer2'},{'focused':False},{'secret_input':True},{'host_input':True},{'host_observation':dict(revision=2,nonws_end=1,context_valid=True,entry='Idle',editor=None,view=None)},{'host_observation':dict(revision=1,nonws_end=0,context_valid=False,entry='Idle',editor=None,view=None)}):
+   f,c,state=self.guarded_model();s=f.native.snapshot();original=f.native.next_snapshot;f.native.next_snapshot=lambda deadline:original(deadline)|change
+   try:f.seek(s,'ReviewBody','Signer1')
+   except F.C.Rejected:pass
+   c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();c.click.assert_not_called()
+  for attr in ('pending_host','host_prepared'):
+   f,c,state=self.guarded_model();s=f.native.snapshot();setattr(f,attr,('pending',));self.assertFalse(f.seek(s,'ReviewBody','Signer1'));c.scroll_up.assert_not_called();c.scroll_down.assert_not_called()
+ def test_original_seek_scroll_and_deadline_bounds_still_reject(self):
+  for kind in ('seek','scroll','deadline'):
+   f,c,state=self.guarded_model();s=f.native.snapshot()
+   if kind=='seek':f.scrolls[('V3AdmitReview','None','seek','ReviewBody','Signer1')]=64
+   if kind=='scroll':f.scrolls[('V3AdmitReview','None','ScrollRegion',None,'up')]=128
+   if kind=='deadline':f.fixture.deadline_ns=time.monotonic_ns()-1
+   with self.assertRaises(F.C.Rejected):f.seek(s,'ReviewBody','Signer1')
+   c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();c.click.assert_not_called()
+ def test_no_observed_order_anchor_retains_bounded_original_sweep(self):
+  f,c,state=self.guarded_model();original=f.native.next_snapshot
+  def snapshot(deadline):
+   v=original(deadline);v['widgets']=v['widgets'][:1];return v
+  f.native.next_snapshot=snapshot;s=f.native.snapshot()
+  self.assertFalse(f.seek(s,'ArmV3Admit','Signer1'));self.assertEqual(c.scroll_up.call_count,1);c.scroll_down.assert_not_called();c.click.assert_not_called()

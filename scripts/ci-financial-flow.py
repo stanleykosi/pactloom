@@ -193,6 +193,26 @@ class FullFlow:
         count=self.scrolls.get(key,0);self.scrolls[key]=count+1
         C.require(count<64,'input_widget')
         direction='up' if count<24 else 'down'
+        if s['phase']=='V3AdmitReview' and s['subphase']=='None' and tag in ('ReviewBody','ReviewAcknowledgement','ArmV3Admit'):
+            # Actual native order is body, acknowledgement, Arm. An owed body
+            # scroll must not turn downward after repeated action/body trips.
+            latest=self.native.stable(s['phase'],s['owner'])
+            h=latest['host_observation'];old=s['host_observation']
+            C.require(latest['subphase']==s['subphase'] and owner==latest['owner']
+                      and owner in ('Signer1','Signer2'),'input_phase')
+            if (not h['context_valid'] or h['entry']!='Idle'
+                    or self.pending_host is not None or self.host_prepared is not None
+                    or (h['revision'],h['nonws_end'])!=(old['revision'],old['nonws_end'])):return False
+            if self.find(latest,tag,owner) is not None:return False
+            order=('ReviewBody','ReviewAcknowledgement','ArmV3Admit')
+            anchors=[w for w in latest['widgets'] if w['owner']==owner and w['tag'] in order]
+            if anchors:
+                positions=[order.index(w['tag']) for w in anchors]
+                target=order.index(tag)
+                if target<min(positions):direction='up'
+                elif target>max(positions):direction='down'
+            self.scroll(latest,'ScrollRegion',None,direction)
+            return False
         if s['phase']=='Configuring' and s['subphase']=='None' and tag in WITNESS_FIELDS:
             # Witness selectors live in their own native ScrollArea. Wheel over
             # an actual visible field, never an invented inner-region rectangle.
