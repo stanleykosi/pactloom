@@ -253,9 +253,27 @@ impl MaterialFixture {
     pub(crate) fn disclosure(&self) -> &WitnessDisclosureDescriptor { &self.encrypted.disclosure }
     pub(crate) fn rows(&self) -> &[DurableConstructionOutboxV1] { &self.rows }
 
+    // Both inert journals share the SAME synthetic scanned owners/material.
+    // Only current row1's process label (and its derived links) may differ.
+    pub(crate) fn coordinated_process_label_pair(original: &str) -> (Self, Self) {
+        let (owners, _) = checked(wholepact_wallet::wallet::synthetic_scanned_contributions());
+        (
+            Self::with_scanned_owners(true, &owners, None),
+            Self::with_scanned_owners(true, &owners, Some(original)),
+        )
+    }
+
     fn with_generations(coordinated: bool) -> Self {
         let (owners, _) = checked(wholepact_wallet::wallet::synthetic_scanned_contributions());
-        let base_scope = scope(&owners);
+        Self::with_scanned_owners(coordinated, &owners, None)
+    }
+
+    fn with_scanned_owners(
+        coordinated: bool,
+        owners: &[WalletContribution],
+        current_process_instance: Option<&str>,
+    ) -> Self {
+        let base_scope = scope(owners);
         let material_bytes = mathematical_material(&owners[0]);
         // This is the actual mathematical decoder, not a fixture bypass.
         let material = checked(HistoricalConstructionMaterialV1::decode(&material_bytes));
@@ -285,7 +303,12 @@ impl MaterialFixture {
                     channel_binding_digest: channel.clone(),
                     uid: 42,
                     pid: 100 + u32::from(index),
-                    process_instance: hash_label(0x50 + index),
+                    process_instance: if index == 1 {
+                        current_process_instance.map(str::to_owned)
+                            .unwrap_or_else(|| hash_label(0x50 + index))
+                    } else {
+                        hash_label(0x50 + index)
+                    },
                     signer_generation: if coordinated { 1 } else { 1 + u64::from(index) },
                     account_id: base_scope.account_id.clone(),
                     agreement_id: proposal.manifest().agreement.agreement_id.clone(),

@@ -1,14 +1,14 @@
-name: Admission intent finite boundary diagnostic preflight only
+name: Canonical coordinated transport identity preflight only
 on:
   push:
-    branches: [checkpoint/intent-boundary-preflight-p55b]
+    branches: [checkpoint/transport-identity-preflight-p56]
 permissions: {}
 concurrency:
-  group: intent-boundary-preflight-p55b
+  group: transport-identity-preflight-p56
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/intent-boundary-preflight-p55b' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/transport-identity-preflight-p56' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -88,6 +88,7 @@ jobs:
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-postimport-frame-trace.py', '--source', str(repo), '--out', str(root/'postimport-frame-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-service-lifetime-trace.py', '--source', str(repo), '--out', str(root/'service-lifetime-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-admit-read-trace.py', '--source', str(repo), '--out', str(root/'admit-read-traces'), '--run'], env=env, timeout=180))
+          print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-transport-identity-trace.py', '--source', str(repo), '--out', str(root/'transport-identity-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-pair-channel-trace.py', '--source', str(repo), '--out', str(root/'pair-channel-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-host-phase-trace.py', '--source', str(repo), '--out', str(root/'host-phase-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-admission-trace.py', '--source', str(repo), '--out', str(root/'admission-traces'), '--run'], env=env, timeout=180))
@@ -171,7 +172,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/intent-boundary-preflight-p55b' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/transport-identity-preflight-p56' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

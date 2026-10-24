@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed P55 finite intent diagnostics and selected maintained synthetic tests; no fullflow or artifact export."""
+"""Fixed P56 canonical coordinated transport identity and selected maintained synthetic tests; no fullflow or artifact export."""
 import importlib.util,json,os,pathlib,shutil,time
 HERE=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('preflight_supervisor',HERE/'ci-financial-supervisor.py');S=importlib.util.module_from_spec(spec);spec.loader.exec_module(S)
@@ -287,6 +287,7 @@ INTENT_VALIDATION_TESTS=(
     'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::diagnostic_stage_tests::actual_validator_first_detail_survives_outer_fallback_and_restores_scope',
     'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::diagnostic_stage_tests::actual_connection_identity_error_keeps_original_journal_conversion',
     'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::diagnostic_stage_tests::actual_transaction_identity_error_keeps_original_journal_conversion',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::transport_identity_tests::distinct_observed_and_original_process_labels_require_canonical_current_rows',
 )
 def intent_test_executable(raw,target):
     rows=[json.loads(line) for line in raw.splitlines() if line.startswith(b'{')]

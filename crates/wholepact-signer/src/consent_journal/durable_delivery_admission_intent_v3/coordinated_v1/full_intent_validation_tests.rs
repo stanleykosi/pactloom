@@ -419,3 +419,6 @@ fn complete_intent_encrypted_retained_reader_binds_canonical_row_columns() {
 #[cfg(wholepact_financial_rendered_host_semantic_ci)]
 #[path = "full_intent_validation_tests/diagnostic_stage_tests.rs"]
 mod diagnostic_stage_tests;
+
+#[path = "full_intent_validation_tests/transport_identity_tests.rs"]
+mod transport_identity_tests;

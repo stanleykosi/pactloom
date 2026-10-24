@@ -102,7 +102,7 @@ impl CoordinatedOriginalClientV1 {
         if transport_identity_id != &self.grant_id
             || channel_key_digest != &key_digest
             || channel_binding_digest != &self.channel_digest
-            || process_instance != &self.observed_host_process_instance
+            || process_instance != &self.original_host_process_instance
             || *uid != unsafe { libc::geteuid() }
             || *pid != std::process::id()
             || *signer_generation != 1

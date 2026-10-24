@@ -261,7 +261,9 @@ impl CoordinatedPreconstructionSessionV1 {
             channel_binding_digest: self.peer.channel_digest().into(),
             uid: self.peer.actual_peer().uid(),
             pid: self.peer.actual_peer().pid(),
-            process_instance: self.peer.actual_peer().instance().into(),
+            // The observed socket peer has its own fresh observation label.
+            // Persist the authenticated original Host identity, not that label.
+            process_instance: self.peer.original_host_process_instance().into(),
             signer_generation: self.peer.generation(),
             account_id: self.peer.scope().account_id.clone(),
             agreement_id: self.peer.scope().agreement_id.clone(),

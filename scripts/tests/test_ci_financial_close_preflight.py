@@ -208,7 +208,7 @@ class IntentValidationExecutionPreflightTests(unittest.TestCase):
  def test_intent_feature_union_is_exact_and_does_not_replace_old_target(self):
   self.assertEqual(set(C.INTENT_FEATURES),set(C.SIGNER_FEATURES)|{'synthetic-qualification'})
   self.assertEqual(len(C.HANDOFF_SECURITY_TESTS),50)
-  self.assertEqual(len(C.INTENT_VALIDATION_TESTS),15)
+  self.assertEqual(len(C.INTENT_VALIDATION_TESTS),16)
   self.assertTrue(set(C.INTENT_VALIDATION_TESTS).isdisjoint(C.HANDOFF_SECURITY_TESTS))
   rows=copy.deepcopy(self.rows);rows[-1]['features']=list(C.SIGNER_FEATURES)
   with self.assertRaises(AssertionError):self.check(rows)
