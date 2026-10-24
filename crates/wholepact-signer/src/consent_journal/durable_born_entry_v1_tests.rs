@@ -297,7 +297,7 @@ impl Fixture {
 
 #[cfg(feature = "synthetic-qualification")]
 #[path = "durable_born_validation_cost_tests.rs"]
-mod cost_measurement;
+pub(crate) mod cost_measurement;
 
 /// Real encrypted journal/component integration only. The maintained fixture
 /// supplies historical enrollment rows, never a V3 native/read/action owner.

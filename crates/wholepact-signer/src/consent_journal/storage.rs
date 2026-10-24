@@ -9,6 +9,8 @@ mod coordinated_entry_open_v2;
 ))]
 #[path = "durable_born_entry_v1.rs"]
 mod durable_born_entry_v1;
+#[cfg(all(test, feature = "synthetic-qualification", feature = "durable-proposal", feature = "pending-birth-owner-signing", target_os = "linux"))]
+pub(crate) use durable_born_entry_v1::tests::cost_measurement::MaterialFixture as CoordinatedIntentMaterialFixture;
 #[cfg(all(
     feature = "durable-proposal",
     feature = "pending-birth-owner-signing",

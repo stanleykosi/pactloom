@@ -27,6 +27,7 @@ use zeroize::Zeroizing;
 
 // No error formatting or value-rendering assertions: neither measurements nor
 // failure output should disclose material, identifiers, witnesses or payloads.
+#[track_caller]
 fn checked<T, E>(result: std::result::Result<T, E>) -> T {
     match result {
         Ok(value) => value,
@@ -230,7 +231,7 @@ fn scope(owners: &[WalletContribution]) -> DurableConstructionScopeV1 {
     }
 }
 
-struct MaterialFixture {
+pub(crate) struct MaterialFixture {
     encrypted: Fixture,
     rows: Vec<DurableConstructionOutboxV1>,
     material_bytes: Zeroizing<Vec<u8>>,
@@ -238,6 +239,21 @@ struct MaterialFixture {
 
 impl MaterialFixture {
     fn new() -> Self {
+        Self::with_generations(false)
+    }
+
+    // Historical DATA only. Preserve the legacy 1+index fixture above.
+    pub(crate) fn coordinated() -> Self {
+        Self::with_generations(true)
+    }
+
+    pub(crate) fn legacy() -> Self { Self::new() }
+    pub(crate) fn journal(&self) -> &SignerConsentJournal { &self.encrypted.journal }
+    pub(crate) fn genesis(&self) -> &AccountUseGenesis { &self.encrypted.genesis }
+    pub(crate) fn disclosure(&self) -> &WitnessDisclosureDescriptor { &self.encrypted.disclosure }
+    pub(crate) fn rows(&self) -> &[DurableConstructionOutboxV1] { &self.rows }
+
+    fn with_generations(coordinated: bool) -> Self {
         let (owners, _) = checked(wholepact_wallet::wallet::synthetic_scanned_contributions());
         let base_scope = scope(&owners);
         let material_bytes = mathematical_material(&owners[0]);
@@ -270,7 +286,7 @@ impl MaterialFixture {
                     uid: 42,
                     pid: 100 + u32::from(index),
                     process_instance: hash_label(0x50 + index),
-                    signer_generation: 1 + u64::from(index),
+                    signer_generation: if coordinated { 1 } else { 1 + u64::from(index) },
                     account_id: base_scope.account_id.clone(),
                     agreement_id: proposal.manifest().agreement.agreement_id.clone(),
                     participant_id: base_scope.participant_id.clone(),
@@ -279,7 +295,7 @@ impl MaterialFixture {
                 let receipt = NativeConsentReceipt {
                     native_session_id: hash_label(0x60 + index),
                     trusted_launch_measurement: hash_label(0x70),
-                    permission_generation: 1 + u64::from(index),
+                    permission_generation: if coordinated { 1 } else { 1 + u64::from(index) },
                     writer_epoch: 7,
                     nonce: hash_label(0x80 + index),
                     reviewed_at_ms: 100_000,

@@ -718,3 +718,7 @@ impl SignerConsentJournal {
 #[cfg(test)]
 #[path = "coordinated_v1/handoff_chain_tests.rs"]
 mod handoff_chain_tests;
+
+#[cfg(all(test, feature = "synthetic-qualification"))]
+#[path = "coordinated_v1/full_intent_validation_tests.rs"]
+mod full_intent_validation_tests;

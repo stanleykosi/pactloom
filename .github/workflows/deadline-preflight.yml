@@ -1,14 +1,14 @@
-name: AdmitRead terminal failure observation preflight only
+name: Complete admission intent validator investigation only
 on:
   push:
-    branches: [checkpoint/admit-read-preflight-p53]
+    branches: [checkpoint/intent-validator-preflight-p54]
 permissions: {}
 concurrency:
-  group: admit-read-preflight-p53
+  group: intent-validator-preflight-p54
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/admit-read-preflight-p53' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/intent-validator-preflight-p54' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -170,7 +170,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/admit-read-preflight-p53' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/intent-validator-preflight-p54' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed P53 typechecks and selected maintained synthetic tests; no fullflow or artifact export."""
+"""Fixed P54 test-only investigation and selected maintained synthetic tests; no fullflow or artifact export."""
 import importlib.util,json,os,pathlib,shutil,time
 HERE=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('preflight_supervisor',HERE/'ci-financial-supervisor.py');S=importlib.util.module_from_spec(spec);spec.loader.exec_module(S)
@@ -270,6 +270,68 @@ def run_fixture_lifetime_tests(root,env):
     for kind,(_,_,_,names) in FIXTURE_TARGETS.items():
         print('CI_SERVICE_LIFETIME_TESTS '+json.dumps(dict(target=kind,actual_maintained_tests=len(names),passed=True,full_fixture_execution=False,fullflow=False),sort_keys=True))
     return len(entries)
+INTENT_FEATURES=('authority-signing','coordinated-financial-workflow-v1','coordinated-signer-continue','durable-proposal','native-ui','pending-birth-owner-signing','synthetic-qualification','wallet-review')
+INTENT_VALIDATION_TESTS=(
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::complete_intent_accepts_fresh_admit_read_after_prepare_read_expiry',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::complete_intent_rejects_individual_envelope_lineage_mismatches',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::complete_intent_rejects_original_ceiling_and_window_violations',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::complete_intent_nested_requests_cannot_be_rebound_around_lineage',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::complete_intent_retention_commits_review_and_preserves_action_deadline',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::complete_intent_original_rows_reject_valid_envelope_wrong_source_lineage',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::complete_intent_rejects_legacy_generation_rows_without_relabeling',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::complete_intent_encrypted_retained_reader_binds_canonical_row_columns',
+)
+def intent_test_executable(raw,target):
+    rows=[json.loads(line) for line in raw.splitlines() if line.startswith(b'{')]
+    packages={};executables=[]
+    for row in rows:
+        if row.get('reason')!='compiler-artifact':continue
+        t=row.get('target',{});manifest=row.get('manifest_path','')
+        if t.get('kind')==['custom-build'] and pathlib.Path(manifest).is_relative_to(S.REPO):
+            crate=pathlib.Path(manifest).parent.name
+            assert crate in SIGNER_SCRIPTS and crate not in packages.values()
+            assert t.get('name')=='build-script-build' and t.get('src_path')==str(S.REPO/'crates'/crate/'build.rs')
+            packages[row['package_id']]=crate
+        if manifest!=str(S.REPO/'crates/wholepact-signer/Cargo.toml') or row.get('executable') is None:continue
+        assert row.get('profile',{}).get('test') is True
+        assert t.get('kind')==['lib'] and t.get('name')=='wholepact_signer' and t.get('src_path')==str(S.REPO/'crates/wholepact-signer/src/lib.rs')
+        assert sorted(row.get('features',[]))==list(INTENT_FEATURES)
+        executable=pathlib.Path(row['executable'])
+        assert executable.is_file() and not executable.is_symlink() and executable.resolve().is_relative_to(target.resolve())
+        assert str(executable) in row.get('filenames',[])
+        executables.append(executable)
+    assert len(executables)==1 and set(packages.values())==set(SIGNER_SCRIPTS)
+    seen=set()
+    for row in rows:
+        if row.get('reason')!='build-script-executed':continue
+        package=row.get('package_id');cfgs=row.get('cfgs');assert type(cfgs) is list
+        if package not in packages:
+            assert not any(c.startswith('wholepact_financial_') for c in cfgs);continue
+        assert package not in seen and cfgs==list(S.A.FINANCIAL_CFGS)
+        assert row.get('linked_libs')==[] and row.get('linked_paths')==[] and row.get('env')==[]
+        out=pathlib.Path(row['out_dir']);assert out.is_dir() and not out.is_symlink() and out.resolve().is_relative_to(target.resolve());seen.add(package)
+    assert seen==set(packages)
+    return executables[0]
+def run_intent_validation_tests(root,env):
+    assert INTENT_VALIDATION_TESTS and len(set(INTENT_VALIDATION_TESTS))==len(INTENT_VALIDATION_TESTS)
+    selected=S.select_build_environment(env,'coordinator-observed',S.A.SEMANTIC_PROFILE)
+    args=['rustup','run','1.99.0','cargo','test','--locked','--lib','--no-run','--no-default-features','--message-format=json','-p','wholepact-signer','--features','wholepact-signer/coordinated-financial-workflow-v1,wholepact-signer/synthetic-qualification']
+    raw=S.checked(args,'compile',env=selected,seconds=900,limit=32*1024*1024)
+    executable=intent_test_executable(raw,root/'target-shared')
+    deadline=time.monotonic()+360
+    def fixed(args):
+        remaining=deadline-time.monotonic();assert remaining>0
+        return S.checked(args,'compile',env=selected,seconds=min(60,remaining),limit=1024*1024).decode('utf-8',errors='strict')
+    # Verify the entire fixed selection before executing the first test.
+    for name in INTENT_VALIDATION_TESTS:
+        listing=fixed([str(executable),'--list','--exact',name])
+        assert [line for line in listing.splitlines() if line.endswith(': test')]==[name+': test']
+    for name in INTENT_VALIDATION_TESTS:
+        output=fixed([str(executable),'--exact',name,'--test-threads=1'])
+        assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in output
+        print('CI_INTENT_VALIDATION_TEST '+json.dumps(dict(name=name,passed=True,ignored=0),sort_keys=True))
+    print('CI_INTENT_VALIDATION_TESTS '+json.dumps(dict(actual_maintained_tests=len(INTENT_VALIDATION_TESTS),passed=True,genuine_pair_or_final_fixture=False,fullflow=False),sort_keys=True))
+    return len(INTENT_VALIDATION_TESTS)
 def main():
     root=pathlib.Path(os.environ['PREFLIGHT_ROOT']).resolve();assert root.is_dir()
     env=dict(PATH=os.environ['PATH'],HOME=str(root/'home'),CARGO_HOME=str(root/'cargo'),CARGO_TARGET_DIR=str(root/'target-shared'),CARGO_BUILD_JOBS='3',CARGO_INCREMENTAL='0',RUSTUP_HOME=os.environ['RUSTUP_HOME'],GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL='/dev/null',GIT_TERMINAL_PROMPT='0')
@@ -281,8 +343,8 @@ def main():
         for package in PACKAGES:args+=['-p',package]
         args+=['--features',','.join(FEATURES)]
         raw=S.checked(args,'compile',env=selected,seconds=900,limit=32*1024*1024)
-        validate(raw,root/'target-shared');executed=run_handoff_security_tests(root,env);fixture_executed=run_fixture_lifetime_tests(root,env);absence=check_signer_absence(root,env);S.exact_source(sha)
-        print('CI_CLOSE_PREFLIGHT_CONTEXTS '+json.dumps(dict(schema_version=2,actual_test_contexts=list(PACKAGES),actual_semantic_script_crates=list(SCRIPTS),typecheck_passed=True,signer_observed_api_absent_profiles=absence,selected_maintained_tests_executed=executed,fixture_lifetime_maintained_tests_executed=fixture_executed,full_native_execution=False,fullflow=False),sort_keys=True))
+        validate(raw,root/'target-shared');executed=run_handoff_security_tests(root,env);intent_executed=run_intent_validation_tests(root,env);fixture_executed=run_fixture_lifetime_tests(root,env);absence=check_signer_absence(root,env);S.exact_source(sha)
+        print('CI_CLOSE_PREFLIGHT_CONTEXTS '+json.dumps(dict(schema_version=2,actual_test_contexts=list(PACKAGES),actual_semantic_script_crates=list(SCRIPTS),typecheck_passed=True,signer_observed_api_absent_profiles=absence,selected_maintained_tests_executed=executed,intent_validation_tests_executed=intent_executed,fixture_lifetime_maintained_tests_executed=fixture_executed,full_native_execution=False,fullflow=False),sort_keys=True))
     except S.Failure as error:
         # Pre-credential compiler text only; same bounded sanitizer as fresh build.
         print('CI_CLOSE_PREFLIGHT_FAILURE '+json.dumps(dict(stage=error.stage,check=error.check,**S.build_failure_tail(error.output)),sort_keys=True))

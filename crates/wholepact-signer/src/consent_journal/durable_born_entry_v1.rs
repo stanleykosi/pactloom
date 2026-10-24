@@ -686,4 +686,4 @@ impl SignerConsentJournal {
 
 #[cfg(test)]
 #[path = "durable_born_entry_v1_tests.rs"]
-mod tests;
+pub(super) mod tests;
