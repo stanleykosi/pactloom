@@ -3536,18 +3536,18 @@ class SameBatchValidationTests(unittest.TestCase):
     try:outcomes.append(('ok',fn(r,final=final)))
     except O.C.Rejected as e:outcomes.append(('error',e.code))
    self.assertEqual(*outcomes)
- def test_each_read_validates_every_record_once_and_returns_fresh_objects(self):
+ def test_each_read_parses_fresh_objects_and_prefix_validation_is_not_repeated(self):
   from unittest import mock
   with tempfile.TemporaryDirectory() as td:
    p=pathlib.Path(td)/'100.jsonl';r=self.records(100);p.write_bytes(b''.join(json.dumps(x).encode()+b'\n' for x in r));p.chmod(0o600)
    o=O.ObserverFiles(td,time.monotonic_ns()+5_000_000_000,O.C.SEMANTIC_PROFILE)
    with mock.patch.object(O.C,'validate_record',wraps=O.C.validate_record) as validate:
     a=o.read();self.assertEqual(validate.call_count,len(r));a[1]['facts']['widgets'].append({'untrusted':'caller mutation'})
-    b=o.read();self.assertEqual(validate.call_count,2*len(r));self.assertEqual(b,r)
+    b=o.read();self.assertEqual(validate.call_count,len(r));self.assertEqual(b,r)
    fixture=mock.Mock();fixture.deadline_ns=o.deadline_ns;flow=F.FullFlow(mock.Mock(),fixture,o,None)
    with mock.patch.object(O.C,'validate_record',wraps=O.C.validate_record) as validate,mock.patch.object(o,'read',wraps=o.read) as reads:
     self.assertEqual(flow.snapshot()['view_generation'],100)
-    self.assertEqual(reads.call_count,2);self.assertEqual(validate.call_count,2*len(r))
+    self.assertEqual(reads.call_count,2);self.assertEqual(validate.call_count,0)
    p.write_bytes(p.read_bytes().replace(b'"Signer1"',b'"Signer2"',1))
    with self.assertRaises(O.C.Rejected):o.read()
  def test_malformed_initial_batch_never_reaches_private_kernels(self):
@@ -3806,3 +3806,78 @@ class ProtectedPasswordNavigationTests(unittest.TestCase):
    st['mutate']=mutate
    with self.assertRaises(F.C.Rejected):f.password_step(f.native.snapshot())
    self.assertEqual(st['events'],[]);self.assertEqual(st['secret_requests'],0)
+
+class ExactPrefixValidationTests(unittest.TestCase):
+ def fixture(self):
+  temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup);p=pathlib.Path(temp.name)/'100.jsonl';records=SameBatchValidationTests().records(3)
+  p.write_bytes(b''.join(json.dumps(r).encode()+b'\n' for r in records));p.chmod(0o600)
+  o=O.ObserverFiles(temp.name,time.monotonic_ns()+5_000_000_000,O.C.SEMANTIC_PROFILE)
+  return p,records,o
+ def test_full_reads_and_json_parses_remain_fresh_but_only_new_shapes_validate(self):
+  import copy
+  p,r,o=self.fixture()
+  with mock.patch.object(O.C,'loads',wraps=O.C.loads) as loads,mock.patch.object(O.C,'validate_record',wraps=O.C.validate_record) as validate:
+   first=o.read();self.assertEqual((loads.call_count,validate.call_count),(4,4))
+   first[-1]['facts']['widgets'].append({'caller':'mutation'})
+   self.assertEqual(o.read(),r);self.assertEqual((loads.call_count,validate.call_count),(8,4))
+   extra=copy.deepcopy(r[-1]);extra['sequence']+=1;extra['elapsed_ns']+=1;extra['facts']['view_generation']+=1
+   with p.open('ab') as f:f.write(json.dumps(extra).encode()+b'\n')
+   self.assertEqual(o.read(),r+[extra]);self.assertEqual((loads.call_count,validate.call_count),(13,5))
+   snapshot=o.next_snapshot(o.deadline_ns);snapshot['widgets'].append({'another':'mutation'})
+   self.assertEqual(o.read(),r+[extra]);self.assertEqual((loads.call_count,validate.call_count),(23,5))
+ def test_partial_line_is_uncached_until_complete_and_malformed_suffix_never_becomes_valid(self):
+  import copy
+  p,r,o=self.fixture();o.read();extra=copy.deepcopy(r[-1]);extra['sequence']+=1;extra['elapsed_ns']+=1;extra['facts']['view_generation']+=1;raw=json.dumps(extra).encode()
+  with p.open('ab') as f:f.write(raw[:10])
+  with mock.patch.object(O.C,'validate_record',wraps=O.C.validate_record) as validate:
+   self.assertEqual(o.read(),r);self.assertEqual(validate.call_count,0)
+   with p.open('ab') as f:f.write(raw[10:]+b'\n')
+   self.assertEqual(o.read(),r+[extra]);self.assertEqual(validate.call_count,1)
+   with p.open('ab') as f:f.write(b'{}\n')
+   for _ in range(2):
+    with self.assertRaises(O.C.Rejected):o.read()
+   self.assertEqual(validate.call_count,3);self.assertIsNone(o._semantic_active)
+ def test_profile_change_revalidates_and_full_security_checks_still_reject(self):
+  p,r,o=self.fixture();o.read();o.expected_profile=O.C.PROFILE
+  with mock.patch.object(O.C,'validate_record',wraps=O.C.validate_record) as validate:
+   with self.assertRaises(O.C.Rejected):o.read()
+   self.assertEqual(validate.call_count,1)
+  o.expected_profile=O.C.SEMANTIC_PROFILE;self.assertEqual(o.read(),r)
+  p.chmod(0o644)
+  with self.assertRaises(O.C.Rejected):o.read()
+  p.chmod(0o600);p.write_bytes(p.read_bytes().replace(b'Signer1',b'Signer2',1))
+  with self.assertRaises(O.C.Rejected):o.read()
+  with tempfile.TemporaryDirectory() as td:
+   empty=pathlib.Path(td)/'100.jsonl';empty.write_bytes(b'');empty.chmod(0o600)
+   other=O.ObserverFiles(td,time.monotonic_ns()+5_000_000_000,O.C.SEMANTIC_PROFILE);self.assertEqual(other.read(),[])
+   other.expected_profile=O.C.PROFILE
+   birth=dict(r[0],profile=O.C.PROFILE);empty.write_bytes(json.dumps(birth).encode()+b'\n')
+   self.assertEqual(other.read(),[birth]);other.expected_profile=O.C.SEMANTIC_PROFILE
+   with self.assertRaises(O.C.Rejected):other.read()
+
+ def test_aggregate_lineage_and_failure_checks_run_again_on_complete_fresh_set(self):
+  import copy
+  p,r,o=self.fixture();o.read()
+  with mock.patch.object(O.C,'_native_failure_sequence_validated',wraps=O.C._native_failure_sequence_validated) as native,mock.patch.object(O.C,'_join_host_views_validated',wraps=O.C._join_host_views_validated) as join,mock.patch.object(O.C,'validate_actor_cardinality',wraps=O.C.validate_actor_cardinality) as actor:
+   self.assertEqual(o.read(),r);self.assertEqual(o.read(),r)
+   self.assertEqual((native.call_count,join.call_count,actor.call_count),(2,2,2))
+  bad=copy.deepcopy(r[-1]);bad['sequence']+=2;bad['facts']['view_generation']+=1
+  with p.open('ab') as f:f.write(json.dumps(bad).encode()+b'\n')
+  with self.assertRaises(O.C.Rejected) as got:o.read()
+  self.assertEqual(got.exception.code,'order')
+ def test_mandatory_post_snapshot_read_observes_new_failure_and_host_join_mismatch(self):
+  p,r,o=self.fixture();o.read();original=o.read;calls=[]
+  def read(**kwargs):
+   value=original(**kwargs);calls.append(1)
+   if len(calls)==1:
+    failure=dict(schema=1,profile=O.C.SEMANTIC_PROFILE,role='Coordinator',sequence=5,elapsed_ns=5,kind='Failure',facts=dict(code='source_failure'))
+    with p.open('ab') as f:f.write(json.dumps(failure).encode()+b'\n')
+   return value
+  o.read=read;controller=mock.Mock();flow=F.FullFlow(controller,mock.Mock(deadline_ns=o.deadline_ns),o,None)
+  with self.assertRaises(F.C.Rejected) as got:flow.snapshot()
+  self.assertEqual(got.exception.code,'observer_failure');self.assertEqual(len(calls),2);controller.click.assert_not_called()
+  fixture=SemanticHostObserverTests();fixture.setUp();self.addCleanup(fixture.tearDown);fixture.write(fixture.records());fixture.o.read();old=fixture.o._semantic_active['text']
+  changed=fixture.copy(fixture.snapshot);changed['view_generation']=2;changed['host_observation']['revision']=8
+  with (fixture.directory/'100.jsonl').open('ab') as f:f.write(json.dumps(fixture.record('UiSnapshot',changed,4)).encode()+b'\n')
+  with self.assertRaises(O.C.Rejected):fixture.o.read()
+  self.assertIsNone(fixture.o._semantic_active);self.assertFalse(any(old))

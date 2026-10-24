@@ -193,7 +193,7 @@ jobs:
         shell: bash
         run: |
           echo 'Fresh coordinated-financial-rendered-host-semantic-v1 synthetic two-signer qualification passed using read-only same-rendered-Host-text observation. All native authority, full proof, retirements, Returns, normal close and cleanup checks remain required. This is NOT pixel-only UI qualification; the original financial-ui gate remains separately callable and is not upgraded. No dispatch, public-chain settlement, deployment or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
-      - name: Fetch fixed P59b native producer and exact reviewed H65r harness without credentials
+      - name: Fetch fixed P59b native producer and exact reviewed H66 harness without credentials
         if: steps.mode.outputs.gate == 'financial-semantic-p59b-reuse'
         shell: bash
         env:
@@ -213,7 +213,7 @@ jobs:
             test -z "$(git -C "$destination" status --porcelain --untracked-files=all)"
           }
           fetch_fixed P59b 6dab2eb6e4ef29b74f54b5678ac3815276b72490
-          fetch_fixed H65r 012570c696c2fbb92ccaaf30f3d42cd7da031f8c
+          fetch_fixed H66 0c6f03630d1a328469a2e95df8be5491913870dc
       - name: Fixed P59b reuse identity archive and cleanup boundary tests (no native execution)
         if: steps.mode.outputs.gate == 'financial-semantic-p59b-reuse'
         timeout-minutes: 5
@@ -228,7 +228,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -I -B "$GITHUB_WORKSPACE/source/scripts/ci-financial-p59b-reuse.py" acquire "$GITHUB_WORKSPACE/source"
-      - name: Verify fixed P59b archive H65r closure and independent cleanup (no native execution)
+      - name: Verify fixed P59b archive H66 closure and independent cleanup (no native execution)
         if: steps.mode.outputs.gate == 'financial-semantic-p59b-reuse'
         timeout-minutes: 5
         shell: bash
@@ -240,8 +240,8 @@ jobs:
             GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_SHA="$GITHUB_SHA" \
             GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" GITHUB_JOB="$GITHUB_JOB" \
             python3 -I -B "$GITHUB_WORKSPACE/source/scripts/ci-financial-p59b-reuse.py" verify \
-            "$GITHUB_WORKSPACE/source" "$GITHUB_WORKSPACE/P59b" "$GITHUB_WORKSPACE/H65r"
-      - name: Fresh H65r tests image and synthetic runtime using verified P59b native binaries
+            "$GITHUB_WORKSPACE/source" "$GITHUB_WORKSPACE/P59b" "$GITHUB_WORKSPACE/H66"
+      - name: Fresh H66 tests image and synthetic runtime using verified P59b native binaries
         id: p59b_reuse_runtime
         if: steps.mode.outputs.gate == 'financial-semantic-p59b-reuse'
         timeout-minutes: 200
@@ -254,7 +254,7 @@ jobs:
             GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_SHA="$GITHUB_SHA" \
             GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" GITHUB_JOB="$GITHUB_JOB" \
             python3 -I -B "$GITHUB_WORKSPACE/source/scripts/ci-financial-p59b-reuse.py" run \
-            "$GITHUB_WORKSPACE/source" "$GITHUB_WORKSPACE/P59b" "$GITHUB_WORKSPACE/H65r"
+            "$GITHUB_WORKSPACE/source" "$GITHUB_WORKSPACE/P59b" "$GITHUB_WORKSPACE/H66"
       - name: Always reconcile fixed P59b reuse resources using independently pinned cleanup
         if: always() && steps.mode.outputs.gate == 'financial-semantic-p59b-reuse'
         timeout-minutes: 5
@@ -280,7 +280,7 @@ jobs:
         if: success() && steps.mode.outputs.gate == 'financial-semantic-p59b-reuse' && steps.p59b_reuse_runtime.outcome == 'success'
         shell: bash
         run: |
-          echo 'Fresh exact H65r Python tests and semantic-assisted synthetic external-Witness runtime passed using verified P59b native binaries. Native producer is P59b 6dab2eb6e4ef29b74f54b5678ac3815276b72490, runtime harness is H65r 012570c696c2fbb92ccaaf30f3d42cd7da031f8c, and this event is the independent launcher. Unchanged P59b native gates were reused, not rerun or freshly compiled for H65r. Both owned runtime cleanup and independent cleanup passed; the acquisition directory was removed. No pixel-only UI, full-product, public-chain, deployment or dispatch claim is made.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Fresh exact H66 Python tests and semantic-assisted synthetic external-Witness runtime passed using verified P59b native binaries. Native producer is P59b 6dab2eb6e4ef29b74f54b5678ac3815276b72490, runtime harness is H66 0c6f03630d1a328469a2e95df8be5491913870dc, and this event is the independent launcher. Unchanged P59b native gates were reused, not rerun or freshly compiled for H66. Both owned runtime cleanup and independent cleanup passed; the acquisition directory was removed. No pixel-only UI, full-product, public-chain, deployment or dispatch claim is made.' >> "$GITHUB_STEP_SUMMARY"
       - name: Fetch exact independent producer P and reviewed harness H without credentials
         if: steps.mode.outputs.gate == 'financial-semantic-reuse' || steps.mode.outputs.gate == 'financial-preparation-diagnostic'
         shell: bash
