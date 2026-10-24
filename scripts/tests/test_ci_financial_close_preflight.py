@@ -208,7 +208,7 @@ class IntentValidationExecutionPreflightTests(unittest.TestCase):
  def test_intent_feature_union_is_exact_and_does_not_replace_old_target(self):
   self.assertEqual(set(C.INTENT_FEATURES),set(C.SIGNER_FEATURES)|{'synthetic-qualification'})
   self.assertEqual(len(C.HANDOFF_SECURITY_TESTS),50)
-  self.assertEqual(len(C.INTENT_VALIDATION_TESTS),16)
+  self.assertEqual(len(C.INTENT_VALIDATION_TESTS),17)
   self.assertTrue(set(C.INTENT_VALIDATION_TESTS).isdisjoint(C.HANDOFF_SECURITY_TESTS))
   rows=copy.deepcopy(self.rows);rows[-1]['features']=list(C.SIGNER_FEATURES)
   with self.assertRaises(AssertionError):self.check(rows)
@@ -246,3 +246,63 @@ class PrimaryCompilerDiagnosticTests(unittest.TestCase):
   raw=self.record('ghp_secret123 bearer ABC123 password=private\x1b '+('界'*100000))+b'tail\n'*20000
   v=C.preflight_failure_output(raw);self.check_bound(v)
   self.assertNotIn('ghp_secret123',v['primary_compiler_errors']);self.assertNotIn('ABC123',v['primary_compiler_errors']);self.assertNotIn('password=private',v['primary_compiler_errors']);self.assertNotIn('\x1b',v['primary_compiler_errors'])
+
+class ReportMeasurementTests(unittest.TestCase):
+ def value(self):return {**{k:123 for k in C.REPORT_LENGTHS},**{k:False for k in C.REPORT_VALIDATIONS}}
+ def output(self,value):return C.REPORT_MEASUREMENT_MARKER+json.dumps(value)
+ def test_exact_closed_measurement_and_libtest_prefix(self):
+  v=self.value()
+  self.assertEqual(C.report_measurement(self.output(v)),v)
+  self.assertEqual(C.report_measurement('test '+C.REPORT_MEASUREMENT_TEST+' ... '+self.output(v)+'\nok'),v)
+ def test_schema_types_bounds_and_extra_fields_fail_closed(self):
+  cases=[]
+  for x in (-1,2*1024*1024+1,True,1.5,float('nan'),float('inf'),'123',None):
+   v=self.value();v[C.REPORT_LENGTHS[0]]=x;cases.append(v)
+  for x in (0,1,'true',None):
+   v=self.value();v[C.REPORT_VALIDATIONS[0]]=x;cases.append(v)
+  v=self.value();v['payload']='DO_NOT_PRINT';cases.append(v)
+  v=self.value();del v[C.REPORT_LENGTHS[0]];cases.append(v)
+  cases += [[],None]
+  for v in cases:
+   with self.assertRaises(AssertionError):C.report_measurement(self.output(v))
+ def test_missing_duplicate_malformed_and_oversized_markers_fail_closed(self):
+  raw=self.output(self.value())
+  duplicate=C.REPORT_MEASUREMENT_MARKER+'{"pretty_display_bytes":1,"pretty_display_bytes":2}'
+  for output in ('',raw+'\n'+raw,'unknown '+raw,C.REPORT_MEASUREMENT_MARKER+'{invalid',duplicate,C.REPORT_MEASUREMENT_MARKER+' '*2049+json.dumps(self.value())):
+   with self.assertRaises(AssertionError):C.report_measurement(output)
+ def test_exact_target_only_nocapture_and_normalized_projection(self):
+  from unittest import mock
+  import contextlib,io
+  names=('ordinary_exact_test',C.REPORT_MEASUREMENT_TEST);v=self.value()
+  with tempfile.TemporaryDirectory() as td:
+   target=pathlib.Path(td);exe=target/'testbin'
+   outputs=[b'compiler']+[ (n+': test\n').encode() for n in names]+[b'test result: ok. 1 passed; 0 failed; 0 ignored;',('PRIVATE_SENTINEL\n'+self.output(v)+'\ntest result: ok. 1 passed; 0 failed; 0 ignored;').encode()]
+   captured=io.StringIO()
+   with mock.patch.object(C,'INTENT_VALIDATION_TESTS',names),mock.patch.object(C.S,'select_build_environment',return_value={}),mock.patch.object(C,'intent_test_executable',return_value=exe),mock.patch.object(C.S,'checked',side_effect=outputs) as checked,contextlib.redirect_stdout(captured):
+    self.assertEqual(C.run_intent_validation_tests(target,{}),2)
+   self.assertNotIn('--nocapture',checked.call_args_list[-2].args[0]);self.assertIn('--nocapture',checked.call_args_list[-1].args[0])
+   self.assertNotIn('PRIVATE_SENTINEL',captured.getvalue());self.assertIn('CI_RETAINED_REPORT_SIZE ',captured.getvalue())
+ def test_measurement_failure_keeps_original_status_without_output(self):
+  from unittest import mock
+  import contextlib,io
+  with tempfile.TemporaryDirectory() as td:
+   name=C.REPORT_MEASUREMENT_TEST;error=C.S.Failure('compile','command_failed',b'PRIVATE_SENTINEL',exit_status=17);error.cleanup_failed=True
+   with mock.patch.object(C,'INTENT_VALIDATION_TESTS',(name,)),mock.patch.object(C.S,'select_build_environment',return_value={}),mock.patch.object(C,'intent_test_executable',return_value=pathlib.Path(td)/'testbin'),mock.patch.object(C.S,'checked',side_effect=[b'compiler',(name+': test\n').encode(),error]),contextlib.redirect_stdout(io.StringIO()):
+    with self.assertRaises(C.S.Failure) as caught:C.run_intent_validation_tests(pathlib.Path(td),{})
+   self.assertIs(caught.exception,error);self.assertEqual(error.output,b'');self.assertEqual(error.exit_status,17);self.assertTrue(error.cleanup_failed)
+   self.assertNotIn('PRIVATE_SENTINEL',json.dumps(C.preflight_failure_output(error.output)))
+ def test_valid_measurement_survives_failed_reproduction_without_raw_output(self):
+  from unittest import mock
+  import contextlib,io
+  with tempfile.TemporaryDirectory() as td:
+   name=C.REPORT_MEASUREMENT_TEST;value=self.value();raw=('PRIVATE_SENTINEL\n'+self.output(value)+'\nfailed static reproduction assertion').encode();error=C.S.Failure('compile','command_failed',raw,exit_status=101);captured=io.StringIO()
+   with mock.patch.object(C,'INTENT_VALIDATION_TESTS',(name,)),mock.patch.object(C.S,'select_build_environment',return_value={}),mock.patch.object(C,'intent_test_executable',return_value=pathlib.Path(td)/'testbin'),mock.patch.object(C.S,'checked',side_effect=[b'compiler',(name+': test\n').encode(),error]),contextlib.redirect_stdout(captured):
+    with self.assertRaises(C.S.Failure) as caught:C.run_intent_validation_tests(pathlib.Path(td),{})
+   self.assertIs(caught.exception,error);self.assertEqual(error.output,b'');self.assertNotIn('PRIVATE_SENTINEL',captured.getvalue());self.assertEqual(captured.getvalue().splitlines(),['CI_RETAINED_REPORT_SIZE '+json.dumps(value,sort_keys=True)])
+ def test_failure_projection_print_error_cannot_replace_original(self):
+  from unittest import mock
+  with tempfile.TemporaryDirectory() as td:
+   name=C.REPORT_MEASUREMENT_TEST;error=C.S.Failure('compile','command_failed',self.output(self.value()).encode(),exit_status=101)
+   with mock.patch.object(C,'INTENT_VALIDATION_TESTS',(name,)),mock.patch.object(C.S,'select_build_environment',return_value={}),mock.patch.object(C,'intent_test_executable',return_value=pathlib.Path(td)/'testbin'),mock.patch.object(C.S,'checked',side_effect=[b'compiler',(name+': test\n').encode(),error]),mock.patch('builtins.print',side_effect=OSError('broken output')):
+    with self.assertRaises(C.S.Failure) as caught:C.run_intent_validation_tests(pathlib.Path(td),{})
+   self.assertIs(caught.exception,error);self.assertEqual(error.output,b'')

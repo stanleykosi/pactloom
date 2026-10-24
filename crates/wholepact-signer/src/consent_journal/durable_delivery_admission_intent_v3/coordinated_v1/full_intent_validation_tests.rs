@@ -422,3 +422,6 @@ mod diagnostic_stage_tests;
 
 #[path = "full_intent_validation_tests/transport_identity_tests.rs"]
 mod transport_identity_tests;
+
+#[path = "full_intent_validation_tests/retained_report_tests.rs"]
+mod retained_report_tests;

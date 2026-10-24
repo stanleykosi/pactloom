@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed P56 canonical coordinated transport identity and selected maintained synthetic tests; no fullflow or artifact export."""
+"""Fixed P57 test-only retained report size measurement and selected maintained synthetic tests; no fullflow or artifact export."""
 import importlib.util,json,os,pathlib,shutil,time
 HERE=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('preflight_supervisor',HERE/'ci-financial-supervisor.py');S=importlib.util.module_from_spec(spec);spec.loader.exec_module(S)
@@ -288,6 +288,7 @@ INTENT_VALIDATION_TESTS=(
     'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::diagnostic_stage_tests::actual_connection_identity_error_keeps_original_journal_conversion',
     'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::diagnostic_stage_tests::actual_transaction_identity_error_keeps_original_journal_conversion',
     'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::transport_identity_tests::distinct_observed_and_original_process_labels_require_canonical_current_rows',
+    'consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::retained_report_tests::complete_prepared_display_reproduces_retained_and_admit_size_boundaries',
 )
 def intent_test_executable(raw,target):
     rows=[json.loads(line) for line in raw.splitlines() if line.startswith(b'{')]
@@ -320,6 +321,31 @@ def intent_test_executable(raw,target):
         out=pathlib.Path(row['out_dir']);assert out.is_dir() and not out.is_symlink() and out.resolve().is_relative_to(target.resolve());seen.add(package)
     assert seen==set(packages)
     return executables[0]
+REPORT_MEASUREMENT_TEST='consent_journal::authority::durable_delivery_admission_intent_v3::coordinated_v1::full_intent_validation_tests::retained_report_tests::complete_prepared_display_reproduces_retained_and_admit_size_boundaries'
+REPORT_MEASUREMENT_MARKER='COORDINATED_RETAINED_REPORT_SIZE_V1 '
+REPORT_LENGTHS=('pretty_display_bytes','compact_display_bytes','request_json_bytes','pretty_facts_bytes','compact_facts_bytes','pretty_presentation_bytes','compact_presentation_bytes','pretty_packet_bytes','compact_packet_bytes')
+REPORT_VALIDATIONS=('pretty_report_valid','compact_report_valid','pretty_facts_valid','compact_facts_valid','pretty_presentation_valid','compact_presentation_valid')
+def report_measurement(output):
+    # Only content-free measurements may leave this exact test boundary.
+    assert output.count(REPORT_MEASUREMENT_MARKER)==1
+    lines=[line for line in output.splitlines() if REPORT_MEASUREMENT_MARKER in line]
+    assert len(lines)==1
+    prefix,raw=lines[0].split(REPORT_MEASUREMENT_MARKER,1)
+    assert prefix in ('','test '+REPORT_MEASUREMENT_TEST+' ... ')
+    assert len(raw.encode('utf-8'))<=2048
+    def pairs(items):
+        result={}
+        for key,value in items:
+            assert key not in result
+            result[key]=value
+        return result
+    try:value=json.loads(raw,object_pairs_hook=pairs)
+    except (ValueError,UnicodeError):raise AssertionError('measurement_schema') from None
+    assert type(value) is dict and set(value)==set(REPORT_LENGTHS+REPORT_VALIDATIONS)
+    assert all(type(value[k]) is int and 0<=value[k]<=2*1024*1024 for k in REPORT_LENGTHS)
+    assert all(type(value[k]) is bool for k in REPORT_VALIDATIONS)
+    return value
+
 def intent_elapsed_ms(started):
     # Harness monotonic execution interval only; never a native authority clock.
     elapsed=time.monotonic()-started
@@ -332,17 +358,32 @@ def run_intent_validation_tests(root,env):
     raw=S.checked(args,'compile',env=selected,seconds=900,limit=32*1024*1024)
     executable=intent_test_executable(raw,root/'target-shared')
     started=time.monotonic();deadline=started+360
-    def fixed(args):
+    def fixed(args,measurement=False):
         remaining=deadline-time.monotonic();assert remaining>0
-        return S.checked(args,'compile',env=selected,seconds=min(60,remaining),limit=1024*1024).decode('utf-8',errors='strict')
+        try:
+            raw=S.checked(args,'compile',env=selected,seconds=min(60,remaining),limit=1024*1024)
+        except S.Failure as error:
+            if measurement:
+                try:
+                    value=report_measurement(error.output.decode('utf-8',errors='strict'))
+                    print('CI_RETAINED_REPORT_SIZE '+json.dumps(value,sort_keys=True))
+                except BaseException:
+                    pass # Missing/malformed measurements never replace the original failure.
+                finally:
+                    error.output=b'' # Never expose measurement-test stdout through compiler tails.
+            raise
+        try:return raw.decode('utf-8',errors='strict')
+        except UnicodeError:raise AssertionError('measurement_encoding' if measurement else 'test_encoding') from None
     # Verify the entire fixed selection before executing the first test.
     for name in INTENT_VALIDATION_TESTS:
         listing=fixed([str(executable),'--list','--exact',name])
         assert [line for line in listing.splitlines() if line.endswith(': test')]==[name+': test']
     for name in INTENT_VALIDATION_TESTS:
         test_started=time.monotonic()
-        output=fixed([str(executable),'--exact',name,'--test-threads=1'])
+        measurement=name==REPORT_MEASUREMENT_TEST
+        output=fixed([str(executable),'--exact',name,'--test-threads=1']+(['--nocapture'] if measurement else []),measurement=measurement)
         assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in output
+        if measurement:print('CI_RETAINED_REPORT_SIZE '+json.dumps(report_measurement(output),sort_keys=True))
         print('CI_INTENT_VALIDATION_TEST '+json.dumps(dict(name=name,passed=True,ignored=0,elapsed_ms=intent_elapsed_ms(test_started)),sort_keys=True))
     print('CI_INTENT_VALIDATION_TESTS '+json.dumps(dict(actual_maintained_tests=len(INTENT_VALIDATION_TESTS),elapsed_ms=intent_elapsed_ms(started),passed=True,genuine_pair_or_final_fixture=False,fullflow=False),sort_keys=True))
     return len(INTENT_VALIDATION_TESTS)
