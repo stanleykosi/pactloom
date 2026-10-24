@@ -59,31 +59,73 @@ fn coordinate(v: &Value, max: i64) -> f32 {
     let n=v.as_i64().expect("integer pointer coordinate"); assert!((0..max).contains(&n)); n as f32
 }
 
+// Test-only finite failure observation. The original panic payload is never
+// inspected or emitted; the previous hook is restored outside the unwind.
+static CHECKPOINT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+const CHECKPOINTS: [&str; 13] = ["Metadata", "ReadDto", "ParseDto", "ValidateDto",
+    "FormatReview", "CreateContext", "ReadCommand", "ParseCommand", "RunFrame",
+    "ReadSnapshot", "EncodeFrame", "WriteFrame", "Stop"];
+fn checkpoint(n: u8) {
+    CHECKPOINT.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+fn panic_source(file: &str) -> &'static str {
+    if file.ends_with("/egui_layout_tests.rs") { "Harness" }
+    else if file.ends_with("/financial_ci.rs") { "Observer" }
+    else if file.ends_with("/financial_source_ui.rs") { "SourceUi" }
+    else if file.contains("/egui-0.36.2/src/context") { "EguiContext" }
+    else if file.contains("/egui-0.36.2/") && file.ends_with("/ui.rs") { "EguiUi" }
+    else if file.contains("/egui-0.36.2/") && file.ends_with("/scroll_area.rs") { "EguiScrollArea" }
+    else if file.contains("/epaint-0.36.2/src/text/") { "EpaintText" }
+    else { "Other" }
+}
 #[test]
 #[ignore = "requires fixed diagnostic runner public DTO and finite input protocol"]
 fn actual_admit_review_layout_protocol() {
+    checkpoint(0);
+    let previous=std::panic::take_hook();
+    std::panic::set_hook(Box::new(|info| {
+        let stage=CHECKPOINTS[usize::from(CHECKPOINT.load(std::sync::atomic::Ordering::Relaxed))];
+        let (source,line,column)=info.location().map(|l|
+            (panic_source(l.file()),l.line().min(1_000_000),l.column().min(1_000_000)))
+            .unwrap_or(("Other",0,0));
+        // All text is from the closed enums above. No panic message/path/DTO.
+        let _=writeln!(std::io::stderr(),
+            "EGUI_LAYOUT_FAILURE_V1 {{\"checkpoint\":\"{stage}\",\"source\":\"{source}\",\"line\":{line},\"column\":{column}}}");
+    }));
+    let result=std::panic::catch_unwind(layout_protocol_inner);
+    std::panic::set_hook(previous);
+    if let Err(payload)=result { std::panic::resume_unwind(payload); }
+}
+fn layout_protocol_inner() {
     let path=std::env::var_os("WHOLEPACT_CI_EGUI_ADMIT_FIXTURE").expect("fixed fixture path required");
     let path=std::path::PathBuf::from(path);
     let metadata=std::fs::symlink_metadata(&path).expect("test DTO metadata");
     assert!(metadata.is_file() && metadata.permissions().mode() & 0o777 == 0o600);
     assert!(metadata.len()>0 && metadata.len()<=60*1024,"bounded public DTO");
+    checkpoint(1);
     let bytes=std::fs::read(&path).expect("test DTO read");
+    checkpoint(2);
     let p: SignerV3AdmitPresentationV1=serde_json::from_slice(&bytes).expect("strict public Admit DTO");
+    checkpoint(3);
     assert!(p.validate().is_ok(),"complete validated material-derived Admit DTO");
     assert_eq!(p.actor.signer_role,Role::Signer1);
+    checkpoint(4);
     let no_ready: Option<SignerV3AdmitReadyV1> = None;
     let text=serde_json::to_string_pretty(&json!({"exact_admission":p,"authenticated_ready":no_ready})).expect("exact UI formatter");
     assert!(text.len()<=128*1024,"bounded exact UI text, never truncated");
+    checkpoint(5);
     let ctx=egui::Context::default();
     let (mut read_to_end,mut acknowledged,mut arm_clicked)=(false,false,false);
     let mut last_tail=None; let mut elapsed_ms=0u64; let mut wheel_started=false; let mut position=egui::pos2(0.0,0.0);
     let input=std::io::stdin(); let mut input=input.lock();
     for seq in 1..=4096u64 {
+        checkpoint(6);
         let mut line=Vec::new();
         let n=input.by_ref().take(4097).read_until(b'\n',&mut line).expect("bounded command read");
         assert!(n>0&&n<=4096&&line.last()==Some(&b'\n'),"bounded complete command");
+        checkpoint(7);
         let command:Value=serde_json::from_slice(&line).expect("closed command JSON");
-        if command["kind"]=="Stop" { keys(&command,&["kind"]); println!("EGUI_LAYOUT_DONE_V1 {{\"frames\":{},\"arm_clicked\":{}}}",seq-1,arm_clicked); return; }
+        if command["kind"]=="Stop" { checkpoint(12); keys(&command,&["kind"]); println!("EGUI_LAYOUT_DONE_V1 {{\"frames\":{},\"arm_clicked\":{}}}",seq-1,arm_clicked); return; }
         keys(&command,&["kind","dt_ms","event"]); assert_eq!(command["kind"],"Frame");
         let dt=command["dt_ms"].as_u64().expect("integer frame interval"); assert!((1..=1000).contains(&dt));
         elapsed_ms=elapsed_ms.checked_add(dt).expect("finite frame time");
@@ -100,6 +142,7 @@ fn actual_admit_review_layout_protocol() {
             }
         }
         let mut arm_enabled=false;
+        checkpoint(8);
         let _=ctx.run_ui(raw, |parent| {
             let frame=ctx.cumulative_frame_nr(); let visible=parent.is_enabled()&&parent.is_visible()&&!parent.is_sizing_pass();
             crate::financial_ci::begin(&ctx,"V3AdmitReview","None",Some("Signer1"),true,false,false);
@@ -118,11 +161,14 @@ fn actual_admit_review_layout_protocol() {
             (read_to_end,acknowledged)=review_progress_after_pass((read_to_end,acknowledged),(painted_to_end,ack_in_pass),eligible,true);
             if eligible {last_tail=Some(frame); if clicked {assert!(v3_admission_tail_eligible(Phase::V3AdmitReview,Phase::V3AdmitReview,read_to_end,acknowledged,true,false,frame>0));arm_clicked=true;}}
         });
+        checkpoint(9);
         let snapshot=crate::financial_ci::take_layout_test_snapshot();
         let geometry=GEOMETRY.with(|g|g.borrow().clone());
+        checkpoint(10);
         let out=json!({"seq":seq,"elapsed_ms":elapsed_ms,"snapshot":snapshot,"geometry":geometry,
             "state":{"read_to_end":read_to_end,"acknowledged":acknowledged,"arm_enabled":arm_enabled,"arm_clicked":arm_clicked}});
         let encoded=serde_json::to_string(&out).expect("finite frame output"); assert!(encoded.len()<=16*1024);
+        checkpoint(11);
         println!("EGUI_LAYOUT_FRAME_V1 {encoded}"); std::io::stdout().flush().expect("test frame flush");
     }
     panic!("bounded layout frame budget exhausted");

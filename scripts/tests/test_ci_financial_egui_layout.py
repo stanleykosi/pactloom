@@ -1,6 +1,7 @@
 """Bridge contract tests only. No egui/runtime/layout qualification is claimed."""
 import copy
 import importlib.util
+import json
 import os
 import pathlib
 import subprocess
@@ -29,6 +30,50 @@ def row():
 
 
 class BridgeContractTests(unittest.TestCase):
+    def test_terminal_eof_keeps_finite_panic_and_original_exit(self):
+        """Real benign pipe/exit ordering; not an egui or authority substitute."""
+        original = subprocess.Popen
+        failure = dict(checkpoint='RunFrame', source='Harness', line=100, column=20)
+        code = ('import json,os,sys,time; '
+                'request=json.loads(sys.stdin.buffer.readline()); '
+                'assert request=={"kind":"Frame","dt_ms":16,"event":None}; '
+                'print("running 1 test",flush=True); os.close(1); time.sleep(.02); '
+                'sys.stderr.write("suppressed private sentinel\\n"); '
+                'sys.stderr.write("EGUI_LAYOUT_FAILURE_V1 "+'
+                + repr(json.dumps(failure)) + '+"\\n"); '
+                'sys.stderr.flush(); sys.exit(101)')
+        def benign(args, **kwargs):
+            self.assertEqual(args, [sys.executable, '--exact', B.TEST, '--ignored',
+                                   '--nocapture', '--test-threads=1'])
+            return original([sys.executable, '-c', code], **kwargs)
+        with mock.patch.object(B.subprocess, 'Popen', side_effect=benign):
+            pipe = B.PipeFrames(pathlib.Path(sys.executable), F.C, time.monotonic_ns() + F.C.ACTION_NS)
+        try:
+            with self.assertRaises(B.DiagnosticError) as caught:
+                pipe.frame()
+            self.assertEqual(str(caught.exception), 'child_protocol_eof')
+            self.assertTrue(pipe.close())
+            self.assertEqual(pipe.startup, dict(selected_test_count=1, first_frame_request_sent=True,
+                failure_record_status='Valid', failure=failure,
+                precleanup_exit=dict(state='Exited', code=101, signal=None)))
+            self.assertEqual(pipe.process.returncode, 101)
+            self.assertEqual(pipe.frames, [])
+            summary = B.public_summary(dict(frames=[], outcome='diagnostic_rejected',
+                failure_code='child_protocol_eof', counters=None, wall_elapsed_ns=1,
+                cleanup_ok=True, startup=pipe.startup), F)
+            self.assertNotIn('sentinel', json.dumps(summary))
+            self.assertEqual(summary['failure_code'], 'child_protocol_eof')
+            for bad in (dict(failure, payload='forbidden'), dict(failure, checkpoint=['RunFrame']),
+                        dict(failure, source='unbounded filename'), dict(failure, line=-1)):
+                with self.assertRaises(B.DiagnosticError):
+                    B.validate_failure_record(bad)
+            # A duplicate or malformed finite marker is never forwarded.
+            pipe.stderr_chunk(B.FAILURE_PREFIX + json.dumps(failure).encode() + b'\n')
+            self.assertEqual(pipe.startup['failure_record_status'], 'Rejected')
+            self.assertIsNone(pipe.startup['failure'])
+        finally:
+            pipe.close()
+
     def test_exact_source_and_input_methods_are_not_reimplemented(self):
         controller = B.controller_type(F)
         for name in ('click', 'scroll_up', 'scroll_down', '_budget',
@@ -69,6 +114,25 @@ class BridgeContractTests(unittest.TestCase):
                 B.validate_summary(bad)
         self.assertEqual(B.validate_summary(dict(schema=1, outcome='diagnostic_setup_rejected')),
                          dict(schema=1, outcome='diagnostic_setup_rejected'))
+        success = copy.deepcopy(summary)
+        success.update(outcome='source_bound_arm_reachable', failure_code=None,
+            final_state=dict.fromkeys(('read_to_end', 'acknowledged', 'arm_enabled', 'arm_clicked'), True),
+            first_transition_seq=dict.fromkeys(('read_to_end', 'acknowledged', 'arm_enabled', 'arm_clicked'), 1),
+            startup=dict(selected_test_count=1, first_frame_request_sent=True,
+                failure_record_status='Absent', failure=None,
+                precleanup_exit=dict(state='Exited', code=0, signal=None)))
+        B.validate_summary(success)
+        for alter in (
+            lambda r: r.update(startup=None),
+            lambda r: r['startup'].update(selected_test_count=0),
+            lambda r: r['startup'].update(first_frame_request_sent=False),
+            lambda r: r['startup'].update(failure_record_status='Rejected'),
+            lambda r: r['startup'].update(precleanup_exit=dict(state='Running', code=None, signal=None)),
+        ):
+            bad = copy.deepcopy(success)
+            alter(bad)
+            with self.assertRaises(B.DiagnosticError):
+                B.validate_summary(bad)
 
     def test_original_input_count_and_fixed_axis_mapping(self):
         class Pipe:

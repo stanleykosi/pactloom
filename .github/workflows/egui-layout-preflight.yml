@@ -1,14 +1,14 @@
-name: Exact material-backed headless egui review experiment
+name: Exact material-backed headless egui startup diagnosis
 on:
   push:
-    branches: [checkpoint/egui-layout-d62]
+    branches: [checkpoint/egui-layout-d62b]
 permissions: {}
 concurrency:
-  group: egui-layout-d62
+  group: egui-layout-d62b
   cancel-in-progress: false
 jobs:
   diagnostic:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/egui-layout-d62' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/egui-layout-d62b' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

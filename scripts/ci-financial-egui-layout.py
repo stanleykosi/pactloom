@@ -24,6 +24,10 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parent
 TEST = 'financial_source_ui::egui_layout_tests::actual_admit_review_layout_protocol'
 PREFIX = b'EGUI_LAYOUT_FRAME_V1 '
+FAILURE_PREFIX = b'EGUI_LAYOUT_FAILURE_V1 '
+CHECKPOINTS = frozenset('''Metadata ReadDto ParseDto ValidateDto FormatReview CreateContext
+ReadCommand ParseCommand RunFrame ReadSnapshot EncodeFrame WriteFrame Stop'''.split())
+PANIC_SOURCES = frozenset('''Harness Observer SourceUi EguiContext EguiUi EguiScrollArea EpaintText Other'''.split())
 DTO_ENV = 'WHOLEPACT_CI_EGUI_ADMIT_FIXTURE'
 MAX_FRAMES = 4096
 FRAME_MS = 16
@@ -38,7 +42,7 @@ protocol_host_context protocol_widget protocol_geometry protocol_state protocol_
 wall_deadline child_exit child_pipe child_output_bound child_protocol_eof frame_bound
 child_initialization input_button input_forbidden progress_bound host_observation_forbidden
 dto_missing dto_path dto_metadata report_bound initial_gate_control arm_attempt_missing
-process_or_io child_cleanup test_binary'''.split())
+process_or_io child_cleanup test_binary startup_diagnostic_invalid'''.split())
 PINS = {
     'ci-financial-flow.py': '53897379193db82848366970474a095c11ce7553373e9a10e400b84dca2a0a67',
     'ci-financial-scenario.py': 'db76d745c672a002cafe22b6195acd6ab5c2073a89fe79e4aad75d1cda6fc98e',
@@ -77,6 +81,43 @@ def exact(value, keys):
 
 def finite(value, low=-10_000_000, high=10_000_000):
     return type(value) in (int, float) and math.isfinite(value) and low <= value <= high
+
+
+def validate_failure_record(value):
+    exact(value, ('checkpoint', 'source', 'line', 'column'))
+    require(type(value['checkpoint']) is str and value['checkpoint'] in CHECKPOINTS
+            and type(value['source']) is str and value['source'] in PANIC_SOURCES,
+            'startup_diagnostic_invalid')
+    require(all(type(value[k]) is int and 0 <= value[k] <= 1_000_000 for k in ('line', 'column')),
+            'startup_diagnostic_invalid')
+    return value
+
+
+def validate_startup(value):
+    exact(value, ('selected_test_count', 'first_frame_request_sent', 'failure_record_status',
+                  'failure', 'precleanup_exit'))
+    count = value['selected_test_count']
+    require(count is None or (type(count) is int and 0 <= count <= 1), 'startup_diagnostic_invalid')
+    require(type(value['first_frame_request_sent']) is bool, 'startup_diagnostic_invalid')
+    status = value['failure_record_status']
+    require(status in ('Absent', 'Valid', 'Rejected'), 'startup_diagnostic_invalid')
+    if status == 'Valid':
+        validate_failure_record(value['failure'])
+    else:
+        require(value['failure'] is None, 'startup_diagnostic_invalid')
+    result = value['precleanup_exit']
+    exact(result, ('state', 'code', 'signal'))
+    state = result['state']
+    require(state in ('Unobserved', 'Running', 'Exited', 'Signaled'), 'startup_diagnostic_invalid')
+    if state == 'Exited':
+        require(type(result['code']) is int and 0 <= result['code'] <= 255
+                and result['signal'] is None, 'startup_diagnostic_invalid')
+    elif state == 'Signaled':
+        require(result['code'] is None and type(result['signal']) is int
+                and 1 <= result['signal'] <= 64, 'startup_diagnostic_invalid')
+    else:
+        require(result['code'] is None and result['signal'] is None, 'startup_diagnostic_invalid')
+    return value
 
 
 def validate_frame(row, sequence, contract):
@@ -124,10 +165,15 @@ class PipeFrames:
         self.closed = False
         self.cleanup_ok = True
         self.buffer = bytearray()
+        self.stderr_buffer = bytearray()
         self.discarded_bytes = 0
         self.frames = []
         self.last = None
         self.stopped = False
+        self.stdout_eof = False
+        self.startup = dict(selected_test_count=None, first_frame_request_sent=False,
+            failure_record_status='Absent', failure=None,
+            precleanup_exit=dict(state='Unobserved', code=None, signal=None))
         try:
             self.process = subprocess.Popen([str(binary), '--exact', TEST, '--ignored', '--nocapture',
                 '--test-threads=1'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -150,10 +196,48 @@ class PipeFrames:
         self.remaining()
         require(self.process.poll() is None, 'child_exit')
         try:
-            self.process.stdin.write(json.dumps(value, separators=(',', ':')).encode() + b'\n')
+            encoded = json.dumps(value, separators=(',', ':')).encode() + b'\n'
+            require(self.process.stdin.write(encoded) == len(encoded), 'child_pipe')
             self.process.stdin.flush()
         except (OSError, ValueError):
             raise DiagnosticError('child_pipe') from None
+
+    def stderr_chunk(self, chunk):
+        self.discarded_bytes += len(chunk)
+        require(self.discarded_bytes <= 1_048_576, 'child_output_bound')
+        self.stderr_buffer.extend(chunk)
+        require(len(self.stderr_buffer) <= 65536, 'child_output_bound')
+        while b'\n' in self.stderr_buffer:
+            line, _, rest = self.stderr_buffer.partition(b'\n')
+            self.stderr_buffer = bytearray(rest)
+            if not line.startswith(FAILURE_PREFIX):
+                continue
+            try:
+                require(self.startup['failure_record_status'] == 'Absent', 'startup_diagnostic_invalid')
+                value = validate_failure_record(self.contract.loads(bytes(line[len(FAILURE_PREFIX):]), limit=512))
+                self.startup['failure_record_status'] = 'Valid'
+                self.startup['failure'] = value
+            except (DiagnosticError, self.contract.Rejected, TypeError):
+                self.startup['failure_record_status'] = 'Rejected'
+                self.startup['failure'] = None
+
+    def stdout_metadata(self, line):
+        if line in (b'running 0 tests', b'running 1 test'):
+            count = 0 if line == b'running 0 tests' else 1
+            if self.startup['selected_test_count'] is not None:
+                self.startup['failure_record_status'] = 'Rejected'
+                self.startup['failure'] = None
+            self.startup['selected_test_count'] = count
+
+    def discard_stdout_chunk(self, chunk):
+        self.discarded_bytes += len(chunk)
+        require(self.discarded_bytes <= 1_048_576, 'child_output_bound')
+        self.buffer.extend(chunk)
+        require(len(self.buffer) <= 65536, 'child_output_bound')
+        while b'\n' in self.buffer:
+            line, _, rest = self.buffer.partition(b'\n')
+            self.buffer = bytearray(rest)
+            self.stdout_metadata(bytes(line))
 
     def read_row(self):
         while True:
@@ -164,6 +248,7 @@ class PipeFrames:
                     raw = bytes(line.split(PREFIX, 1)[1])
                     # libtest may put its fixed test-name prefix on this line.
                     return self.contract.loads(raw, limit=65536)
+                self.stdout_metadata(bytes(line))
                 self.discarded_bytes += len(line) + 1
                 require(self.discarded_bytes <= 1_048_576, 'child_output_bound')
                 continue
@@ -175,17 +260,20 @@ class PipeFrames:
                 if not chunk:
                     self.selector.unregister(key.fileobj)
                     if key.data == 'stdout':
+                        self.stdout_eof = True
                         raise DiagnosticError('child_protocol_eof')
                 elif key.data == 'stdout':
                     self.buffer.extend(chunk)
                 else:
-                    self.discarded_bytes += len(chunk)
-                    require(self.discarded_bytes <= 1_048_576, 'child_output_bound')
+                    self.stderr_chunk(chunk)
 
     def frame(self, event=None, *, reason='snapshot'):
         require(len(self.frames) < MAX_FRAMES, 'frame_bound')
         self.send(dict(kind='Frame', dt_ms=FRAME_MS, event=event))
+        if not self.frames:
+            self.startup['first_frame_request_sent'] = True
         row = validate_frame(self.read_row(), len(self.frames) + 1, self.contract)
+        require(self.startup['failure_record_status'] == 'Absent', 'startup_diagnostic_invalid')
         self.last = row
         # No raw native text, report display, DTO, material IDs or runtime data.
         self.frames.append(dict(row, input_event=event, reason=reason))
@@ -206,15 +294,63 @@ class PipeFrames:
                 if not chunk:
                     self.selector.unregister(key.fileobj)
                 else:
-                    self.discarded_bytes += len(chunk)
-                    require(self.discarded_bytes <= 1_048_576, 'child_output_bound')
+                    if key.data == 'stderr':
+                        self.stderr_chunk(chunk)
+                    else:
+                        self.discarded_bytes += len(chunk)
+                        require(self.discarded_bytes <= 1_048_576, 'child_output_bound')
         require(self.process.wait(timeout=self.remaining()) == 0, 'child_exit')
+
+    def observe_precleanup_exit(self):
+        """Failure-only bounded drain. Never let cleanup signals replace original exit."""
+        if self.process is None:
+            return
+        end = min(self.deadline_ns, time.monotonic_ns() + (1_000_000_000 if self.stdout_eof else 0))
+        try:
+            while self.selector is not None and self.selector.get_map():
+                remaining = max(0, (end - time.monotonic_ns()) / 1e9)
+                ready = self.selector.select(remaining)
+                if not ready:
+                    break
+                for key, _ in ready:
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    if not chunk:
+                        self.selector.unregister(key.fileobj)
+                        if key.data == 'stdout':
+                            self.stdout_eof = True
+                    elif key.data == 'stderr':
+                        self.stderr_chunk(chunk)
+                    else:
+                        self.discard_stdout_chunk(chunk)
+                if time.monotonic_ns() >= end:
+                    break
+            code = self.process.poll()
+            if code is None and self.stdout_eof and time.monotonic_ns() < end:
+                try:
+                    code = self.process.wait(timeout=(end - time.monotonic_ns()) / 1e9)
+                except subprocess.TimeoutExpired:
+                    pass
+            if code is None:
+                result = dict(state='Running', code=None, signal=None)
+            elif code >= 0:
+                result = dict(state='Exited', code=code, signal=None)
+            else:
+                result = dict(state='Signaled', code=None, signal=-code)
+            self.startup['precleanup_exit'] = result
+            if self.stderr_buffer.startswith(FAILURE_PREFIX):
+                self.startup['failure_record_status'] = 'Rejected'
+                self.startup['failure'] = None
+        except (OSError, ValueError, DiagnosticError):
+            # Preserve the original controller/EOF failure, including its code.
+            self.startup['failure_record_status'] = 'Rejected'
+            self.startup['failure'] = None
 
     def close(self):
         if self.closed:
             return self.cleanup_ok
         self.closed = True
         if self.process is not None:
+            self.observe_precleanup_exit()
             # Even a reaped leader can leave descendants in its owned session.
             # Attempt every cleanup boundary; never replace the primary failure.
             for sig in (signal.SIGTERM, signal.SIGKILL):
@@ -397,7 +533,7 @@ def public_summary(report, flow):
             if w['tag'] in ('ReviewBody', 'ReviewAcknowledgement', 'ArmV3Admit')],
         counters=count, first_transition_seq={key: next((r['seq'] for r in frames if r['state'][key]), None)
             for key in ('read_to_end', 'acknowledged', 'arm_enabled', 'arm_clicked')},
-        cleanup_ok=report.get('cleanup_ok'))
+        cleanup_ok=report.get('cleanup_ok'), startup=report.get('startup'))
     require(result['cleanup_ok'] is None or type(result['cleanup_ok']) is bool, 'report_bound')
     require(len(json.dumps(result, allow_nan=False).encode()) <= 16384, 'report_bound')
     return validate_summary(result)
@@ -413,7 +549,7 @@ def validate_summary(value):
     exact(value, ('schema', 'classification', 'outcome', 'failure_code', 'frames',
           'input_events_delivered', 'frame_ms', 'observation_min_ms', 'wall_elapsed_ns',
           'simulated_elapsed_ms', 'initial_scroll', 'final_state', 'final_geometry',
-          'final_widgets', 'counters', 'first_transition_seq', 'cleanup_ok'))
+          'final_widgets', 'counters', 'first_transition_seq', 'cleanup_ok', 'startup'))
     require(type(value['schema']) is int and value['schema'] == 1 and
             value['classification'] == 'D-source-bound-egui-diagnostic-only', 'report_bound')
     require(value['outcome'] in ('source_bound_arm_reachable', 'controller_rejected',
@@ -435,6 +571,8 @@ def validate_summary(value):
             0 <= value['wall_elapsed_ns'] <= 180_000_000_000, 'report_bound')
     require(value['initial_scroll'] == 'fresh-top-not-live-retained-offset', 'report_bound')
     require(value['cleanup_ok'] is None or type(value['cleanup_ok']) is bool, 'report_bound')
+    if value['startup'] is not None:
+        validate_startup(value['startup'])
     counters_value = value['counters']
     if counters_value is not None:
         exact(counters_value, ('actions', 'seek_body', 'seek_ack', 'seek_arm', 'outer_up',
@@ -463,6 +601,10 @@ def validate_summary(value):
     if value['outcome'] == 'source_bound_arm_reachable':
         require(code is None and count > 0 and value['final_state']['arm_clicked'] and
                 value['cleanup_ok'] is True, 'report_bound')
+        startup = value['startup']
+        require(startup is not None and startup['first_frame_request_sent']
+                and startup['selected_test_count'] == 1 and startup['failure_record_status'] == 'Absent'
+                and startup['precleanup_exit'] == dict(state='Exited', code=0, signal=None), 'report_bound')
     else:
         require(code is not None, 'report_bound')
     require(len(json.dumps(value, allow_nan=False).encode()) <= 16384, 'report_bound')
@@ -484,7 +626,7 @@ def run(binary):
         observation_throttle_anchor_sha256=hashlib.sha256(THROTTLE_ANCHOR.encode()).hexdigest(),
         transport='test-subprocess-not-Weston', frame_clock='simulated-not-live-cadence',
         authority='none-Arm-dry-intercept-Final-forbidden', outcome='not_started',
-        initial_control=None, counters=None, frames=[], review_steps=[])
+        initial_control=None, counters=None, frames=[], review_steps=[], startup=None)
     try:
         pipe = PipeFrames(binary, contract, fixture.deadline_ns)
         controller = controller_type(flow)(pipe)
@@ -521,6 +663,7 @@ def run(binary):
             report['counters'] = counters(driver)
         if pipe is not None:
             report['cleanup_ok'] = pipe.close()
+            report['startup'] = validate_startup(pipe.startup)
             if not report['cleanup_ok'] and report['outcome'] == 'source_bound_arm_reachable':
                 report['outcome'] = 'diagnostic_rejected'
                 report['failure_code'] = 'child_cleanup'

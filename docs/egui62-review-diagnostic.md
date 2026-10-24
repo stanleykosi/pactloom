@@ -124,6 +124,38 @@ The outer hosted driver must import the bridge and call `validate_summary(value)
 before re-emitting that stdout object; it rejects extra keys, arbitrary failure
 text, nonfinite geometry, altered timing constants and inconsistent outcomes.
 
+### D62b startup observation after D62's pre-frame EOF
+
+D62 built both test binaries and exported a validated 37,220-byte DTO, then
+returned `child_protocol_eof` before any frame or input event was observed. That
+result did not identify a layout failure. D62b adds no retry or application
+change: only a bounded native panic-location record and its bridge projection.
+
+The supplemental `startup` summary is null if unavailable; otherwise it has
+exact fields `selected_test_count` (null, 0 or 1), `first_frame_request_sent`
+(true only after the complete JSON write and flush), `failure_record_status`
+(`Absent`, `Valid`, `Rejected`), `failure` (null or the record below), and
+`precleanup_exit`. The latter is `{state,code,signal}` with `Unobserved`/`Running`
+and null values, `Exited` with a 0–255 exit code, or `Signaled` with a 1–64 signal.
+Cleanup termination never overwrites this original-child observation. The exact
+libtest selected-count line is an observation, not proof that a test executed.
+
+The Rust hook suppresses the original panic payload and emits only
+`EGUI_LAYOUT_FAILURE_V1 {checkpoint,source,line,column}` on stderr. Checkpoints:
+`Metadata`, `ReadDto`, `ParseDto`, `ValidateDto`, `FormatReview`, `CreateContext`,
+`ReadCommand`, `ParseCommand`, `RunFrame`, `ReadSnapshot`, `EncodeFrame`,
+`WriteFrame`, `Stop`. Source classes: `Harness`, `Observer`, `SourceUi`,
+`EguiContext`, `EguiUi`, `EguiScrollArea`, `EpaintText`, `Other`. Line and column
+are bounded integers 0–1,000,000; no path, panic message, stack or DTO is emitted.
+Duplicate or malformed markers are rejected without retaining their payload.
+The same original panic is resumed after restoring the previous hook.
+
+On EOF the bridge may drain at most one second of remaining stderr, still within
+the unchanged 120-second wall deadline and 1 MiB discarded-output ceiling. The
+original EOF/controller failure remains primary. One benign real-pipe regression
+covers stdout EOF arriving before the finite panic record and original exit 101;
+it does not claim to reproduce the unknown native panic or qualify layout.
+
 `source_bound_arm_reachable` establishes only this composition's reachability
 under the disclosed timing/transport model. `controller_rejected` preserves the
 original closed rejection code and last actual geometry/counters. Neither
@@ -137,6 +169,6 @@ python3 -I -B -m unittest discover -s scripts/tests -p test_ci_financial_egui_la
 python3 -I -B -m unittest discover -s scripts/tests -p test_ci_financial_scenario.py -v
 ```
 
-These check six source/protocol/input/cadence/benign-process-cleanup contracts and
+These check seven source/protocol/input/cadence/benign-process-cleanup contracts and
 the six existing NativeScenario guards. The real egui test must still be built
 and executed in the reviewed hosted graph.

@@ -52,7 +52,7 @@ class EguiPreflightBoundaryTests(unittest.TestCase):
    with self.assertRaises(AssertionError):D.private_dto(p)
  def test_workflow_is_checkpoint_only_no_upload_or_qualification_activation(self):
   s=(ROOT.parent/'.github/workflows/egui-layout-preflight.yml').read_text()
-  self.assertIn('branches: [checkpoint/egui-layout-d62]',s);self.assertIn('permissions: {}',s);self.assertIn('timeout-minutes: 45',s)
+  self.assertIn('branches: [checkpoint/egui-layout-d62b]',s);self.assertIn('permissions: {}',s);self.assertIn('timeout-minutes: 45',s)
   for forbidden in ('upload-artifact','qualification/durable-proposal-v1','secrets.','--release','workflow_dispatch'):self.assertNotIn(forbidden,s)
 
  def test_export_marker_is_one_closed_finite_record_not_raw_output(self):
