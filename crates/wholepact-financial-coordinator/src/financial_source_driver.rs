@@ -29,6 +29,19 @@ macro_rules! history_error {
     }};
 }
 
+// Failure observation only; evaluate the original operation once and return its error.
+macro_rules! history_retirement_detail {
+    ($stage:ident, $operation:expr) => {{
+        let result = $operation;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error) = &result {
+            use wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics as diagnostic;
+            diagnostic::work_fallback(diagnostic::DriverStage::$stage,error);
+        }
+        result
+    }};
+}
+
 use crate::{rejected, Result};
 use std::{
     sync::{
@@ -1828,52 +1841,52 @@ fn retire_history_exclusively(
 ) -> Result<()> {
     let role = ticket.role();
     let original_cutoff = ticket.deadline();
-    output
+    history_retirement_detail!(HistoryRetirementNativePauseTicket, output
         .try_send(Outcome::HistoryRetirement(ticket))
-        .map_err(|_| rejected("History retirement native receiver unavailable"))?;
+        .map_err(|_| rejected("History retirement native receiver unavailable")))?;
     let outbound = loop {
         if revoked.load(Ordering::Acquire) || Instant::now() >= original_cutoff {
-            return Err(rejected(
+            return history_retirement_detail!(HistoryRetirementNativePauseWait, Err(rejected(
                 "History retirement interrupted before native pause",
-            ));
+            )));
         }
         // No reap can start until this sole owner receives the nominal pause
         // outbound. Ordinary actor checks are still valid before that point.
-        endpoint.check_original_tree_alive()?;
+        history_retirement_detail!(HistoryRetirementNativePauseWait, endpoint.check_original_tree_alive())?;
         match input.try_recv() {
             Ok(Command::RetireHistory(outbound)) => break outbound,
             Ok(_) => {
-                return Err(rejected(
+                return history_retirement_detail!(HistoryRetirementNativePauseWait, Err(rejected(
                     "unexpected positive command during History retirement",
-                ))
+                )))
             }
             Err(mpsc::TryRecvError::Disconnected) => {
-                return Err(rejected("History retirement native owner ended"))
+                return history_retirement_detail!(HistoryRetirementNativePauseWait, Err(rejected("History retirement native owner ended")))
             }
             Err(mpsc::TryRecvError::Empty) => thread::sleep(Duration::from_millis(1)),
         }
     };
     let completion = endpoint.retire_witness(outbound)?;
     if completion.role() != role {
-        return Err(rejected("History retirement actual role changed"));
+        return history_retirement_detail!(HistoryRetirementNativeResume, Err(rejected("History retirement actual role changed")));
     }
-    output
+    history_retirement_detail!(HistoryRetirementNativeResume, output
         .try_send(Outcome::HistoryRetired(completion))
-        .map_err(|_| rejected("History retirement completion receiver unavailable"))?;
+        .map_err(|_| rejected("History retirement completion receiver unavailable")))?;
     loop {
         if revoked.load(Ordering::Acquire) || Instant::now() >= original_cutoff {
-            return Err(rejected(
+            return history_retirement_detail!(HistoryRetirementNativeResume, Err(rejected(
                 "History retirement interrupted before native resume",
-            ));
+            )));
         }
-        if endpoint.finish_retirement_resume()? {
+        if history_retirement_detail!(HistoryRetirementNativeResume, endpoint.finish_retirement_resume())? {
             break;
         }
         thread::sleep(Duration::from_millis(1));
     }
-    output
+    history_retirement_detail!(HistoryRetirementNativeResume, output
         .try_send(Outcome::HistoryResumed(role))
-        .map_err(|_| rejected("History resume receiver unavailable"))?;
+        .map_err(|_| rejected("History resume receiver unavailable")))?;
     Ok(())
 }
 
@@ -2517,5 +2530,23 @@ mod return_driver_tests {
         assert!(!claim_once(&mut exact, Role::Signer1, true));
         assert!(claim_once(&mut exact, Role::Signer1, false));
         assert!(!claim_once(&mut exact, Role::Signer1, false));
+    }
+}
+
+#[cfg(test)]
+mod history_retirement_detail_tests {
+    #[test]
+    fn retirement_handoff_observation_preserves_operation_and_original_io_error() {
+        let calls=std::cell::Cell::new(0);
+        let ok:crate::Result<u8>=history_retirement_detail!(HistoryRetirementNativePauseTicket,{
+            calls.set(calls.get()+1);Ok(7)
+        });
+        assert_eq!(ok.unwrap(),7);assert_eq!(calls.get(),1);
+        let failed:crate::Result<()>=history_retirement_detail!(HistoryRetirementNativePauseWait,{
+            calls.set(calls.get()+1);Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,"retirement wrapper sentinel"))
+        });
+        let error=failed.unwrap_err();assert_eq!(calls.get(),2);
+        assert_eq!(error.kind(),std::io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(),"retirement wrapper sentinel");
     }
 }

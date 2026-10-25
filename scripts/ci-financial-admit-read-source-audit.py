@@ -45,6 +45,10 @@ def restore_history_observer(text):
     return text.replace(new,old)
 
 def restore_history_actor(text):
+    # Exact P71 finite retirement domain and actual first-detail test only.
+    assert text.count('HistoryRetirementError,HistoryRetirementNativePauseTicket,HistoryRetirementNativePauseWait,HistoryRetirementHostQuiescence,HistoryRetirementPurposeClose,HistoryRetirementOwnedStopReap,HistoryRetirementHostResume,HistoryRetirementNativeResume});')==1
+    text=text.replace('HistoryRetirementError,HistoryRetirementNativePauseTicket,HistoryRetirementNativePauseWait,HistoryRetirementHostQuiescence,HistoryRetirementPurposeClose,HistoryRetirementOwnedStopReap,HistoryRetirementHostResume,HistoryRetirementNativeResume});','HistoryRetirementError});',1)
+    text=remove_region(text,' #[test] fn retirement_actual_error_enables_first_finite_detail_without_rewrite() {',' #[test] fn early_append_panic_keeps_first_worker_class_without_retry() {','08b66a3ef146bfcb37cb7ff0fce913f48cab40654afd4ad11e22a8c888d2206d')
     stages=','+','.join(W_STAGES+C_ERROR_STAGES)
     assert text.count(stages)==1
     text=text.replace(stages,'')
@@ -57,6 +61,20 @@ def restore_shared_wall_regression(text):
     assert hashlib.sha256(text.encode()).hexdigest()=="33c4b1f180f6f4093fd195a65a27921bceea06cde078b9917e22f3a3048b0079"
     assert text.count(SHARED_WALL_REGRESSION)==1
     return text.replace(SHARED_WALL_REGRESSION,"",1)
+
+# Exact P71 repaint relocation and cfg(test)-only child declaration. The
+# pre-existing raw hook, every guard and the original 20 ms cadence stay pinned.
+UI_REPAINT_CURRENT_SHA = '930e2e54c6429bde08d5bddd6dc671c5a8b335777cb5e00bcc7763b6d11d5a27'
+UI_REPAINT_INSERTED = '        // Poll inside every egui pass, including retirement/eligibility returns.\n        // A pre-pass raw-hook request can be suppressed before begin_pass resets\n        // its delay; it is not a substitute for this in-pass lifecycle wakeup.\n        ctx.request_repaint_after(Duration::from_millis(20));\n'
+UI_REPAINT_TEST_INCLUDE = '\n#[cfg(test)]\n#[path = "financial_source_ui/repaint_tests.rs"]\nmod repaint_tests;\n'
+UI_REPAINT_BOTTOM = '        ctx.request_repaint_after(Duration::from_millis(20));\n'
+UI_REPAINT_BOUNDARY = '    }\n    fn apply_intent(&mut self, intent: Intent, frame: u64, ctx: &egui::Context) -> Result<()> {'
+def restore_ui_repaint(text):
+    assert hashlib.sha256(text.encode()).hexdigest()==UI_REPAINT_CURRENT_SHA
+    assert text.count(UI_REPAINT_INSERTED)==1 and text.count(UI_REPAINT_TEST_INCLUDE)==1
+    assert text.count(UI_REPAINT_BOUNDARY)==1
+    text=text.replace(UI_REPAINT_INSERTED,'',1).replace(UI_REPAINT_TEST_INCLUDE,'',1)
+    return text.replace(UI_REPAINT_BOUNDARY,UI_REPAINT_BOTTOM+UI_REPAINT_BOUNDARY,1)
 
 def digest(text): return hashlib.sha256(text.encode()).hexdigest()
 def tokens(text):

@@ -4781,6 +4781,10 @@ impl Window {
     }
     fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        // Poll inside every egui pass, including retirement/eligibility returns.
+        // A pre-pass raw-hook request can be suppressed before begin_pass resets
+        // its delay; it is not a substitute for this in-pass lifecycle wakeup.
+        ctx.request_repaint_after(Duration::from_millis(20));
         let facts = ctx.input(|input| {
             raw_facts(&input.raw).map(|mut facts| {
                 facts.focused &= input.focused;
@@ -5661,7 +5665,6 @@ impl Window {
                 );
             }
         }
-        ctx.request_repaint_after(Duration::from_millis(20));
     }
     fn apply_intent(&mut self, intent: Intent, frame: u64, ctx: &egui::Context) -> Result<()> {
         if host_entry_blocks_source(self.host_entry) {
@@ -9543,3 +9546,7 @@ mod normal_finish_tail_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "financial_source_ui/repaint_tests.rs"]
+mod repaint_tests;

@@ -35,6 +35,69 @@ def validate(raw,target):
         assert row.get('linked_libs')==[] and row.get('linked_paths')==[] and row.get('env')==[]
         out=pathlib.Path(row['out_dir']);assert out.is_dir() and not out.is_symlink() and out.resolve().is_relative_to(target.resolve());seen.add(package)
     assert seen==set(packages)
+# Actual pinned egui scheduling tests in the existing Coordinator binary.
+# This is a headless test process, not a financial/native runtime activation.
+REPAINT_TESTS=(
+    'financial_source_ui::repaint_tests::quiet_retirement_poll_requires_in_pass_repaint',
+    'financial_source_ui::repaint_tests::draw_poll_request_precedes_every_early_return',
+)
+COORDINATOR_DIAGNOSTIC_TESTS=('financial_source_driver::history_retirement_detail_tests::retirement_handoff_observation_preserves_operation_and_original_io_error',)
+def coordinator_test_executable(raw,target):
+    rows=[json.loads(line) for line in raw.splitlines() if line.startswith(b'{')]
+    packages={};executables=[]
+    for row in rows:
+        if row.get('reason')!='compiler-artifact':continue
+        t=row.get('target',{});manifest=row.get('manifest_path','')
+        if t.get('kind')==['custom-build'] and pathlib.Path(manifest).is_relative_to(S.REPO):
+            crate=pathlib.Path(manifest).parent.name
+            assert crate in SCRIPTS and crate not in packages.values()
+            assert t.get('name')=='build-script-build' and t.get('src_path')==str(S.REPO/'crates'/crate/'build.rs')
+            packages[row['package_id']]=crate
+        if manifest!=str(S.REPO/'crates/wholepact-financial-coordinator/Cargo.toml') or row.get('executable') is None:continue
+        assert row.get('profile',{}).get('test') is True
+        assert t.get('kind')==['bin'] and t.get('name')=='wholepact-financial-coordinator' and t.get('src_path')==str(S.REPO/'crates/wholepact-financial-coordinator/src/main.rs')
+        assert sorted(row.get('features',[]))==sorted(S.A.RECIPE['artifact_features']['coordinator-observed'])
+        executable=pathlib.Path(row['executable'])
+        assert executable.is_file() and not executable.is_symlink() and executable.resolve().is_relative_to(target.resolve())
+        assert str(executable) in row.get('filenames',[])
+        executables.append(executable)
+    assert len(executables)==1 and set(packages.values())==set(SCRIPTS)
+    seen=set()
+    for row in rows:
+        if row.get('reason')!='build-script-executed':continue
+        package=row.get('package_id');cfgs=row.get('cfgs');assert type(cfgs) is list
+        if package not in packages:
+            assert not any(c.startswith('wholepact_financial_') for c in cfgs);continue
+        assert package not in seen and cfgs==list(S.A.FINANCIAL_CFGS)
+        assert row.get('linked_libs')==[] and row.get('linked_paths')==[] and row.get('env')==[]
+        out=pathlib.Path(row['out_dir']);assert out.is_dir() and not out.is_symlink() and out.resolve().is_relative_to(target.resolve());seen.add(package)
+    assert seen==set(packages)
+    return executables[0]
+def run_coordinator_tests(root,env):
+    assert len(REPAINT_TESTS)==2 and len(set(REPAINT_TESTS))==2
+    assert len(COORDINATOR_DIAGNOSTIC_TESTS)==1
+    names=REPAINT_TESTS+COORDINATOR_DIAGNOSTIC_TESTS
+    assert len(set(names))==3
+    selected=S.select_build_environment(env,'coordinator-observed',S.A.SEMANTIC_PROFILE)
+    args=['rustup','run','1.99.0','cargo','test','--locked','--bin','wholepact-financial-coordinator','--no-run','--no-default-features','--message-format=json','-p','wholepact-financial-coordinator','--features',','.join(S.A.RECIPE['artifact_features']['coordinator-observed'])]
+    raw=S.checked(args,'compile',env=selected,seconds=900,limit=32*1024*1024)
+    executable=coordinator_test_executable(raw,root/'target-shared')
+    deadline=time.monotonic()+60
+    def fixed(args):
+        remaining=deadline-time.monotonic();assert remaining>0
+        return S.checked(args,'compile',env=selected,seconds=min(30,remaining),limit=1024*1024).decode('utf-8',errors='strict')
+    for name in names:
+        listing=fixed([str(executable),'--list','--exact',name])
+        assert [line for line in listing.splitlines() if line.endswith(': test')]==[name+': test']
+    for name in names:
+        output=fixed([str(executable),'--exact',name,'--test-threads=1'])
+        assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in output
+        marker='CI_REPAINT_TEST ' if name in REPAINT_TESTS else 'CI_RETIREMENT_HANDOFF_TEST '
+        print(marker+json.dumps(dict(name=name,passed=True,ignored=0),sort_keys=True))
+    print('CI_REPAINT_TESTS '+json.dumps(dict(actual_maintained_tests=len(REPAINT_TESTS),passed=True,headless_egui=True,fullflow=False),sort_keys=True))
+    print('CI_RETIREMENT_HANDOFF_TESTS '+json.dumps(dict(actual_maintained_tests=len(COORDINATOR_DIAGNOSTIC_TESTS),passed=True,fullflow=False),sort_keys=True))
+    return len(names)
+
 SIGNER_SCRIPTS=('wholepact-financial-coordinator-origin','wholepact-signer')
 SIGNER_FEATURES=('authority-signing','coordinated-financial-workflow-v1','coordinated-signer-continue','durable-proposal','native-ui','pending-birth-owner-signing','wallet-review')
 SIGNER_PROBES=(('VerifiedImportedCoordinatedDurableReviewSessionV1','request_admission_retained_observed_v1'),('PendingCoordinatedDurableDeliveryAdmissionV1','read_original_status_retained_observed_v1'),('CoordinatedOriginalClientV1','prepare_closed_recipient_observed_v1'),('ImportedCoordinatedDurableReviewSessionV1','await_verified_observed_v3'))
@@ -470,12 +533,13 @@ def main():
     try:
         env=S.encrypted_build_environment(root,env)
         selected=S.select_build_environment(env,'coordinator-observed',S.A.SEMANTIC_PROFILE)
+        coordinator_executed=run_coordinator_tests(root,env)
         args=['rustup','run','1.99.0','cargo','check','--locked','--tests','--no-default-features','--message-format=json']
         for package in PACKAGES:args+=['-p',package]
         args+=['--features',','.join(FEATURES)]
         raw=S.checked(args,'compile',env=selected,seconds=900,limit=32*1024*1024)
         validate(raw,root/'target-shared');executed=run_handoff_security_tests(root,env);intent_executed=run_intent_validation_tests(root,env);fixture_executed=run_fixture_lifetime_tests(root,env);absence=check_signer_absence(root,env);S.exact_source(sha)
-        print('CI_CLOSE_PREFLIGHT_CONTEXTS '+json.dumps(dict(schema_version=2,actual_test_contexts=list(PACKAGES),actual_semantic_script_crates=list(SCRIPTS),typecheck_passed=True,signer_observed_api_absent_profiles=absence,selected_maintained_tests_executed=executed,intent_validation_tests_executed=intent_executed,fixture_lifetime_maintained_tests_executed=fixture_executed,full_native_execution=False,fullflow=False),sort_keys=True))
+        print('CI_CLOSE_PREFLIGHT_CONTEXTS '+json.dumps(dict(schema_version=2,actual_test_contexts=list(PACKAGES),actual_semantic_script_crates=list(SCRIPTS),typecheck_passed=True,coordinator_selected_tests_executed=coordinator_executed,repaint_schedule_tests_executed=len(REPAINT_TESTS),retirement_handoff_tests_executed=len(COORDINATOR_DIAGNOSTIC_TESTS),signer_observed_api_absent_profiles=absence,selected_maintained_tests_executed=executed,intent_validation_tests_executed=intent_executed,fixture_lifetime_maintained_tests_executed=fixture_executed,full_native_execution=False,fullflow=False),sort_keys=True))
     except S.Failure as error:
         # Pre-credential compiler text only; same bounded sanitizer as fresh build.
         try:

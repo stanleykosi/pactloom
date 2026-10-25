@@ -1018,5 +1018,9 @@ impl OwnedWitnessRetirement{
 impl Drop for OwnedWitnessRetirement{fn drop(&mut self){
     // Error propagation must publish shared-first R BEFORE DirectChild Drop
     // can enter its honest potentially blocking kill/reap fallback.
-    if self.child.is_some(){self.core.phase.revoke();}
+    if self.child.is_some(){
+        self.core.phase.revoke();
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        crate::financial_observer::financial_ci_flush_actor_failure_before_edge_close();
+    }
 }}

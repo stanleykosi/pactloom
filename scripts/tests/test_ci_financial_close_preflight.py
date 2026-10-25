@@ -13,6 +13,7 @@ class ExactHistorySourceRestorationTests(unittest.TestCase):
    (base/'wholepact-financial-coordinator-origin/src/financial_observer.rs',audit.restore_history_observer,'67a92e04a03df01257be85ee99c8544be4f627c05c3800a6b5ae9b82cbd6dc4a','WRITER.try_lock()','WRITER.lock()'),
    (base/'wholepact-financial-coordinator-origin/src/financial_ci_actor_diagnostics.rs',audit.restore_history_actor,'84ebadcad2265ff1945995ffbb0e0c8c90ae5bcb7658bf3524b4c6a3700a80e4','HistoryMonitorCheck','HistoryUnknown'),
    (base/'wholepact-financial-coordinator-origin/src/signer_continue_state.rs',audit.restore_shared_wall_regression,'f22c0ad3452dc038b0e34f45f8fbd1182c11113d6977d15b1bb347e838fe6cea','wall < prior','wall <= prior'),
+   (base/'wholepact-financial-coordinator/src/financial_source_ui.rs',audit.restore_ui_repaint,'e7eab264c493c758e8723576fb476b1373204502d35d125113ede6d537dbdc96','from_millis(20)','from_millis(21)'),
   ]
   for source,restore,expected,old,new in cases:
    raw=source.read_text()
@@ -68,6 +69,67 @@ class ContextPreflightTests(unittest.TestCase):
    with self.assertRaises(AssertionError):self.check(rows)
  def test_fixed_preflight_never_executes_runtime_or_changes_recipe(self):
   text=P.read_text();self.assertIn("'cargo','check'",text);self.assertNotIn('build_inputs(',text);self.assertNotIn('export_compiled_artifacts(',text);self.assertNotIn('docker',text);self.assertEqual(C.S.A.RECIPE['build_recipe_version'],3)
+
+class RepaintExecutionPreflightTests(unittest.TestCase):
+ def setUp(self):
+  ContextPreflightTests.setUp(self)
+  self.executable=self.target/'wholepact-financial-coordinator-test';self.executable.write_bytes(b'inert metadata fixture, never executed')
+  row=next(r for r in self.rows if r.get('profile',{}).get('test') and r['manifest_path']==str(C.S.REPO/'crates/wholepact-financial-coordinator/Cargo.toml'))
+  row.update(executable=str(self.executable),filenames=[str(self.executable)])
+  self.index=self.rows.index(row)
+ def check(self,rows):return C.coordinator_test_executable(b'\n'.join(json.dumps(x).encode() for x in rows),self.target)
+ def test_exact_binary_features_cfg_and_pinned_test_inventory(self):
+  self.assertEqual(self.check(self.rows),self.executable)
+  self.assertEqual(C.REPAINT_TESTS,('financial_source_ui::repaint_tests::quiet_retirement_poll_requires_in_pass_repaint','financial_source_ui::repaint_tests::draw_poll_request_precedes_every_early_return'))
+ def test_wrong_binary_features_profile_or_executable_rejected(self):
+  for field,value in [('features',[]),('features',C.S.A.RECIPE['artifact_features']['coordinator-observed']+['extra']),('profile',dict(test=False)),('profile',dict(test=1)),('executable','/outside'),('filenames',[])]:
+   rows=copy.deepcopy(self.rows);rows[self.index][field]=value
+   with self.assertRaises(AssertionError):self.check(rows)
+  for field,value in [('kind',['lib']),('name','other'),('src_path','/wrong/main.rs')]:
+   rows=copy.deepcopy(self.rows);rows[self.index]['target'][field]=value
+   with self.assertRaises(AssertionError):self.check(rows)
+  with self.assertRaises(AssertionError):self.check(self.rows+[self.rows[self.index]])
+  with self.assertRaises(AssertionError):self.check(self.rows[:self.index]+self.rows[self.index+1:])
+  link=self.target/'linked-executable';link.symlink_to(self.executable)
+  rows=copy.deepcopy(self.rows);rows[self.index].update(executable=str(link),filenames=[str(link)])
+  with self.assertRaises(AssertionError):self.check(rows)
+ def test_wrong_cfg_missing_script_and_output_escape_rejected(self):
+  for field,value in [('cfgs',[]),('cfgs',list(C.S.A.FINANCIAL_CFGS[:2])),('linked_libs',['x']),('linked_paths',['/x']),('env',[['X','y']]),('out_dir','/')]:
+   rows=copy.deepcopy(self.rows);rows[1][field]=value
+   with self.assertRaises(AssertionError):self.check(rows)
+  for rows in (self.rows[2:],self.rows+[self.rows[0]],self.rows+[dict(reason='build-script-executed',package_id='foreign',cfgs=['wholepact_financial_ci'])]):
+   with self.assertRaises(AssertionError):self.check(rows)
+ def test_no_run_then_exact_lists_and_runs_reject_missing_or_ignored_tests(self):
+  from unittest import mock
+  import contextlib,io
+  names=C.REPAINT_TESTS+C.COORDINATOR_DIAGNOSTIC_TESTS;good='test result: ok. 1 passed; 0 failed; 0 ignored;'
+  for listings,result,ok in [([n+': test\n' for n in names],good,True),(['']+[n+': test\n' for n in names[1:]],good,False),([n+': test\n' for n in names],'test result: ok. 0 passed; 0 failed; 1 ignored;',False)]:
+   outputs=[b'compiler']+[x.encode() for x in listings]+[result.encode()]*len(names)
+   with mock.patch.object(C.S,'select_build_environment',return_value={}),mock.patch.object(C,'coordinator_test_executable',return_value=self.executable),mock.patch.object(C.S,'checked',side_effect=outputs) as checked,contextlib.redirect_stdout(io.StringIO()):
+    if ok:self.assertEqual(C.run_coordinator_tests(self.target,{}),3)
+    else:
+     with self.assertRaises(AssertionError):C.run_coordinator_tests(self.target,{})
+    command=checked.call_args_list[0].args[0]
+    self.assertIn('--no-run',command);self.assertIn('--locked',command);self.assertNotIn('--lib',command)
+    self.assertEqual(command[command.index('--bin')+1],'wholepact-financial-coordinator')
+    self.assertEqual(checked.call_args_list[0].kwargs['seconds'],900)
+    for call in checked.call_args_list[1:]:self.assertLessEqual(call.kwargs['seconds'],30)
+    if ok:
+     self.assertEqual([call.args[0][1:] for call in checked.call_args_list[1:]],[[ '--list','--exact',n] for n in names]+[['--exact',n,'--test-threads=1'] for n in names])
+ def test_origin_retirement_selector_matches_actual_module_path_in_both_profiles(self):
+  root=P.parent.parent;origin=root/'crates/wholepact-financial-coordinator-origin/src'
+  self.assertIn('mod financial_workflow_origin;', (origin/'lib.rs').read_text())
+  self.assertIn('#[path="witness_retirement.rs"]\nmod retirement;', (origin/'financial_workflow_origin.rs').read_text())
+  source=(origin/'witness_retirement.rs').read_text();self.assertIn('mod retirement_error_observation_tests {',source)
+  name='history_retirement_observation_preserves_operation_and_original_io_error'
+  self.assertIn('fn '+name+'()',source)
+  workflow=(root/'.github/workflows/deadline-preflight.yml').read_text()
+  self.assertEqual(workflow.count('financial_workflow_origin::retirement::retirement_error_observation_tests::'+name),2)
+  self.assertNotIn('witness_retirement::retirement_error_observation_tests::',workflow)
+ def test_actual_repaint_gate_precedes_broad_contexts_without_replacing_old_gates(self):
+  text=P.read_text();main=text[text.index('def main():'):]
+  self.assertLess(main.index('coordinator_executed=run_coordinator_tests(root,env)'),main.index("'cargo','check','--locked','--tests'"))
+  for gate in ('validate(raw,','run_handoff_security_tests(','run_intent_validation_tests(','run_fixture_lifetime_tests(','check_signer_absence('):self.assertIn(gate,main)
 
 class SignerAbsencePreflightTests(unittest.TestCase):
  def setUp(self):

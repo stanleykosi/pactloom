@@ -4,6 +4,21 @@ use super::*;
 use crate::host_interstage::{RetirementRequest,RetirementPurpose};
 use crate::financial_witness_channel::{FinancialWitnessOutcomeV1,Packet as WP};
 use std::time::Duration;
+// Shared retirement code observes only an actual InitialHistory failure here.
+// Neither a successful call nor another purpose gains a History-stage record.
+macro_rules! history_retirement_detail {
+    ($purpose:expr, $stage:ident, $operation:expr) => {{
+        let result = $operation;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error) = &result {
+            if $purpose == RetirementPurpose::InitialHistory {
+                use crate::financial_ci_actor_diagnostics as diagnostic;
+                diagnostic::work_fallback(diagnostic::DriverStage::$stage,error);
+            }
+        }
+        result
+    }};
+}
 pub struct CoordinatorWitnessRetirementTicketV1{
     core:Arc<Core>,entries:Vec<Arc<EntryReviewed>>,request:RetirementRequest,cutoff:Instant,phases:u64,consumed:bool,
 }
@@ -144,10 +159,10 @@ impl CoordinatorFinancialEndpointV1{
                 let(entry,correlation,service)=self.signing_services[t.request.target.index()].retirement_source()?;
                 Some((entry,correlation,signed.clone(),service,a.read.writer_deadline,self.signing_services[t.request.target.index()].retirement_wall_bounds()?))
             }else{None};
-            if !Arc::ptr_eq(&self.core,&t.core){return Err(rejected("foreign retirement outbound"));}
-            self.retirement_bounds(cutoff)?;self.core.check()?;self.retirement_idle(t.phases,t.request.purpose,t.request.target)?;
-            self.retirement_send_host(&Packet::RetireRequest{request:t.request.clone()},cutoff)?;
-            self.retirement_wait_host(&t.request,false,cutoff,None)?;
+            if !Arc::ptr_eq(&self.core,&t.core){return history_retirement_detail!(t.request.purpose,HistoryRetirementHostQuiescence,Err(rejected("foreign retirement outbound")));}
+            history_retirement_detail!(t.request.purpose,HistoryRetirementHostQuiescence,self.retirement_bounds(cutoff))?;history_retirement_detail!(t.request.purpose,HistoryRetirementHostQuiescence,self.core.check())?;history_retirement_detail!(t.request.purpose,HistoryRetirementHostQuiescence,self.retirement_idle(t.phases,t.request.purpose,t.request.target))?;
+            history_retirement_detail!(t.request.purpose,HistoryRetirementHostQuiescence,self.retirement_send_host(&Packet::RetireRequest{request:t.request.clone()},cutoff))?;
+            history_retirement_detail!(t.request.purpose,HistoryRetirementHostQuiescence,self.retirement_wait_host(&t.request,false,cutoff,None))?;
             let i=t.request.target.index();
             match t.request.purpose{
                 RetirementPurpose::FinancialSigning=>{
@@ -173,33 +188,33 @@ impl CoordinatorFinancialEndpointV1{
                     }
                 },
                 RetirementPurpose::InitialHistory=>{
-                    self.close_history_purpose(t.request.target)?;
-                    loop{self.retirement_bounds(cutoff)?;self.core.check()?;
-                        if let Some(packet)=self.tree.as_ref().unwrap().financial_history(t.request.target)?.financial_history_receive()?{
-                            match packet{crate::financial_history_channel::Packet::PurposeClosed{coordinator,session} if coordinator==self.coordinator&&session==self.session=>{self.histories[i].retirement_closed()?;break;},
-                                _=>return Err(rejected("History retirement expected exact PurposeClosed"))}}
+                    history_retirement_detail!(t.request.purpose,HistoryRetirementPurposeClose,self.close_history_purpose(t.request.target))?;
+                    loop{history_retirement_detail!(t.request.purpose,HistoryRetirementPurposeClose,self.retirement_bounds(cutoff))?;history_retirement_detail!(t.request.purpose,HistoryRetirementPurposeClose,self.core.check())?;
+                        if let Some(packet)=history_retirement_detail!(t.request.purpose,HistoryRetirementPurposeClose,(||self.tree.as_ref().unwrap().financial_history(t.request.target)?.financial_history_receive())())?{
+                            match packet{crate::financial_history_channel::Packet::PurposeClosed{coordinator,session} if coordinator==self.coordinator&&session==self.session=>{history_retirement_detail!(t.request.purpose,HistoryRetirementPurposeClose,self.histories[i].retirement_closed())?;break;},
+                                _=>return history_retirement_detail!(t.request.purpose,HistoryRetirementPurposeClose,Err(rejected("History retirement expected exact PurposeClosed")))}}
                         std::thread::sleep(Duration::from_millis(1));
                     }
                 }
             }
-            let mut owner=self.tree.as_mut().unwrap().take_witness_retirement(t.request.target,t.request.purpose,t.request.witness_instance.clone(),Arc::clone(&self.core))?;
+            let mut owner=history_retirement_detail!(t.request.purpose,HistoryRetirementOwnedStopReap,self.tree.as_mut().unwrap().take_witness_retirement(t.request.target,t.request.purpose,t.request.witness_instance.clone(),Arc::clone(&self.core)))?;
             let index=owner.index();
             let proof=loop{
-                self.retirement_bounds(cutoff)?;self.core.check_retirement_other_roots(index)?;
-                if let Some(proof)=owner.advance(cutoff)?{break proof;}
+                history_retirement_detail!(t.request.purpose,HistoryRetirementOwnedStopReap,self.retirement_bounds(cutoff))?;history_retirement_detail!(t.request.purpose,HistoryRetirementOwnedStopReap,self.core.check_retirement_other_roots(index))?;
+                if let Some(proof)=history_retirement_detail!(t.request.purpose,HistoryRetirementOwnedStopReap,owner.advance(cutoff))?{break proof;}
                 std::thread::sleep(Duration::from_millis(1));
             };
-            if proof.instance()!=t.request.witness_instance{return Err(rejected("retirement instance proof mismatch"));}
-            self.tree.as_mut().unwrap().install_retirement(&proof)?;self.core.install_retired(&proof)?;
+            if proof.instance()!=t.request.witness_instance{return history_retirement_detail!(t.request.purpose,HistoryRetirementOwnedStopReap,Err(rejected("retirement instance proof mismatch")));}
+            history_retirement_detail!(t.request.purpose,HistoryRetirementOwnedStopReap,self.tree.as_mut().unwrap().install_retirement(&proof))?;history_retirement_detail!(t.request.purpose,HistoryRetirementOwnedStopReap,self.core.install_retired(&proof))?;
             match t.request.purpose{
                 RetirementPurpose::FinancialSigning=>self.core.phase.signing_retirement_step(i,5,6)?,
                 RetirementPurpose::FinancialContinuation=>self.witnesses[i].retirement_reaped()?,
-                RetirementPurpose::InitialHistory=>{self.histories[i].retirement_reaped()?;self.core.phase.observe_history_retired(i)?;}
+                RetirementPurpose::InitialHistory=>{history_retirement_detail!(t.request.purpose,HistoryRetirementOwnedStopReap,self.histories[i].retirement_reaped())?;history_retirement_detail!(t.request.purpose,HistoryRetirementOwnedStopReap,self.core.phase.observe_history_retired(i))?;}
             }
             #[cfg(wholepact_financial_ci)]
             if t.request.purpose==RetirementPurpose::FinancialSigning{crate::financial_observer::signer(t.request.target,"SigningRetired")?;}
-            self.retirement_send_host(&Packet::RetireResume{request:t.request.clone()},cutoff)?;
-            self.retirement_wait_host(&t.request,true,cutoff,Some(index))?;
+            history_retirement_detail!(t.request.purpose,HistoryRetirementHostResume,self.retirement_send_host(&Packet::RetireResume{request:t.request.clone()},cutoff))?;
+            history_retirement_detail!(t.request.purpose,HistoryRetirementHostResume,self.retirement_wait_host(&t.request,true,cutoff,Some(index)))?;
             if let Some((entry,correlation,signed,service,writer,(service_valid_from_ms,service_valid_until_ms,last_wall)))=signed_record {
                 let record=Arc::new(super::signed_custody::SignedResultRecord{core:Arc::clone(&self.core),entry,correlation,signed,service,writer,retired_index:index,service_valid_from_ms,service_valid_until_ms,last_wall:std::sync::atomic::AtomicU64::new(last_wall)});
                 self.signing_services[i].install_retired_result(record)?;
@@ -255,4 +270,30 @@ fn idle_phase_snapshot(word:u64,purpose:RetirementPurpose,target:usize)->bool{
  #[test]fn second_history_can_retire_after_first_signed_reap(){let p=Phases::new();p.step(0,0,67).unwrap();p.signing_step(0,0,6).unwrap();p.step(1,0,HISTORY_RETAINED).unwrap();p.history_step(1,0,5).unwrap();assert!(idle_phase_snapshot(p.snapshot(),RetirementPurpose::InitialHistory,1));}
  #[test]fn another_active_signing_or_action_prevents_retirement(){let p=Phases::new();p.step(0,0,67).unwrap();p.signing_step(0,0,4).unwrap();p.step(1,0,67).unwrap();p.signing_step(1,0,4).unwrap();assert!(!idle_phase_snapshot(p.snapshot(),RetirementPurpose::FinancialSigning,0));}
  #[test]fn retired_phase_without_signed_source_is_not_idle_proof(){let p=Phases::new();p.signing_step(0,0,6).unwrap();assert!(!idle_phase_snapshot(p.snapshot(),RetirementPurpose::InitialHistory,1));}
+}
+
+#[cfg(test)]
+mod retirement_error_observation_tests {
+    use super::*;
+    #[test]
+    fn history_retirement_observation_preserves_operation_and_original_io_error() {
+        for purpose in [RetirementPurpose::InitialHistory,RetirementPurpose::FinancialContinuation,RetirementPurpose::FinancialSigning] {
+            let calls=std::cell::Cell::new(0);
+            let purpose_reads=std::cell::Cell::new(0);
+            let ok:Result<u8>=history_retirement_detail!({purpose_reads.set(purpose_reads.get()+1);purpose},HistoryRetirementHostQuiescence,{
+                calls.set(calls.get()+1);Ok(7)
+            });
+            assert_eq!(ok.unwrap(),7);assert_eq!(calls.get(),1);assert_eq!(purpose_reads.get(),0);
+            let failed:Result<()>=history_retirement_detail!({purpose_reads.set(purpose_reads.get()+1);purpose},HistoryRetirementOwnedStopReap,{
+                calls.set(calls.get()+1);Err(std::io::Error::from_raw_os_error(libc::EACCES))
+            });
+            let error=failed.unwrap_err();
+            assert_eq!(calls.get(),2);assert_eq!(error.kind(),std::io::ErrorKind::PermissionDenied);
+            assert_eq!(error.raw_os_error(),Some(libc::EACCES));
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            assert_eq!(purpose_reads.get(),1);
+            #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
+            assert_eq!(purpose_reads.get(),0);
+        }
+    }
 }
