@@ -144,10 +144,11 @@ class RepaintExecutionPreflightTests(unittest.TestCase):
   names=C.REPAINT_TESTS+C.COORDINATOR_DIAGNOSTIC_TESTS+C.SELECTOR_EXPORT_TESTS+C.ADMISSION_SCROLL_TESTS+C.WITNESS_FIRST_FAILURE_TESTS+C.SIGNING_RETIREMENT_UI_TESTS;good='test result: ok. 1 passed; 0 failed; 0 ignored;'
   for listings,result,ok in [([n+': test\n' for n in names],good,True),(['']+[n+': test\n' for n in names[1:]],good,False),([n+': test\n' for n in names],'test result: ok. 0 passed; 0 failed; 1 ignored;',False)]:
    outputs=[b'compiler']+[x.encode() for x in listings]+[result.encode()]*len(names)
-   with mock.patch.object(C.S,'select_build_environment',return_value={}),mock.patch.object(C,'coordinator_test_executable',return_value=self.executable),mock.patch.object(C.S,'checked',side_effect=outputs) as checked,contextlib.redirect_stdout(io.StringIO()):
+   with mock.patch.object(C.S,'select_build_environment',return_value={}),mock.patch.object(C,'coordinator_test_executable',return_value=self.executable),mock.patch.object(C,'run_provider_tls_probe',return_value=4) as probe,mock.patch.object(C.S,'checked',side_effect=outputs) as checked,contextlib.redirect_stdout(io.StringIO()):
     if ok:self.assertEqual(C.run_coordinator_tests(self.target,{}),12)
     else:
      with self.assertRaises(AssertionError):C.run_coordinator_tests(self.target,{})
+    probe.assert_called_once_with(self.target,{},b'compiler')
     command=checked.call_args_list[0].args[0]
     self.assertIn('--no-run',command);self.assertIn('--locked',command);self.assertNotIn('--lib',command)
     self.assertEqual(command[command.index('--bin')+1],'wholepact-financial-coordinator')
@@ -529,3 +530,20 @@ class SigningRetirementSelectorPreflightTests(unittest.TestCase):
   name='financial_source_ui::signing_retirement_action_tests::signing_retirement_requires_actual_commit_and_fresh_explicit_action'
   self.assertEqual(C.SIGNING_RETIREMENT_UI_TESTS,(name,));self.assertEqual(raw.count('fn '+name.rsplit('::',1)[-1]+'('),1)
   self.assertIn('mod signing_retirement_action_tests {',raw)
+
+class ProviderTlsProbeGateTests(unittest.TestCase):
+ def test_exact_four_cases_are_mandatory_after_metadata_before_existing_test_budget(self):
+  from unittest import mock
+  import inspect,types
+  raw=b'inert compiler metadata';env={'bounded':'build'};root=pathlib.Path('/inert-owned-target')
+  for value in (4,3,5,True,None):
+   spec=types.SimpleNamespace(loader=mock.Mock());module=types.SimpleNamespace(run=mock.Mock(return_value=value))
+   with mock.patch.object(C.importlib.util,'spec_from_file_location',return_value=spec) as make,mock.patch.object(C.importlib.util,'module_from_spec',return_value=module):
+    if type(value) is int and value==4:self.assertEqual(C.run_provider_tls_probe(root,env,raw),4)
+    else:
+     with self.assertRaises(AssertionError):C.run_provider_tls_probe(root,env,raw)
+    make.assert_called_once_with('preflight_provider_tls_probe',C.HERE/'ci-financial-provider-tls-probe.py');spec.loader.exec_module.assert_called_once_with(module);module.run.assert_called_once_with(root,env,raw,C.S)
+  source=inspect.getsource(C.run_coordinator_tests)
+  self.assertLess(source.index('executable=coordinator_test_executable('),source.index('run_provider_tls_probe(root,selected,raw)'))
+  self.assertLess(source.index('run_provider_tls_probe(root,selected,raw)'),source.index('deadline=time.monotonic()+60'))
+  self.assertEqual(source.count('run_provider_tls_probe('),1)

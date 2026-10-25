@@ -6,17 +6,21 @@ public success until the outer owner proves rootfs/container removal.
 """
 import ctypes
 import contextlib
+import base64
 import hashlib
 import importlib.util
 import json
 import os
 import pathlib
 import resource
+import re
 import selectors
 import signal
 import stat
+import ssl
 import subprocess
 import sys
+import tempfile
 import time
 ROOT=pathlib.Path(__file__).resolve().parent
 
@@ -31,6 +35,8 @@ UID=10001
 EVIDENCE=pathlib.Path('/ci-financial-evidence')
 WAYLAND=pathlib.Path('/run/ci-financial-wayland')
 FIXTURE=pathlib.Path('/ci-fixture/full-parent')
+PROVIDER_CA=pathlib.Path('/etc/wholepact/fixture-provider-ca.pem')
+PROVIDER_CA_LINK=pathlib.Path('/etc/ssl/certs/wholepact-fixture-provider.pem')
 PARENT_SELECTOR=('host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::'
  'qualification::durable_proposal_v1::coordinated_full_fixture_v1::coordinator_live_full_financial_fixture_parent')
 READY=b'CI_FINANCIAL_FIXTURE_READY version=1'
@@ -139,6 +145,90 @@ def root_setup():
 def write_new(path,data,mode):
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,mode)
     with os.fdopen(fd,'wb') as stream:os.fchmod(stream.fileno(),mode);stream.write(data)
+
+def read_fixture_provider_ca(selected):
+    """Only the original fixture's public CA, through no-follow directory FDs."""
+    selected=F.absolute(str(selected));root=selected.parent
+    C.require(selected.name==F.FIXTURE_FILE and root.parent==F.ARTIFACT_PARENT and
+              root.name.startswith('f-') and len(root.name)>2,'fixture_path')
+    directory=root/'synthetic-provider-tls-v1'
+    private={F.ARTIFACT_PARENT.parent,F.ARTIFACT_PARENT,root,directory}
+    fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:
+        current=pathlib.Path('/')
+        for part in directory.parts[1:]:
+            child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
+            os.close(fd);fd=child;current=current/part
+            if current in private:
+                meta=os.fstat(fd)
+                C.require(stat.S_ISDIR(meta.st_mode) and meta.st_uid==UID and meta.st_gid==UID and
+                          stat.S_IMODE(meta.st_mode)==0o700,'fixture_path')
+        leaf=os.open('ca.pem',os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
+        with os.fdopen(leaf,'rb') as stream:
+            before=os.fstat(stream.fileno())
+            C.require(stat.S_ISREG(before.st_mode) and before.st_uid==UID and before.st_gid==UID and
+                      before.st_nlink==1 and stat.S_IMODE(before.st_mode)==0o600 and
+                      0<before.st_size<=16384,'fixture_path')
+            raw=stream.read(16385);after=os.fstat(stream.fileno())
+            stable=('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns')
+            C.require(len(raw)==before.st_size and all(getattr(before,k)==getattr(after,k) for k in stable),'fixture_path')
+            return raw
+    finally:os.close(fd)
+
+def validate_fixture_provider_ca(raw):
+    # No general certificate input: exactly the generated public root, never a
+    # key, chain, appended block or arbitrary trailing text.
+    C.require(type(raw) is bytes and 0<len(raw)<=16384 and
+        re.fullmatch(rb'-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\n]+-----END CERTIFICATE-----\n',raw) is not None,'fixture')
+    try:
+        pem=raw.decode('ascii')
+        der=base64.b64decode(b''.join(raw.splitlines()[1:-1]),validate=True)
+        C.require(der==ssl.PEM_cert_to_DER_cert(pem),'fixture')
+        context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        original=set(context.get_ca_certs(binary_form=True))
+        context.load_verify_locations(cadata=pem)
+        certificates=context.get_ca_certs(binary_form=True)
+        C.require(der in certificates and set(certificates)==original|{der},'fixture')
+        cert=context.get_ca_certs()[certificates.index(der)]
+        C.require(cert['subject']==cert['issuer'],'fixture')
+    except (ValueError,ssl.SSLError,KeyError,IndexError):
+        raise C.Rejected('fixture') from None
+
+def install_fixture_provider_ca(selected,deadline):
+    """Public test trust only, inside the existing disposable root-owned tmpfs."""
+    C.require(os.getpid()==1 and os.getresuid()==(0,0,0) and os.getresgid()==(0,0,0),'process')
+    directory=PROVIDER_CA.parent
+    meta=directory.lstat();link=PROVIDER_CA_LINK.lstat()
+    C.require(stat.S_ISDIR(meta.st_mode) and meta.st_uid==0 and meta.st_gid==0 and
+              stat.S_IMODE(meta.st_mode)==0o755 and stat.S_ISLNK(link.st_mode) and
+              link.st_uid==0 and os.readlink(PROVIDER_CA_LINK)==str(PROVIDER_CA) and
+              not os.path.lexists(PROVIDER_CA),'contract')
+    with fixture_effective_identity():raw=read_fixture_provider_ca(selected)
+    validate_fixture_provider_ca(raw)
+    # OpenSSL sees only an unlinked public copy. The final native trust path is
+    # still absent until strict self-signature and validity verification pass.
+    with tempfile.TemporaryFile(dir=directory) as public:
+        public.write(raw);public.flush();public.seek(0)
+        name='/proc/self/fd/'+str(public.fileno())
+        left=(deadline-time.monotonic_ns())/1e9;C.require(left>0,'fixture_deadline')
+        result=subprocess.run(['/usr/bin/openssl','verify','-x509_strict','-check_ss_sig',
+            '-CAfile',name,'-no-CApath','-no-CAstore',name],
+            stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+            close_fds=True,pass_fds=(public.fileno(),),env={},timeout=left,check=False)
+        C.require(result.returncode==0,'fixture')
+    C.require(time.monotonic_ns()<deadline,'fixture_deadline')
+    fd=os.open(PROVIDER_CA,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o444)
+    try:
+        with os.fdopen(fd,'wb') as stream:
+            os.fchmod(stream.fileno(),0o444);stream.write(raw);stream.flush();os.fsync(stream.fileno())
+        C.require(time.monotonic_ns()<deadline,'fixture_deadline')
+    except BaseException as error:
+        try:PROVIDER_CA.unlink()
+        except OSError:
+            # Never continue to native launch or claim this partial file gone.
+            # The original failure survives; outer tmpfs removal is mandatory.
+            error.fixture_trust_cleanup_unverified=True
+        raise
 
 def write_account(base,home,*,initial=False):
     F.absolute(home);C.require(':' not in home and '\n' not in home,'fixture_path')
@@ -335,6 +425,7 @@ def main():
     expected_profile=C.EXTERNAL_PROFILE
     try:
         base,expected_profile=root_setup();parent=FixtureParent(original)
+        install_fixture_provider_ca(parent.path,parent.deadline)
         write_account(base,str(parent.home))
         os.setgroups([]);os.setresgid(UID,UID,UID);os.setresuid(UID,UID,UID);K.harden_process()
         fixture=F.Fixture.load(parent.path,original,expected_profile)

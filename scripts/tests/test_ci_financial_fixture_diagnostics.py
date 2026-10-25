@@ -249,6 +249,7 @@ class CachedProgressDiagnostics(unittest.TestCase):
                     (M.os,'setresgid'),(M.os,'setresuid'),(M.K,'harden_process'),(M.F.Fixture,'load'),
                     (M.OUT,'validate_completed')):stack.enter_context(mock.patch.object(obj,name))
                 stack.enter_context(mock.patch.object(M,'root_setup',return_value=(b'',M.C.EXTERNAL_PROFILE)))
+                installer=stack.enter_context(mock.patch.object(M,'install_fixture_provider_ca'))
                 stack.enter_context(mock.patch.object(M,'NativeSession',return_value=session))
                 stack.enter_context(mock.patch.object(M,'secure_file',return_value=(b'{}',None)))
                 stack.enter_context(mock.patch.object(M.pathlib.Path,'iterdir',return_value=[pathlib.Path('1')]))
@@ -257,6 +258,7 @@ class CachedProgressDiagnostics(unittest.TestCase):
                 if fail:
                     with self.assertRaises(SystemExit):M.main()
                 else:M.main()
+                installer.assert_called_once_with(M.FixtureParent.return_value.path,M.FixtureParent.return_value.deadline)
                 text=output.getvalue()
                 self.assertEqual(text.count('CI_FINANCIAL_PROGRESS_DIAGNOSTIC '),int(fail and not invalid))
                 self.assertNotIn('secret',text)

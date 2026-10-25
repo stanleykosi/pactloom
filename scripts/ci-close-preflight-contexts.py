@@ -77,6 +77,12 @@ def coordinator_test_executable(raw,target):
         out=pathlib.Path(row['out_dir']);assert out.is_dir() and not out.is_symlink() and out.resolve().is_relative_to(target.resolve());seen.add(package)
     assert seen==set(packages)
     return executables[0]
+def run_provider_tls_probe(root,env,raw):
+    spec=importlib.util.spec_from_file_location('preflight_provider_tls_probe',HERE/'ci-financial-provider-tls-probe.py')
+    probe=importlib.util.module_from_spec(spec);spec.loader.exec_module(probe)
+    passed=probe.run(root,env,raw,S)
+    assert type(passed) is int and passed==4
+    return passed
 def run_coordinator_tests(root,env):
     assert len(REPAINT_TESTS)==2 and len(set(REPAINT_TESTS))==2
     assert len(COORDINATOR_DIAGNOSTIC_TESTS)==1
@@ -90,6 +96,7 @@ def run_coordinator_tests(root,env):
     args=['rustup','run','1.99.0','cargo','test','--locked','--bin','wholepact-financial-coordinator','--no-run','--no-default-features','--message-format=json','-p','wholepact-financial-coordinator','--features',','.join(S.A.RECIPE['artifact_features']['coordinator-observed'])]
     raw=S.checked(args,'compile',env=selected,seconds=900,limit=32*1024*1024)
     executable=coordinator_test_executable(raw,root/'target-shared')
+    run_provider_tls_probe(root,selected,raw)
     deadline=time.monotonic()+60
     def fixed(args):
         remaining=deadline-time.monotonic();assert remaining>0

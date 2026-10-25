@@ -96,6 +96,21 @@ _FINALIZE=r'''def finalize(meta):
         need((ROOT / name).stat().st_uid == (10001 if name == 'pristine-setup' else 0), 'artifact_owner')
     ocr = meta['ocr_executable']
     verify(pathlib.Path(ocr['path']), {'size':ocr['bytes'],'sha256':ocr['sha256']})
+    # Keep the pinned distro bundle unchanged. Only this disposable image gains
+    # one fixed cert-directory link into its existing root-owned runtime tmpfs.
+    certs = pathlib.Path('/etc/ssl/certs')
+    bundle = certs / 'ca-certificates.crt'
+    for public in (certs, bundle):
+        info = public.lstat()
+        need(info.st_uid == 0 and info.st_gid == 0 and not (info.st_mode & 0o022), 'input_file')
+        need(stat.S_ISDIR(info.st_mode) if public == certs else stat.S_ISREG(info.st_mode), 'input_file')
+        need(stat.S_IMODE(info.st_mode) == (0o755 if public == certs else 0o644), 'input_file')
+    original_bundle = bundle.read_bytes()
+    need(0 < len(original_bundle) <= 1024 * 1024, 'input_file')
+    link = certs / 'wholepact-fixture-provider.pem'
+    need(not os.path.lexists(link), 'input_file')
+    link.symlink_to('/etc/wholepact/fixture-provider-ca.pem')
+    need(bundle.read_bytes() == original_bundle, 'input_digest')
     manifest = {'schema':1,'profile':meta['profile'],'source_commit':meta['source_commit'],'files':files}
     target = ROOT / 'manifest.json'
     need(not target.exists(), 'manifest')
