@@ -2895,15 +2895,16 @@ class FinancialHostReadinessTests(unittest.TestCase):
     PROMPT='Type APPROVE 0123456789abcdef to approve this exact operation, or anything else to reject: '
     def harness(self,*,owner='Signer1',action='ConfigureFinancialSetup',proof='after_submit',
                 parked=True,direct=False,deadline=300_000_000_000,hold_after_click=0,prompt_after=80,
-                controls_after=0,restriction=None,profile=F.C.SEMANTIC_PROFILE):
+                controls_after=0,restriction=None,profile=F.C.SEMANTIC_PROFILE,initial_clock=1_000_000_000):
         from unittest import mock
         class Selected(Exception):pass
-        state=dict(generation=0,clock=1_000_000_000,phase='FinancialSetupSelected' if direct else 'V3Audited',
+        state=dict(generation=0,clock=initial_clock,phase='FinancialSetupSelected' if direct else 'V3Audited',
                    begun=False,submitted=False,verified=False,selected=None,effects=[],deadlines=[],capture=0,wheels=[])
         records=[]
         def record(role,kind,facts):
+            # Native records use actor-relative elapsed time, not host uptime.
             row=dict(schema=1,profile=profile,role=role,sequence=len(records)+1,
-                     elapsed_ns=state['clock'],kind=kind,facts=facts)
+                     elapsed_ns=state['clock']-initial_clock+1_000_000_000,kind=kind,facts=facts)
             F.C.validate_record(row,profile);records.append(row)
         record(owner,'SignerMilestone',dict(owner=owner,step='AdmissionAudited'))
         if owner=='Signer2' and not direct:
@@ -2959,8 +2960,13 @@ class FinancialHostReadinessTests(unittest.TestCase):
         controller.observe=mock.MagicMock();ocr=mock.Mock()
         def ocr_read(*args):state['capture']+=1;return prompt
         ocr.read.side_effect=ocr_read
-        flow=F.FullFlow(controller,fixture,Observer(),ocr,operator)
+        with mock.patch.object(F.time,'monotonic_ns',side_effect=lambda:state['clock']):
+            flow=F.FullFlow(controller,fixture,Observer(),ocr,operator)
+        state['constructed_startup_ceiling']=flow.startup_wait_ceiling()
+        # This fixture begins after the actual commands-consumption transition,
+        # which marks startup complete AND clears its final-slot-only ceiling.
         flow.startup_index=len(F.HOST_STARTUP);flow.commands_instruction_observed=True;flow.startup_focus_seen=True
+        flow._startup_ceiling=None
         def click(x,y):
             if x==320:state['phase']='Selecting';state['effects'].append('SelectNextV3')
             elif x==420:
@@ -3007,6 +3013,41 @@ class FinancialHostReadinessTests(unittest.TestCase):
             self.assertEqual(set(state['deadlines']),{original});self.assertEqual(flow.fixture.deadline_ns,original)
             self.assertEqual(state['capture'],1);flow.operator.financial_gate.assert_called_once_with(owner,flow.records)
             c.focus.assert_not_called();c._command.assert_not_called()
+    def test_post_startup_fixture_matches_actual_ceiling_clear_at_small_and_large_clock(self):
+        from unittest import mock
+        for initial in (1_000_000_000,1_000_000_000_000_000):
+            with self.subTest(initial_clock=initial):
+                clock=[initial]
+                # Exercise the genuine final-slot transition rather than merely
+                # assuming that a startup-complete flag releases its ceiling.
+                with mock.patch.object(F.time,'monotonic_ns',side_effect=lambda:clock[0]):
+                    actual,state,c,observer,_=CommandsConsumptionGateTests.harness(self,clock=clock)
+                    bound=actual.startup_wait_ceiling()
+                    original=actual.fixture.deadline_ns
+                    self.assertFalse(actual.host_startup_complete)
+                    self.assertEqual(bound,min(actual.fixture.deadline_ns,initial+F.C.ACTION_NS))
+                    state['ack']=True;actual.startup_waiting=False
+                    self.assertTrue(actual.observe_commands_instruction(observer.next_snapshot(bound)))
+                    self.assertTrue(actual.host_startup_complete)
+                    self.assertIsNone(actual.startup_wait_ceiling())
+                    self.assertEqual(actual.fixture.deadline_ns,original)
+                    c.click.assert_not_called();c.type_ascii.assert_not_called()
+                for profile in (F.C.SEMANTIC_PROFILE,F.C.EXTERNAL_PROFILE):
+                    deadline=initial+299_000_000_000
+                    flow,c,state,stop=self.harness(profile=profile,initial_clock=initial,
+                                                  deadline=deadline,prompt_after=160)
+                    expected=min(deadline,initial+F.C.ACTION_NS) if profile==F.C.SEMANTIC_PROFILE else None
+                    self.assertEqual(state['constructed_startup_ceiling'],expected)
+                    self.assertEqual(flow.host_startup_complete,actual.host_startup_complete)
+                    self.assertIsNone(flow.startup_wait_ceiling())
+                    with mock.patch.object(F.time,'monotonic_ns',side_effect=lambda:state['clock']):
+                        with self.assertRaises(stop):flow.run()
+                    self.assertGreater(state['clock'],initial+F.C.ACTION_NS)
+                    self.assertTrue(state['verified']);self.assertIsNotNone(state['selected'])
+                    self.assertEqual(set(state['deadlines']),{deadline})
+                    self.assertEqual(flow.fixture.deadline_ns,deadline)
+                    self.assertIsNone(flow.startup_wait_ceiling())
+                    flow.operator.financial_gate.assert_called_once_with('Signer1',flow.records)
     def test_clipped_host_controls_use_existing_navigation_then_wait_without_more_wheels(self):
         from unittest import mock
         flow,c,state,stop=self.harness(controls_after=16)
