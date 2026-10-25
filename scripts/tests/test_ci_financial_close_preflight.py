@@ -475,7 +475,7 @@ class OriginalFailureSelectionTests(unittest.TestCase):
     with self.assertRaises(AssertionError):audit.restore_original_failure_cause(mutation,kind)
 
  def test_new_native_selections_bind_existing_binaries_and_real_functions(self):
-  groups=[(C.HANDOFF_SECURITY_TESTS,55),(C.INTENT_VALIDATION_TESTS,21),(tuple(n for v in C.FIXTURE_TARGETS.values() for n in v[-1]),18)]
+  groups=[(C.HANDOFF_SECURITY_TESTS,55),(C.INTENT_VALIDATION_TESTS,21),(tuple(n for v in C.FIXTURE_TARGETS.values() for n in v[-1]),20)]
   for names,count in groups:self.assertEqual(len(names),count);self.assertEqual(len(set(names)),count)
   prefix='native_ui::runtime::financial_v1::coordinated_driver::financial_tail_v1::financial_worker_observation_tests::'
   checks=[(C.HANDOFF_SECURITY_TESTS,prefix+'actual_join_preserves_worker_error_identity_and_success','wholepact-signer/src/native_ui/runtime/coordinated_financial_driver_v1/financial_tail_v1.rs'),(C.HANDOFF_SECURITY_TESTS,prefix+'actual_join_panic_remains_uncertain_without_retry','wholepact-signer/src/native_ui/runtime/coordinated_financial_driver_v1/financial_tail_v1.rs'),(C.HANDOFF_SECURITY_TESTS,'native_ui::witness_workspace::financial_continuation_v1::coordinated_admit_v1::tests::failed_admit_observation_retains_actual_cause_and_transport_boundary','wholepact-signer/src/native_ui/witness_workspace/financial_continuation_v1/coordinated_admit_v1.rs'),(C.HANDOFF_SECURITY_TESTS,'financial_ci_actor::admit_transport_plain_observation_tests::plain_admission_result_retains_success_and_original_error_variants','wholepact-signer/src/financial_ci_actor.rs'),(C.INTENT_VALIDATION_TESTS,'financial_ci_actor::admit_transport_observation_tests::checked_admission_stages_and_callback_precedence_are_finite','wholepact-signer/src/financial_ci_actor.rs'),(C.FIXTURE_TARGETS['authority'][-1],'transport::history_diagnostics_v1::tests::pure_flow_frame_first_error_and_returned_error_remain_independent','wholepact-authority/src/transport/history_diagnostics_v1.rs'),(C.WITNESS_FIRST_FAILURE_TESTS,'financial_source_driver::reported_witness_failure_tests::authenticated_report_projection_retains_every_finite_stage_class_and_peer','wholepact-financial-coordinator/src/financial_source_driver.rs')]
@@ -501,3 +501,16 @@ class OriginalFailureSelectionTests(unittest.TestCase):
    self.assertIn('fn '+name.rsplit('::',1)[-1]+'(', (P.parent.parent/'crates/wholepact-financial-coordinator-origin/src'/path).read_text())
   gate=workflow.split('for name in semantic_names:',1)[1].split('print(',1)[0]
   for token in ("'--list', '--exact'","'--exact', name, '--test-threads=1'",'1 passed; 0 failed; 0 ignored;'):self.assertIn(token,gate)
+
+class FinancialContinuationReplaySelectionTests(unittest.TestCase):
+ def test_existing_authority_target_executes_both_actual_journal_regressions(self):
+  expected=('journal::durable_financial_continuation_journal_v1::tests::coordinated_final_stamp_uses_financial_profile_without_weakening_replay','journal::durable_financial_continuation_journal_v1::tests::coordinated_final_stamp_is_bound_to_the_post_append_phase')
+  crate,features,scripts,names=C.FIXTURE_TARGETS['authority']
+  self.assertEqual(crate,'wholepact-authority');self.assertIn('native-witness-owner',features)
+  self.assertNotIn('coordinated-witness-financial-continuation',features)
+  self.assertEqual(names[-2:],expected);self.assertEqual(len(names),12)
+  self.assertEqual(len(C.FIXTURE_TARGETS['pristine-host'][-1]),8)
+  root=P.parent.parent/'crates/wholepact-authority/src'
+  source=(root/'durable_financial_continuation_journal_v1.rs').read_text()
+  for name in expected:self.assertEqual(source.count('fn '+name.rsplit('::',1)[-1]+'('),1)
+  self.assertIn('#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]\n#[path = "durable_financial_continuation_journal_v1.rs"]\nmod durable_financial_continuation_journal_v1;', (root/'journal.rs').read_text())

@@ -280,6 +280,8 @@ FIXTURE_TARGETS={
         'native_witness_owner::window::ephemeral_fixture_v1::acceptance_gate_tests::sealed_synthetic_server_gate_never_calls_accept_or_resumes',
         'native_witness_owner::window::ephemeral_fixture_v1::acceptance_gate_tests::sealing_synthetic_server_gate_never_renews_expired_or_stopped_owner',
         'transport::history_diagnostics_v1::tests::pure_flow_frame_first_error_and_returned_error_remain_independent',
+        'journal::durable_financial_continuation_journal_v1::tests::coordinated_final_stamp_uses_financial_profile_without_weakening_replay',
+        'journal::durable_financial_continuation_journal_v1::tests::coordinated_final_stamp_is_bound_to_the_post_append_phase',
     )),
     'pristine-host':('wholepact-native-host',('durable-proposal','financial-runtime','manual-admission','synthetic-born-joined-qualification'),('wholepact-native-host','wholepact-signer'),(
         'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::coordinated_external_witness_v1::request_selector_tests::exact_second_owner_selector_parses_without_creating_permission',

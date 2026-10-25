@@ -1,14 +1,14 @@
-name: Original failure preservation preflight only
+name: Financial continuation replay preflight only
 on:
   push:
-    branches: [checkpoint/original-error-preflight-p75]
+    branches: [checkpoint/financial-replay-preflight-p76]
 permissions: {}
 concurrency:
-  group: original-error-preflight-p75
+  group: financial-replay-preflight-p76
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/original-error-preflight-p75' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/financial-replay-preflight-p76' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -207,7 +207,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/original-error-preflight-p75' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/financial-replay-preflight-p76' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

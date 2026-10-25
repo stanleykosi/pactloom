@@ -431,6 +431,116 @@ mod tests {
     use crate::durable_payment_v1::tests::{h, history, owner_event};
     use std::os::unix::fs::PermissionsExt;
 
+    /// Real encrypted replay/append kernels, not a fabricated native Final or
+    /// source. The recorded fixture remains inert and never-funded.
+    #[test]
+    fn coordinated_final_stamp_uses_financial_profile_without_weakening_replay() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (journal, events, _) =
+            crate::journal::durable_delivery_admission_journal_v2::tests::recorded_journal_with_attempts(
+                &directory.path().join("never-funded-final-stamp.db"),
+                3,
+            );
+        let c = journal.connection.lock().unwrap();
+        let ledger = load(c.connection()).unwrap();
+        let (original_stamp, birth) = namespace_account_stamp(c.connection(), &ledger.policy).unwrap();
+        let original = ledger.selected_durable_delivery_admission_v2().unwrap().unwrap();
+        let OwnerControl::AdmitDurablePaymentWithDeliveryV2 { record } = &original.control else {
+            panic!()
+        };
+        let continuation = prepare_financial_continuation_request_v1(
+            FinancialContinuationTermsV1 {
+                scope: record.scope.clone(),
+                original_delivery_operation_id: original.operation_id.clone(),
+                original_delivery_request_digest: original_delivery_request_digest_v1(original).unwrap(),
+                original_delivery_committed_head: ledger.snapshot.head.clone(),
+                original_local_intent_digest: h('b'),
+                original_recipient_intent_digest: h('c'),
+                original_recipient_enrollment_ref: h('d'),
+                original_recipient_manifest_ref: h('e'),
+                valid_from_ms: 129_000,
+                valid_until_ms: 790_000,
+            },
+            h('f'),
+            &history(&birth, &events),
+        ).unwrap();
+        let event = owner_event(&ledger, continuation, 129_000);
+        let prefix = || {
+            c.connection().prepare("SELECT payload FROM authority_events ORDER BY sequence")
+                .unwrap().query_map([], |r| r.get::<_, Vec<u8>>(0)).unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>().unwrap()
+        };
+        let original_prefix = prefix();
+        // First roll back a valid append, then reject a corrupt head link without
+        // weakening immutable triggers, finally commit/reload a valid append.
+        for (bad_link, commit) in [(false, false), (true, false), (false, true)] {
+            let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Immediate).unwrap();
+            let mut current = load(&tx).unwrap();
+            let previous = current.snapshot.head.digest.clone();
+            let result = current.apply_financial_continuation_v1(&event).unwrap();
+            let appended_previous = if bad_link { h('0') } else { previous.clone() };
+            assert!(!bad_link || appended_previous != previous);
+            append_exact(&tx, &current, &event, &appended_previous).unwrap();
+            // This is the exact old post-append reader failure, inside the same
+            // uncommitted transaction, not a timing or native-authority stub.
+            assert!(matches!(namespace_account_stamp(&tx, &current.policy),
+                Err(AuthorityError::CorruptHistory)));
+            let checked = namespace_financial_account_stamp_v1(&tx, &current.policy);
+            if bad_link {
+                assert!(matches!(checked, Err(AuthorityError::CorruptHistory)));
+            } else {
+                let (stamp, actual_birth) = checked.unwrap();
+                assert!(stamp.head == current.snapshot.head);
+                assert!(actual_birth == birth);
+                assert!(!stamp.quarantined);
+                let MutationResult::Controlled(snapshot) = result else { panic!() };
+                assert!(snapshot == current.snapshot);
+                assert_eq!(stamp.head.sequence, original_stamp.head.sequence + 1);
+            }
+            if commit {
+                tx.commit().unwrap();
+                let replayed = load_financial_continuation_v1(c.connection()).unwrap();
+                assert!(replayed.snapshot == current.snapshot);
+                let (stamp, actual_birth) = namespace_financial_account_stamp_v1(c.connection(), &current.policy).unwrap();
+                assert!(stamp.head == replayed.snapshot.head && actual_birth == birth);
+                assert!(matches!(namespace_account_stamp(c.connection(), &current.policy),
+                    Err(AuthorityError::CorruptHistory)));
+                let retained = prefix();
+                assert_eq!(&retained[..original_prefix.len()], original_prefix.as_slice());
+                assert_eq!(retained.len(), original_prefix.len() + 1);
+            } else {
+                tx.rollback().unwrap();
+                assert!(c.connection().is_autocommit());
+                assert!(namespace_account_stamp(c.connection(), &current.policy).unwrap().0 == original_stamp);
+                assert_eq!(prefix(), original_prefix);
+            }
+        }
+    }
+
+    #[test]
+    fn coordinated_final_stamp_is_bound_to_the_post_append_phase() {
+        let source = include_str!("coordinated_financial_continuation_journal_v1.rs");
+        let (before, after) = source.split_once("observed_stage = Stage::FinalCurrentness;").unwrap();
+        assert_eq!(before.matches("namespace_account_stamp(").count(), 2);
+        assert_eq!(after.matches("namespace_account_stamp(").count(), 0);
+        assert_eq!(source.matches("namespace_financial_account_stamp_v1(").count(), 1);
+        assert!(before.ends_with("super::durable_financial_continuation_journal_v1::append_exact(&tx, &ledger, &ticket.event, &previous)?;\n                "));
+        let retained = [
+            "publication.check_original_owner(&ticket.owner)?;",
+            "ticket.file.check_current(c.connection())?;",
+            "publication.check_original_bounds()?;",
+            "ticket.peer.check_original_bounds()?;",
+            "let (final_stamp, final_birth) = namespace_financial_account_stamp_v1(&tx, &ticket.policy)?;",
+            ".require_original_account_connection(&c, &final_birth)?;",
+            "if final_stamp.head != ledger.snapshot.head || final_stamp.quarantined {",
+            "record.terms.require_live(final_now)?;",
+            "if snapshot != &ledger.snapshot {",
+        ];
+        let positions: Vec<_> = retained.iter().map(|text| after.find(text).unwrap()).collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
     /// Recorded never-funded data tests real encrypted append/reopen/immutability.
     /// It creates no native decision, enrolled live source, TLS owner or signature.
     #[test]

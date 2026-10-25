@@ -312,7 +312,7 @@ impl AuthorityJournal {
                 ticket.file.check_current(c.connection())?;
                 publication.check_original_bounds()?;
                 ticket.peer.check_original_bounds()?;
-                let (final_stamp, final_birth) = namespace_account_stamp(&tx, &ticket.policy)?;
+                let (final_stamp, final_birth) = namespace_financial_account_stamp_v1(&tx, &ticket.policy)?;
                 ticket
                     .owner
                     .require_original_account_connection(&c, &final_birth)?;
