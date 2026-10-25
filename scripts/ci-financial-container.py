@@ -316,6 +316,17 @@ def emit_cached_input_failure(flow,error):
     except Exception:return
 
 
+
+def emit_snapshot_failure(error):
+    # Exception-local finite reason only, never raw errors, records or new reads.
+    try:
+        if getattr(error,'code',None)!='snapshot':return
+        value=dict(version=1,reason=getattr(error,'snapshot_reason','Unclassified'))
+        encoded=json.dumps(C.validate_snapshot_diagnostic(value),separators=(',',':'))
+        print('CI_FINANCIAL_SNAPSHOT_DIAGNOSTIC '+encoded,flush=True)
+    except Exception:return # Preserve the original failure and cleanup.
+
+
 def main():
     if sys.argv[1:]==['fixture-child']:fixture_child();return
     C.require(not sys.argv[1:],'contract')
@@ -347,6 +358,7 @@ def main():
         if flow is not None and flow.location is not None:
             print('CI_FINANCIAL_LOCATION '+json.dumps(flow.location,separators=(',',':')),flush=True)
         emit_cached_input_failure(flow,error)
+        emit_snapshot_failure(error)
         emit_cached_progress_failure(flow)
         emit_cached_host_failure(flow)
         emit_cached_review_failure(flow)

@@ -254,12 +254,21 @@ class FullFlow:
         for owner in ('Signer1','Signer2'):
             if not self.milestone(owner,'ReturnFinished'):return owner
         return None
-    def press(self,s,tag,owner,*,ordinal=None):
+    def press(self,s,tag,owner,*,ordinal=None,paired_layout=False):
         key=self.key(s,tag,owner)+(ordinal,)
         C.require(key not in self.done,'replay')
+        if paired_layout:
+            C.require(s['phase']=='AdmissionReview' and s['subphase']=='None' and owner==s['owner']
+                      and owner in ('Signer1','Signer2') and not(s['secret_input'] or s['host_input']),'input_phase')
         # Two real later frames before one effect. Repeated observations may wait;
         # an attempted effect is latched BEFORE send and never retried.
-        latest=self._review_timed('StableFrames',lambda:self.native.stable(s['phase'],s['owner'],protected=s['secret_input'] or s['host_input']),frame=s)
+        try:
+            latest=self._review_timed('StableFrames',lambda:self.native.stable(s['phase'],s['owner'],protected=s['secret_input'] or s['host_input'],**({'paired_layout':True} if paired_layout else {})),frame=s)
+        except S.PairedLayoutChanged:
+            # Only the explicitly opted-in pre-effect pair can defer. No latch,
+            # input, navigation reset or deadline renewal precedes this return.
+            if not paired_layout:raise
+            return
         self.note_review_observation(latest)
         if tag=='PasswordSubmit' and s['phase'] in ('V3Password','Password'):
             self.password_guard(latest,s)
@@ -525,7 +534,7 @@ class FullFlow:
         for ack,body in sides:
             if not self.used(s,ack,owner):
                 checkbox=self.find(s,ack,owner)
-                if checkbox is not None and checkbox['enabled']:self.press(s,ack,owner)
+                if checkbox is not None and checkbox['enabled']:self.press(s,ack,owner,paired_layout=True)
                 else:self.seek(s,ack,owner)
                 return
         for action in ('ArmSigner','ArmWitness'):
@@ -535,7 +544,7 @@ class FullFlow:
             if pending not in self.scrolls:
                 button=self.find(s,action,owner)
                 if button is None:self.seek(s,action,owner);return
-                if button['enabled']:self.press(s,action,owner);return
+                if button['enabled']:self.press(s,action,owner,paired_layout=True);return
                 turn=self.scrolls.get(key,0);C.input_budget(turn<256,'paired_review',turn)
                 self.scrolls[pending]=turn
             # Complete this ordinary body-wheel turn before re-seeking the arm:
@@ -597,9 +606,9 @@ class FullFlow:
             self.host_capture_context=None;raise
         self.cache_host_observation(observed)
         self.host_capture_context=(observed['revision'],observed['nonws_end'])
-        C.require(type(text) is str and text.isascii() and len(text)<=8192 and
+        C.snapshot_checked('HostContext',C.require,type(text) is str and text.isascii() and len(text)<=8192 and
                   H.count(text)==observed['view']['nonws'],'snapshot')
-        C.require(observed['revision']>=self.host_occurrences.last_revision and
+        C.snapshot_checked('HostContext',C.require,observed['revision']>=self.host_occurrences.last_revision and
                   observed['nonws_end']>=self.host_occurrences.last_end,'snapshot')
         if text.endswith(HOST_COMMANDS_INSTRUCTION):
             start=observed['nonws_end']-H.count(HOST_COMMANDS_INSTRUCTION)
@@ -872,7 +881,8 @@ class FullFlow:
                         self.host_coverage_context=new_context
                         return self.seek_host_coverage(s)
                     return False
-                raise C.Rejected('snapshot') from None
+                error=C.Rejected('snapshot');error.snapshot_reason='HostContext'
+                raise error from None
             self.host_capture_outcome='Accepted';self.host_rejection=None
             self.host_coverage_context=None
             self.host_deferred=(occurrence,suffix)

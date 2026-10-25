@@ -80,7 +80,19 @@ def restore_selector_export_ui(text):
     assert hashlib.sha256(text.encode()).hexdigest()==UI_REPAINT_CURRENT_SHA
     return text
 
+# Exact P73 distinct ScrollArea identity and its cfg(test)-only child.
+UI_ADMISSION_SCROLL_CURRENT_SHA = '564479de74dffffc910e0860a6b51100270fb31fa197de30dcdcccc148946ab6'
+UI_ADMISSION_SCROLL_SALT = '        .id_salt(_ci_tag)\n'
+UI_ADMISSION_SCROLL_TEST_INCLUDE = '\n#[cfg(test)]\n#[path = "financial_source_ui/admission_scroll_tests.rs"]\nmod admission_scroll_tests;\n'
+def restore_admission_scroll_ui(text):
+    assert hashlib.sha256(text.encode()).hexdigest()==UI_ADMISSION_SCROLL_CURRENT_SHA
+    assert text.count(UI_ADMISSION_SCROLL_SALT)==1 and text.endswith(UI_ADMISSION_SCROLL_TEST_INCLUDE)
+    text=text.replace(UI_ADMISSION_SCROLL_SALT,'',1)[:-len(UI_ADMISSION_SCROLL_TEST_INCLUDE)]
+    assert hashlib.sha256(text.encode()).hexdigest()==UI_SELECTOR_EXPORT_CURRENT_SHA
+    return text
+
 def restore_ui_repaint(text):
+    text=restore_admission_scroll_ui(text)
     text=restore_selector_export_ui(text)
     assert hashlib.sha256(text.encode()).hexdigest()==UI_REPAINT_CURRENT_SHA
     assert text.count(UI_REPAINT_INSERTED)==1 and text.count(UI_REPAINT_TEST_INCLUDE)==1

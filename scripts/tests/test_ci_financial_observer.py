@@ -1313,7 +1313,8 @@ class PairedAdmissionTests(unittest.TestCase):
         def scroll(s,body,role):
             if view[0]!=body:return False
             reads[bodies.index(body)]+=1;events.append('scroll:'+body);return True
-        def press(s,tag,role):
+        def press(s,tag,role,*,paired_layout=False):
+            self.assertTrue(paired_layout)
             self.assertTrue(all(reads));events.append(tag);flow.done.add(flow.key(s,tag,role)+(None,))
         flow.seek=seek;flow.scroll=scroll;flow.press=press
         for _ in range(20):
@@ -4286,3 +4287,182 @@ class SameBatchHostMatchReceiptTests(unittest.TestCase):
     try:outcomes.append(('ok',O.C._join_host_views_validated(rows,final=final,_shape_receipt=receipt)))
     except O.C.Rejected as error:outcomes.append(('error',error.code))
    self.assertEqual(*outcomes)
+
+
+class PairedLayoutSettlingTests(unittest.TestCase):
+ def frame(self,generation,owner='Signer1',display=False,profile=None):
+  y=420 if display else 350
+  widgets=[dict(tag='SignerReviewBody',owner=owner,enabled=True,rect=[10,10,590,300]),
+    dict(tag='SignerReviewAcknowledgement',owner=owner,enabled=True,rect=[10,y,900,y+20]),
+    dict(tag='WitnessReviewAcknowledgement',owner=owner,enabled=True,rect=[10,y+30,900,y+50]),
+    dict(tag='ArmSigner',owner=owner,enabled=True,rect=[10,490,220,515]),
+    dict(tag='ArmWitness',owner=owner,enabled=True,rect=[10,530,220,555])]
+  if display:widgets.insert(1,dict(tag='WitnessReviewBody',owner=owner,enabled=True,rect=[610,10,1190,390]))
+  s=observed_snapshot(phase='AdmissionReview',subphase='None',owner=owner,view_generation=generation,
+    focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=widgets)
+  if profile==F.C.SEMANTIC_PROFILE:s['host_view_id']=None
+  return s
+ def model(self,frames,profile=None):
+  from unittest import mock
+  profile=profile or F.C.PROFILE
+  controller=mock.Mock();fixture=mock.Mock();fixture.deadline_ns=time.monotonic_ns()+120_000_000_000
+  observer=mock.Mock();observer.expected_profile=profile;observer.read.return_value=[]
+  iterator=iter(frames);bounds=[]
+  def next_snapshot(deadline):bounds.append(deadline);return next(iterator)
+  observer.next_snapshot=next_snapshot
+  flow=F.FullFlow(controller,fixture,observer,None)
+  flow.startup_index=len(F.HOST_STARTUP);flow.commands_instruction_observed=True
+  flow.startup_focus_seen=True;flow._startup_ceiling=None;flow.pump_host=lambda s:False
+  return flow,controller,bounds
+ def test_actual_fullflow_defers_only_paired_layout_then_clicks_once_for_both_owners_and_profiles(self):
+  for profile in (F.C.EXTERNAL_PROFILE,F.C.SEMANTIC_PROFILE):
+   for owner in ('Signer1','Signer2'):
+    for target in ('SignerReviewAcknowledgement','ArmSigner'):
+     with self.subTest(profile=profile,owner=owner,target=target):
+      frames=[self.frame(n,owner,n>=3,profile) for n in range(1,7)]
+      f,c,bounds=self.model(frames,profile);f.last_phase=('AdmissionReview','None',owner)
+      sentinel=('AdmissionReview','None','existing-budget',owner);f.scrolls[sentinel]=17
+      if target=='ArmSigner':
+       for tag in ('SignerReviewAcknowledgement','WitnessReviewAcknowledgement'):
+        f.done.add(f.key(frames[0],tag,owner)+(None,))
+      original_done=set(f.done);original=f.native.next_snapshot
+      def snapshot(deadline):
+       if len(bounds)==3:
+        self.assertEqual(f.done,original_done);self.assertEqual(f.actions,0)
+        self.assertEqual(f.scrolls,{sentinel:17});c.click.assert_not_called()
+       return original(deadline)
+      f.native.next_snapshot=snapshot
+      with self.assertRaises(StopIteration):f.run()
+      self.assertEqual(c.click.call_count,1);self.assertEqual(f.actions,1)
+      self.assertEqual(f.done,original_done|{f.key(frames[-1],target,owner)+(None,)})
+      self.assertEqual(f.scrolls,{sentinel:17});self.assertTrue(all(b==f.fixture.deadline_ns for b in bounds))
+      c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();c.type_ascii.assert_not_called()
+ def test_generic_stable_stays_strict_and_actual_paired_deferral_has_no_failure_reason(self):
+  f,c,_=self.model([self.frame(1),self.frame(2,display=True)])
+  with self.assertRaises(F.C.Rejected) as raised:f.native.stable('AdmissionReview','Signer1')
+  self.assertEqual(raised.exception.code,'snapshot');self.assertEqual(raised.exception.snapshot_reason,'StableSourceShape')
+  f,c,_=self.model([self.frame(1),self.frame(2,display=True)])
+  with self.assertRaises(F.S.PairedLayoutChanged) as raised:f.native.stable('AdmissionReview','Signer1',paired_layout=True)
+  self.assertFalse(hasattr(raised.exception,'snapshot_reason'));c.click.assert_not_called()
+ def test_all_original_frame_guards_and_nonwidget_changes_fail_closed(self):
+  import copy
+  cases=[('duplicate','snapshot','SnapshotValidation'),('replay','replay',None),('focus','input_phase',None),
+   ('phase','input_phase',None),('owner','input_phase',None),('secret','sensitive_capture',None),
+   ('host','sensitive_capture',None),('scale','snapshot','StableSourceShape'),
+   ('viewport','snapshot','SnapshotValidation'),('subphase','input_phase',None)]
+  for kind,code,reason in cases:
+   with self.subTest(kind=kind):
+    a=self.frame(1);b=self.frame(2,display=True)
+    if kind=='duplicate':b['widgets'].append(copy.deepcopy(b['widgets'][0]))
+    elif kind=='replay':b['view_generation']=1
+    elif kind=='focus':b['focused']=False
+    elif kind=='phase':b['phase']='Reading'
+    elif kind=='owner':b['owner']='Signer2'
+    elif kind=='secret':b['secret_input']=True
+    elif kind=='host':b['host_input']=True;b['host_observation']['entry']='Writing'
+    elif kind=='scale':b['pixels_per_point']=.75
+    elif kind=='viewport':b['viewport']=[1280,799]
+    elif kind=='subphase':b['subphase']='Review'
+    f,c,_=self.model([a,b])
+    with self.assertRaises(F.C.Rejected) as raised:f.press(a,'SignerReviewAcknowledgement','Signer1',paired_layout=True)
+    self.assertEqual(raised.exception.code,code);self.assertEqual(getattr(raised.exception,'snapshot_reason',None),reason)
+    self.assertFalse(f.done);self.assertEqual(f.actions,0);c.click.assert_not_called()
+ def test_explicit_opt_in_rejects_wrong_context_before_observation(self):
+  for change in (dict(phase='Reading'),dict(subphase='Review'),dict(secret_input=True),dict(host_input=True),dict(owner='Signer2')):
+   f,c,bounds=self.model([]);s=self.frame(1);s.update(change)
+   with self.assertRaises(F.C.Rejected) as raised:f.press(s,'ArmSigner','Signer1',paired_layout=True)
+   self.assertEqual(raised.exception.code,'input_phase');self.assertEqual(bounds,[]);c.click.assert_not_called()
+ def test_original_deadline_stops_unsettled_layout_without_input_or_budget_reset(self):
+  from unittest import mock
+  state={'now':1_000_000_000,'generation':0};deadline=state['now']+10
+  with mock.patch.object(F.time,'monotonic_ns',lambda:state['now']):
+   f,c,bounds=self.model([],F.C.SEMANTIC_PROFILE);f.fixture.deadline_ns=deadline
+   f.fixture.check=lambda:F.C.require(state['now']<deadline,'deadline')
+   def snapshot(bound):
+    bounds.append(bound);self.assertEqual(bound,deadline)
+    state['generation']+=1;state['now']+=1
+    return self.frame(state['generation'],display=state['generation']%2==0,profile=F.C.SEMANTIC_PROFILE)
+   f.native.next_snapshot=snapshot;f.last_phase=('AdmissionReview','None','Signer1');f.scrolls['retained']=63
+   with self.assertRaises(F.C.Rejected) as raised:f.run()
+   self.assertEqual(raised.exception.code,'deadline');self.assertEqual(f.scrolls,{'retained':63})
+   self.assertFalse(f.done);self.assertEqual(f.actions,0);c.click.assert_not_called()
+   self.assertTrue(all(b==deadline for b in bounds));self.assertEqual(f.fixture.deadline_ns,deadline)
+ def test_error_after_click_latch_is_not_caught_or_retried(self):
+  for error in (OSError('inert failure'),F.S.PairedLayoutChanged()):
+   f,c,_=self.model([self.frame(1),self.frame(2)]);c.click.side_effect=error;s=self.frame(0)
+   with self.assertRaises(type(error)) as raised:f.paired_admission(s,'Signer1')
+   self.assertIs(raised.exception,error);self.assertEqual(c.click.call_count,1)
+   self.assertEqual(f.actions,1);self.assertTrue(f.used(s,'SignerReviewAcknowledgement','Signer1'))
+   with self.assertRaises(F.C.Rejected) as replay:f.press(s,'SignerReviewAcknowledgement','Signer1',paired_layout=True)
+   self.assertEqual(replay.exception.code,'replay');self.assertEqual(c.click.call_count,1)
+
+
+class SnapshotFailureReasonTests(unittest.TestCase):
+ def test_annotation_preserves_exception_identity_first_reason_and_non_snapshot_errors(self):
+  for code in ('snapshot','record_shape','replay','deadline'):
+   error=F.C.Rejected(code)
+   def fail():raise error
+   with self.assertRaises(F.C.Rejected) as raised:
+    F.C.snapshot_checked('SnapshotValidation',F.C.snapshot_checked,'RecordValidation',fail)
+   self.assertIs(raised.exception,error);self.assertEqual(error.code,code)
+   self.assertEqual(getattr(error,'snapshot_reason',None),'RecordValidation' if code=='snapshot' else None)
+  sentinel=object();self.assertIs(F.C.snapshot_checked('StableSourceShape',lambda:sentinel),sentinel)
+  for reason in ('/never/output',1,[],'Unclassified'):
+   error=F.C.Rejected('snapshot');calls=[]
+   def fail():calls.append(True);raise error
+   with self.assertRaises(F.C.Rejected) as raised:F.C.snapshot_checked(reason,fail)
+   self.assertIs(raised.exception,error);self.assertEqual(calls,[True]);self.assertFalse(hasattr(error,'snapshot_reason'))
+ def test_actual_observer_record_and_semantic_join_boundaries_preserve_original_failure(self):
+  from unittest import mock
+  with tempfile.TemporaryDirectory() as directory:
+   p=pathlib.Path(directory);p.chmod(0o700)
+   record=dict(schema=1,profile=O.C.SEMANTIC_PROFILE,role='Coordinator',sequence=1,elapsed_ns=0,
+    kind='Birth',facts=dict(pid=100,parent_pid=99,parent_role=None))
+   f=p/'100.jsonl';f.write_text(json.dumps(record)+'\n');f.chmod(0o600)
+   for function,reason in (('validate_record','RecordValidation'),('_join_host_views_validated','SemanticHostLinkage')):
+    collector=O.ObserverFiles(p,time.monotonic_ns()+1_000_000_000,O.C.SEMANTIC_PROFILE)
+    error=O.C.Rejected('snapshot')
+    with mock.patch.object(O.C,function,side_effect=error):
+     with self.assertRaises(O.C.Rejected) as raised:collector.read()
+    self.assertIs(raised.exception,error);self.assertEqual(error.snapshot_reason,reason)
+ def test_finite_emission_privacy_and_failure_only_supervisor_projection(self):
+  import contextlib,io
+  from unittest import mock
+  container=F.load('ci-financial-container');supervisor=F.load('ci-financial-supervisor')
+  for reason in F.C.SNAPSHOT_REASONS:
+   error=F.C.Rejected('snapshot');error.snapshot_reason=reason;error.private_payload='/never/output'
+   out=io.StringIO()
+   with contextlib.redirect_stdout(out):container.emit_snapshot_failure(error)
+   text=out.getvalue();self.assertNotIn('/never/output',text)
+   value=json.loads(text.split(' ',1)[1]);self.assertEqual(value,dict(version=1,reason=reason))
+   runtime=supervisor.RuntimeRecords('external');held=io.StringIO()
+   with contextlib.redirect_stdout(held):
+    runtime(text.encode());self.assertEqual(held.getvalue(),'')
+    runtime(b'CI_FINANCIAL_RESULT '+json.dumps(supervisor.P.failure('snapshot',runtime.expected_profile)).encode())
+   self.assertIn('CI_FINANCIAL_SNAPSHOT_DIAGNOSTIC ',held.getvalue());self.assertEqual(runtime.first_failure['code'],'snapshot')
+  error=F.C.Rejected('snapshot');out=io.StringIO()
+  with contextlib.redirect_stdout(out):container.emit_snapshot_failure(error)
+  self.assertIn('Unclassified',out.getvalue());self.assertFalse(hasattr(error,'snapshot_reason'))
+  with mock.patch('builtins.print',side_effect=BrokenPipeError):container.emit_snapshot_failure(error)
+  self.assertEqual(error.code,'snapshot')
+  error.snapshot_reason='/never/output';out=io.StringIO()
+  with contextlib.redirect_stdout(out):container.emit_snapshot_failure(error)
+  self.assertEqual(out.getvalue(),'');self.assertEqual(error.code,'snapshot')
+  for code in ('deadline','replay','record_shape'):
+   out=io.StringIO()
+   with contextlib.redirect_stdout(out):container.emit_snapshot_failure(F.C.Rejected(code))
+   self.assertEqual(out.getvalue(),'')
+ def test_closed_diagnostic_schema_duplicates_success_and_wrong_error_are_rejected(self):
+  supervisor=F.load('ci-financial-supervisor');good=dict(version=1,reason='StableSourceShape')
+  for value in (dict(good,reason='raw/private/path'),dict(good,extra=True),dict(good,version=True),dict(good,version=2)):
+   with self.assertRaises(F.C.Rejected):F.C.validate_snapshot_diagnostic(value)
+   with self.assertRaises(supervisor.Failure):supervisor.RuntimeRecords('external')(b'CI_FINANCIAL_SNAPSHOT_DIAGNOSTIC '+json.dumps(value).encode())
+  line=b'CI_FINANCIAL_SNAPSHOT_DIAGNOSTIC '+json.dumps(good).encode()
+  runtime=supervisor.RuntimeRecords('external');runtime(line)
+  with self.assertRaises(supervisor.Failure):runtime(line)
+  runtime=supervisor.RuntimeRecords('external');runtime(line)
+  with self.assertRaises(supervisor.Failure):runtime(b'CI_FINANCIAL_RESULT '+json.dumps(supervisor.P.failure('deadline',runtime.expected_profile)).encode())
+  runtime=supervisor.RuntimeRecords('external');runtime(line)
+  success=dict(schema=1,profile=runtime.expected_profile,native_oracle_verified=True,fixture_cleaned=True,
+    display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)
+  with self.assertRaises(supervisor.Failure):runtime(b'CI_FINANCIAL_CANDIDATE '+json.dumps(success).encode())

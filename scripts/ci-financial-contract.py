@@ -85,6 +85,29 @@ def require(condition, code='contract'):
     if not condition:
         raise Rejected(code)
 
+
+SNAPSHOT_REASONS=frozenset(('Unclassified','RecordValidation','SemanticHostLinkage',
+    'SnapshotValidation','StableSourceShape','HostSourceShape','HostViewShape',
+    'HostPostCaptureShape','HostContext'))
+
+def snapshot_checked(reason,operation,*args,**kwargs):
+    """Failure-only finite annotation; same operation, result and exception."""
+    try:return operation(*args,**kwargs)
+    except Exception as error:
+        try:
+            if (type(reason) is str and reason in SNAPSHOT_REASONS and reason!='Unclassified'
+                    and getattr(error,'code',None)=='snapshot' and getattr(error,'snapshot_reason',None) is None):
+                error.snapshot_reason=reason
+        except Exception:pass
+        raise
+
+def validate_snapshot_diagnostic(value):
+    exact(value,('version','reason'))
+    require(type(value['version']) is int and value['version']==1
+            and type(value['reason']) is str and value['reason'] in SNAPSHOT_REASONS)
+    return value
+
+
 def exact(value, keys, code='record_shape'):
     require(type(value) is dict and set(value) == set(keys), code)
 

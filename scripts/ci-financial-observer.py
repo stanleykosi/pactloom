@@ -93,7 +93,7 @@ class ObserverFiles:
                 C.require(len(records)+len(entries)<C.MAX_RECORDS,'record_limit')
                 C.require(len(line)<=C.MAX_RECORD_BYTES,'record_limit')
                 entry=json.loads(line) if index<prior_count else C.loads(line)
-                if index>=prior_count:C.validate_record(entry,self.expected_profile)
+                if index>=prior_count:C.snapshot_checked('RecordValidation',C.validate_record,entry,self.expected_profile)
                 entries.append(entry)
             if entries:
                 role=entries[0]['role'];birth=entries[0]
@@ -105,7 +105,7 @@ class ObserverFiles:
         C._native_failure_sequence_validated(records)
         C.validate_host_exit_cardinality(records)
         C.validate_actor_cardinality(records)
-        if self.expected_profile==C.SEMANTIC_PROFILE:self._set_host_view(C._join_host_views_validated(records,_shape_receipt=True))
+        if self.expected_profile==C.SEMANTIC_PROFILE:self._set_host_view(C.snapshot_checked('SemanticHostLinkage',C._join_host_views_validated,records,_shape_receipt=True))
         return records
     @staticmethod
     def _unavailable_timing():
@@ -174,9 +174,9 @@ class ObserverFiles:
             self._semantic_active=copy.deepcopy(active)
             self._semantic_active['text']=bytearray(active['text'],'ascii')
     def host_view(self,snapshot):
-        C.require(self.expected_profile==C.SEMANTIC_PROFILE and self._semantic_active is not None,'snapshot')
+        C.snapshot_checked('SemanticHostLinkage',C.require,self.expected_profile==C.SEMANTIC_PROFILE and self._semantic_active is not None,'snapshot')
         view=self._semantic_active.copy();view['text']=bytes(view['text']).decode('ascii')
-        C.match_host_view(snapshot,view)
+        C.snapshot_checked('SemanticHostLinkage',C.match_host_view,snapshot,view)
         return view['text']
     def _drain_failure(self,deadline_ns,records):
         # Failure is already latched. This bounded observer-only exception never

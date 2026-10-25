@@ -26,10 +26,20 @@ class ExactHistorySourceRestorationTests(unittest.TestCase):
   import hashlib
   spec=importlib.util.spec_from_file_location('p72_selector_restoration',P.parent/'ci-financial-admit-read-source-audit.py');audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
   raw=(P.parent.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
+  raw=audit.restore_admission_scroll_ui(raw)
   self.assertEqual(hashlib.sha256(audit.restore_selector_export_ui(raw).encode()).hexdigest(),'930e2e54c6429bde08d5bddd6dc671c5a8b335777cb5e00bcc7763b6d11d5a27')
   for old,new in [('selector_export_phase(painted_phase)','selector_export_phase(self.phase)'),('!host_entry_blocks_source(host_entry) && has_selector','has_selector'),('self.retained_continue.iter().any(Option::is_some)','true'),('scrub_unrequested_payloads(&mut input.raw.events);','input.raw.events.clear();')]:
    self.assertIn(old,raw)
    with self.assertRaises(AssertionError):audit.restore_selector_export_ui(raw.replace(old,new,1))
+
+ def test_exact_paired_scroll_inverse_preserves_p72_and_rejects_identity_or_completion_mutations(self):
+  import hashlib
+  spec=importlib.util.spec_from_file_location('p73_scroll_restoration',P.parent/'ci-financial-admit-read-source-audit.py');audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
+  raw=(P.parent.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
+  self.assertEqual(hashlib.sha256(audit.restore_admission_scroll_ui(raw).encode()).hexdigest(),'a04c0d0394c63ffe1e93ca1a1f7295c570e5346576c9f018fc2f00dd8ffd88ce')
+  for old,new in [('.id_salt(_ci_tag)','.id_salt("same")'),('.max_height(390.0)','.max_height(391.0)'),('eligible && ui.is_rect_visible(end.rect)','eligible')]:
+   self.assertIn(old,raw)
+   with self.assertRaises(AssertionError):audit.restore_admission_scroll_ui(raw.replace(old,new,1))
 
 class ContextPreflightTests(unittest.TestCase):
  def setUp(self):
@@ -99,6 +109,15 @@ class RepaintExecutionPreflightTests(unittest.TestCase):
   import re
   self.assertEqual(set(re.findall(r'#\[test\]\s*fn (\w+)\s*\(',source)),{n.rsplit('::',1)[-1] for n in expected})
   self.assertNotIn('#[ignore]',source)
+ def test_admission_scroll_exact_names_bind_to_actual_child_module(self):
+  root=P.parent.parent;ui=root/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs'
+  self.assertIn('#[cfg(test)]\n#[path = "financial_source_ui/admission_scroll_tests.rs"]\nmod admission_scroll_tests;',ui.read_text())
+  expected=('financial_source_ui::admission_scroll_tests::paired_review_scroll_areas_keep_independent_native_state', 'financial_source_ui::admission_scroll_tests::review_completion_requires_eligible_visible_end', 'financial_source_ui::admission_scroll_tests::paired_review_ids_and_completion_are_bound_to_production')
+  self.assertEqual(C.ADMISSION_SCROLL_TESTS,expected)
+  source=(ui.parent/'financial_source_ui/admission_scroll_tests.rs').read_text()
+  import re
+  self.assertEqual(set(re.findall(r'#\[test\]\s*fn (\w+)\s*\(',source)),{n.rsplit('::',1)[-1] for n in expected})
+  self.assertNotIn('#[ignore]',source)
  def test_wrong_binary_features_profile_or_executable_rejected(self):
   for field,value in [('features',[]),('features',C.S.A.RECIPE['artifact_features']['coordinator-observed']+['extra']),('profile',dict(test=False)),('profile',dict(test=1)),('executable','/outside'),('filenames',[])]:
    rows=copy.deepcopy(self.rows);rows[self.index][field]=value
@@ -120,11 +139,11 @@ class RepaintExecutionPreflightTests(unittest.TestCase):
  def test_no_run_then_exact_lists_and_runs_reject_missing_or_ignored_tests(self):
   from unittest import mock
   import contextlib,io
-  names=C.REPAINT_TESTS+C.COORDINATOR_DIAGNOSTIC_TESTS+C.SELECTOR_EXPORT_TESTS;good='test result: ok. 1 passed; 0 failed; 0 ignored;'
+  names=C.REPAINT_TESTS+C.COORDINATOR_DIAGNOSTIC_TESTS+C.SELECTOR_EXPORT_TESTS+C.ADMISSION_SCROLL_TESTS;good='test result: ok. 1 passed; 0 failed; 0 ignored;'
   for listings,result,ok in [([n+': test\n' for n in names],good,True),(['']+[n+': test\n' for n in names[1:]],good,False),([n+': test\n' for n in names],'test result: ok. 0 passed; 0 failed; 1 ignored;',False)]:
    outputs=[b'compiler']+[x.encode() for x in listings]+[result.encode()]*len(names)
    with mock.patch.object(C.S,'select_build_environment',return_value={}),mock.patch.object(C,'coordinator_test_executable',return_value=self.executable),mock.patch.object(C.S,'checked',side_effect=outputs) as checked,contextlib.redirect_stdout(io.StringIO()):
-    if ok:self.assertEqual(C.run_coordinator_tests(self.target,{}),7)
+    if ok:self.assertEqual(C.run_coordinator_tests(self.target,{}),10)
     else:
      with self.assertRaises(AssertionError):C.run_coordinator_tests(self.target,{})
     command=checked.call_args_list[0].args[0]

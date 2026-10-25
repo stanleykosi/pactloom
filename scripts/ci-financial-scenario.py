@@ -28,6 +28,9 @@ K=module('ci-financial-controller')
 class HostObservationChanged(Exception):
     """A read-only semantic Host bracket crossed a genuine source transition."""
 
+class PairedLayoutChanged(Exception):
+    """Validated paired-review widgets changed before any input was attempted."""
+
 class NativeScenario:
     """One actual fixture and target; no retries, rebinding or renewed clocks."""
     def __init__(self,controller,fixture,next_snapshot,*,expected_profile=C.PROFILE,host_view=None,wait_ceiling=None):
@@ -45,18 +48,25 @@ class NativeScenario:
             C.require(bound is None or (type(bound) is int and bound>0),'deadline')
             if bound is not None:deadline=min(deadline,bound)
             C.require(time.monotonic_ns()<deadline,'deadline')
-        s=C.validate_snapshot(self.next_snapshot(deadline),self.expected_profile)
+        s=C.snapshot_checked('SnapshotValidation',C.validate_snapshot,self.next_snapshot(deadline),self.expected_profile)
         if self.wait_ceiling is not None:C.require(time.monotonic_ns()<deadline,'deadline')
         C.require(s['view_generation']>self._generation,'replay')
         self._generation=s['view_generation'];return s
-    def stable(self,phase,owner,*,protected=False):
+    def stable(self,phase,owner,*,protected=False,paired_layout=False):
         """Two later actual UI frames separated by genuine render progress."""
         first=self.snapshot();self.controller.wait_render_progress();second=self.snapshot()
         for s in (first,second):
             C.require(s['phase']==phase and s['owner']==owner and s['focused'],'input_phase')
             C.require(protected or not(s['secret_input'] or s['host_input']),'sensitive_capture')
         shape=lambda s:{k:v for k,v in s.items() if k not in ('view_generation','host_observation','host_view_id')}
-        C.require(shape(first)==shape(second),'snapshot');return second
+        if paired_layout:
+            C.require(phase=='AdmissionReview' and owner in ('Signer1','Signer2') and not protected,'input_phase')
+            C.require(first['subphase']==second['subphase']=='None','input_phase')
+            unchanged=lambda s:{k:v for k,v in shape(s).items() if k!='widgets'}
+            C.snapshot_checked('StableSourceShape',C.require,unchanged(first)==unchanged(second),'snapshot')
+            if first['widgets']!=second['widgets']:raise PairedLayoutChanged()
+        else:C.snapshot_checked('StableSourceShape',C.require,shape(first)==shape(second),'snapshot')
+        return second
     @staticmethod
     def widget(snapshot,tag,owner):
         found=[w for w in snapshot['widgets'] if w['tag']==tag and w['owner']==owner]
@@ -172,14 +182,14 @@ class NativeScenario:
             a=self.snapshot();self.controller.wait_render_progress();first=self.snapshot()
             self._host_read_frames((a,first),phase,owner)
             source_shape=lambda s:{k:v for k,v in s.items() if k not in ('view_generation','host_observation','host_view_id')}
-            C.require(source_shape(a)==source_shape(first),'snapshot')
+            C.snapshot_checked('HostSourceShape',C.require,source_shape(a)==source_shape(first),'snapshot')
         else:first=self.stable(phase,owner)
         self.controller.wait_render_progress();second=self.snapshot()
         if semantic:self._host_read_frames((first,second),phase,owner)
         shape=lambda s:{k:v for k,v in s.items() if k!='view_generation'}
-        C.require(shape(first)==shape(second),'snapshot')
+        C.snapshot_checked('HostViewShape',C.require,shape(first)==shape(second),'snapshot')
         h=second['host_observation']
-        C.require(h['context_valid'] and h['entry']=='Idle' and h['view'] is not None,'snapshot')
+        C.snapshot_checked('HostContext',C.require,h['context_valid'] and h['entry']=='Idle' and h['view'] is not None,'snapshot')
         return second
     def capture_host(self,phase,owner,ocr):
         s=self.host_stable(phase,owner)
@@ -193,7 +203,7 @@ class NativeScenario:
             with self.controller.observe() as frame:
                 text=ocr.read(frame,physical,self.fixture.deadline_ns)
         after=self.host_stable(phase,owner)
-        C.require({k:v for k,v in s.items() if k!='view_generation'}==
+        C.snapshot_checked('HostPostCaptureShape',C.require,{k:v for k,v in s.items() if k!='view_generation'}==
                   {k:v for k,v in after.items() if k!='view_generation'},'snapshot')
         return text,after['host_observation']
 

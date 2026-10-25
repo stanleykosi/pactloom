@@ -7362,6 +7362,7 @@ fn review_display(ui: &mut egui::Ui, display: &str, eligible: bool) -> bool {
 fn review_display_tagged(ui: &mut egui::Ui, display: &str, eligible: bool, _ci_tag: &'static str) -> bool {
     let mut end_visible = false;
     let _ci_scroll = egui::ScrollArea::vertical()
+        .id_salt(_ci_tag)
         .max_height(390.0)
         .show(ui, |ui| {
             ui.monospace(display);
@@ -9578,3 +9579,7 @@ mod repaint_tests;
 #[cfg(test)]
 #[path = "financial_source_ui/selector_export_tests.rs"]
 mod selector_export_tests;
+
+#[cfg(test)]
+#[path = "financial_source_ui/admission_scroll_tests.rs"]
+mod admission_scroll_tests;
