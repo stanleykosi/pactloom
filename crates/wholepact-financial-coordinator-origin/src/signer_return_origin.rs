@@ -1045,6 +1045,7 @@ impl CoordinatorFinancialEndpointV1 {
                 t.reported = true;
                 t.phase = 73;
                 received_workflow_progress(&self.core.phase, i, 72, 73)?;
+                slot.wire_phase = 73;
                 Ok(CoordinatorFinancialEventV1::ReturnCompleted { role, data })
             }
             Packet::ReturnFailed { data, .. } => {
@@ -1269,6 +1270,7 @@ impl HostFinancialWorkflowRelayV1 {
                 t.result = Some(data.clone());
                 t.reported = true;
                 t.phase = 73;
+                slot.phase = 73;
                 Ok(true)
             }
             Packet::ReturnFailed { data, .. } => {

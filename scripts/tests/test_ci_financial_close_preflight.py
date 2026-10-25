@@ -571,3 +571,29 @@ class ResultSelectorDomainPreflightTests(unittest.TestCase):
   self.assertLess(workflow.index(marker),workflow.index("env = environments['observed-semantic']"))
   gate=workflow.split('          for name in names:',1)[1].split('          # These actual Origin',1)[0]
   for token in ("'--list', '--exact'","'--exact', name, '--test-threads=1'",'1 passed; 0 failed; 0 ignored;','timeout=30'):self.assertIn(token,gate)
+
+class TerminalPhaseAndResumePreflightTests(unittest.TestCase):
+ def test_five_actual_source_regressions_are_mandatory_and_ui_inverse_is_exact(self):
+  import hashlib,inspect
+  spec=importlib.util.spec_from_file_location('p80_cause_inventory',P.parent/'ci-financial-cause-trace.py');cause=importlib.util.module_from_spec(spec);spec.loader.exec_module(cause)
+  self.assertEqual(cause.TERMINAL_PHASE_TEST_NAMES,('sign_committed_outer_phase_matches_both_original_consumers','return_completed_outer_phase_reaches_normal_notice_after_sign','invalid_or_replayed_reports_never_advance_outer_phase','coordinator_progress_error_and_restriction_preserve_original_results'))
+  self.assertEqual(cause.RESUME_TAIL_TEST_NAMES,('typed_signing_resume_drops_only_obsolete_serving_before_pre_poll_check',))
+  self.assertEqual(len(cause.TEST_NAMES),8);self.assertEqual(len(cause.RETIREMENT_TEST_NAMES),12)
+  names=cause.TEST_NAMES+cause.RETIREMENT_TEST_NAMES+cause.TERMINAL_PHASE_TEST_NAMES+cause.RESUME_TAIL_TEST_NAMES
+  self.assertEqual(len(names),25);self.assertEqual(len(set(names)),25)
+  runner=inspect.getsource(cause.native_tests)
+  for token in ('retirement_harness::terminal_phase_harness::','resume_tail_harness::','--list','--test-threads=1','0 failed; 0 ignored;','PINNED_RUSTC'):self.assertIn(token,runner)
+  self.assertEqual(cause.PINNED_RUSTC,'rustc 1.99.0 (b940084d7 2026-09-28)')
+  workflow=(P.parent.parent/'.github/workflows/deadline-preflight.yml').read_text()
+  command="print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-cause-trace.py'], env=env, timeout=180))"
+  self.assertEqual(workflow.count(command),1);self.assertNotIn('--source-only',workflow)
+  self.assertLess(workflow.index("assert run(rustup+['rustc', '--version']"),workflow.index(command))
+  self.assertLess(workflow.index(command),workflow.index("rustup+['cargo'"))
+  spec=importlib.util.spec_from_file_location('p80_ui_inverse',P.parent/'ci-financial-admit-read-source-audit.py');audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
+  raw=(P.parent.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
+  self.assertEqual(hashlib.sha256(audit.restore_terminal_resume_ui(raw).encode()).hexdigest(),'6ed6cea68e69fd6c2377ca8d86fa1182ca1f741835dc4c881be0fd0e92d1e82d')
+  mutations=[raw+'// unrelated change\n']
+  for old,new in [('self.native.resume_after_witness_retirement(completion)?;','self.native.resume_after_witness_retirement(completion).ok();'),('if self.phase == Phase::SigningRetiring {\n                self.writer_flow.serving.take();','if true {\n                self.writer_flow.serving.take();'),('self.sign_flow.retired = Some(custody);','self.sign_flow.retired = None;')]:
+   self.assertIn(old,raw);mutations.append(raw.replace(old,new,1))
+  for bad in mutations:
+   with self.assertRaises(AssertionError):audit.restore_terminal_resume_ui(bad)

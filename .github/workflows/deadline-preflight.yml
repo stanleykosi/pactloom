@@ -1,14 +1,14 @@
-name: Result selector domain preflight only
+name: Authenticated terminal phase preflight only
 on:
   push:
-    branches: [checkpoint/result-selector-preflight-p79]
+    branches: [checkpoint/terminal-phase-preflight-p80]
 permissions: {}
 concurrency:
-  group: result-selector-preflight-p79
+  group: terminal-phase-preflight-p80
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/result-selector-preflight-p79' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/terminal-phase-preflight-p80' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -208,7 +208,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/result-selector-preflight-p79' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/terminal-phase-preflight-p80' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

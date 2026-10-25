@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P75/P77 exact-source cause-boundary and retirement ordering trace, not an authority fixture.
+"""P75/P77/P80 exact-source cause-boundary and retirement ordering trace, not an authority fixture.
 
 Unmodified relay pump/finish/Drop, custody/owner Drop and finite Slots methods
 are executed with inert lifecycle, child and append adapters. No HostOrigin,
@@ -8,6 +8,8 @@ is unmodified; its failure carrier/classifier are explicitly inert diagnostic
 adapters, not actual transport. Actual Reporter/WRITER tests run separately.
 P77 also executes selected retirement methods/guards and ordinary receive code
 with inert packets/custody dependencies, not authenticated production authority.
+P80 executes exact terminal report arms and typed resume tail with inert carriers;
+DTO validation and native UI authority are not exercised.
 Default requires exact pinned rustc; --source-only explicitly does NOT run Rust.
 The script writes only to a temporary directory, never to repository sources.
 """
@@ -193,7 +195,7 @@ class SourceContracts(unittest.TestCase):
         self.assertLess(host.index('lifecycle_owner:'),host.index('verifier_custody:'))
         self.assertLess(host.index('verifier_custody:'),host.index('signers:'))
     def test_source_items_are_copied_unchanged(self):
-        generated,items=build_harness()
+        generated,items=build_legacy_harness()
         for name,value in items.items():self.assertEqual(generated.count(value),1,name)
         self.assertIn('self.live.store(false, Ordering::Release);',items['custody_drop'])
         self.assertIn('drop(self.host.take());result',items['relay_finish'])
@@ -204,7 +206,7 @@ class SourceContracts(unittest.TestCase):
         self.assertIn('failure.error(),callback',wrapper)
         self.assertEqual(wrapper.count('diagnostic::driver(stage,class);'),1)
     def test_harness_inventory_and_explicit_inert_scope(self):
-        generated,_=build_harness()
+        generated,_=build_legacy_harness()
         self.assertEqual(len(TEST_NAMES),8)
         for name in TEST_NAMES:self.assertEqual(generated.count('fn '+name+'()'),1,name)
         self.assertNotIn('struct HostOriginV1',generated)
@@ -240,6 +242,65 @@ class SourceContracts(unittest.TestCase):
         self.assertEqual(sha(RUST_TESTS),'b53b54d24f398dc6c3d4c7150e4ad228042630d4d8cc05cc5a6861d8e1607066')
         rust,_=build_retirement_harness()
         for name in RETIREMENT_TEST_NAMES:self.assertEqual(rust.count('fn '+name+'()'),1,name)
+
+    def test_p80_terminal_producers_and_original_consumers_are_exact(self):
+        for path,record in P80_RESTORATION.items():
+            self.assertEqual(sha(p80_restore(path,(ROOT/path).read_text())),record['baseline_sha256'],path)
+        rust,e=build_terminal_phase_harness()
+        for name,value in e.items():self.assertEqual(rust.count(value),1,name)
+        for owner,field in [('c','wire_phase'),('h','phase')]:
+            for kind,to in [('sign',67),('return',73)]:
+                key=owner+'_'+kind;arm=e[key]
+                self.assertIn('=> {',arm);self.assertIn('data.validate()?;',arm)
+                self.assertLess(arm.index('if t.reported'),arm.index('slot.'+field+' = '+str(to)+';'))
+                self.assertLess(arm.index('t.phase = '+str(to)+';'),arm.index('slot.'+field+' = '+str(to)+';'))
+                if owner=='c':self.assertLess(arm.index('received_workflow_progress('),arm.index('slot.'+field+' = '+str(to)+';'))
+                self.assertEqual(arm.replace('                slot.'+field+' = '+str(to)+';\n','',1),e[key+'_old'])
+        # The extracted arms do not authenticate packets. Bind the actual dispatch
+        # and predecessor metadata so no inert carrier is mislabeled authority.
+        workflow=(ROOT/PATHS['relay']).read_text()
+        for suffix in ['return self.receive_return_event(packet).map(Some);}', 'return self.receive_sign_event(packet).map(Some);}', 'return self.up_return(target,packet);}', 'return self.up_sign(target,packet);}']:
+            self.assertEqual(workflow.count(suffix),1)
+        activation=(ROOT/(P77_ORIGIN+'signer_activate_wallet_origin.rs')).read_text()
+        self.assertEqual(activation.count('pub(super) const AWAITING_WALLET_PREPARE: u8 = 55;'),1)
+        for line in ['slot.wire_phase = AWAITING_WALLET_PREPARE;','slot.phase = AWAITING_WALLET_PREPARE;']:self.assertEqual(activation.count(line),1)
+        self.assertIn('slot.wire_phase!=67||!slot.activate.wallet.sign.selector_seen',e['c_sign_guard'])
+        self.assertIn('slot.phase!=67||!slot.activate.wallet.sign.selector_seen',e['h_sign_guard'])
+        self.assertIn('slot.wire_phase!=73||slot.activate.wallet.sign.returning.actual_completed()?!=&notice.returned[i]',e['normal_guard'])
+        self.assertIn('return Ok(false)',e['received_progress'])
+        self.assertIn('original workflow restricted, quiescent or closing',e['action_restrictions'])
+        legacy,_=build_legacy_harness()
+        self.assertEqual(sha(legacy),P80_LEGACY_GENERATED_SHA)
+        self.assertEqual(len(TEST_NAMES)+len(RETIREMENT_TEST_NAMES),20)
+        self.assertEqual(len(TERMINAL_PHASE_TEST_NAMES),4)
+        for name in TERMINAL_PHASE_TEST_NAMES:self.assertEqual(rust.count('fn '+name+'()'),1,name)
+
+    def test_p80_resume_tail_preserves_custody_and_pre_poll_order(self):
+        rust,e=build_resume_tail_harness()
+        for name,value in e.items():self.assertEqual(rust.count(value),1,name)
+        source=(ROOT/P80_UI).read_text()
+        raw=item(source,'fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput)')
+        self.assertLess(raw.index('self.check_current();'),raw.index('self.poll_driver(ctx);'))
+        tail=e['tail']
+        self.assertLess(tail.index('self.native.resume_after_witness_retirement(completion)?;'),tail.index('self.writer_flow.serving.take();'))
+        self.assertLess(tail.index('self.writer_flow.serving.take();'),tail.index('self.retirement_paused = None;'))
+        self.assertIn('if self.phase == Phase::SigningRetiring {\n                self.writer_flow.serving.take();\n            }',tail)
+        custody=item(source,'Ok(Outcome::SigningResumed(custody)) =>')
+        for guard in ['self.phase != Phase::SigningRetiring','self.active != Some(role)','self.retirement_paused.is_some()','self.history_resume_pending != Some(role)','self.sign_flow.committed.as_ref() != Some(custody.signed_result())','&p.original != custody.original_binding()','custody.check_current().is_err()']:
+            self.assertIn(guard,custody)
+        self.assertNotIn('self.sign_flow.retired = Some(custody);',tail)
+        self.assertIn('self.sign_flow.retired = Some(custody);',custody)
+        signing=(ROOT/(P77_ORIGIN+'financial_signing_coordinator.rs')).read_text()
+        serving=item(item(signing,'impl FinancialSigningServingV1'),'pub fn check_current(')
+        self.assertIn('self.binding.service_check()?;',serving)
+        self.assertIn('signing_phase(self.binding.slot())!=G_SERVING',serving)
+        self.assertEqual(signing.count('pub(super) const G_SERVING: u8 = 4;'),1)
+        retirement=(ROOT/(P77_ORIGIN+'witness_retirement.rs')).read_text()
+        self.assertEqual(retirement.count('RetirementPurpose::FinancialSigning=>self.core.phase.signing_retirement_step(i,5,6)?,'),1)
+        self.assertEqual(len(RESUME_TAIL_TEST_NAMES),1)
+        self.assertEqual(rust.count('fn '+RESUME_TAIL_TEST_NAMES[0]+'()'),1)
+        # Whole UI inverse pins all remaining currentness/custody guards unchanged.
+        self.assertEqual(sha(p80_restore(P80_UI,source)),P80_RESTORATION[P80_UI]['baseline_sha256'])
 
 RUST_SUPPORT=r"""
 use std::{cell::RefCell, fmt, io, sync::{Arc,atomic::{AtomicBool,Ordering}}, time::Instant};
@@ -365,7 +426,7 @@ fn pump_ok_case(value:bool){setup();let mut relay=HostFinancialWorkflowRelayV1::
  STATE.with(|s|{let s=s.borrow();assert_eq!(s.detail_calls,0);assert!(s.signer_marks.is_empty());});}
 """
 
-def build_harness():
+def build_legacy_harness():
     e=extracted_items()
     diag='\n'.join(e[k] for k in ('codes_macro','stage_codes','class_codes','slots_struct','classify_io'))
     diag+='\nimpl Slots {\n'+'\n'.join(e[k] for k in ('slots_new','slots_enter','slots_active','slots_failure'))+'\n}\n'
@@ -396,11 +457,11 @@ def native_tests():
         checked([rustc,'--edition=2021','--test','--cfg','wholepact_financial_rendered_host_semantic_ci','--cfg','feature="synthetic-qualification"','-C','opt-level=0',str(src),'-o',str(binary)],120)
         listing=checked([str(binary),'--list','--format','terse'],15)
         actual=sorted(line.removesuffix(': test') for line in listing.splitlines() if line.endswith(': test'))
-        if actual!=sorted(['harness::'+name for name in TEST_NAMES]+['retirement_harness::'+name for name in RETIREMENT_TEST_NAMES]):raise AssertionError(('unexpected exact Rust test inventory',actual))
+        if actual!=sorted(['harness::'+name for name in TEST_NAMES]+['retirement_harness::'+name for name in RETIREMENT_TEST_NAMES]+['retirement_harness::terminal_phase_harness::'+name for name in TERMINAL_PHASE_TEST_NAMES]+['resume_tail_harness::'+name for name in RESUME_TAIL_TEST_NAMES]):raise AssertionError(('unexpected exact Rust test inventory',actual))
         output=checked([str(binary),'--test-threads=1'],60);print(output,end='')
-        if f'test result: ok. {len(TEST_NAMES)+len(RETIREMENT_TEST_NAMES)} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' not in output:
+        if f'test result: ok. {len(TEST_NAMES)+len(RETIREMENT_TEST_NAMES)+len(TERMINAL_PHASE_TEST_NAMES)+len(RESUME_TAIL_TEST_NAMES)} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' not in output:
             raise AssertionError('Rust test result missing/count mismatch')
-    return dict(rust_harness_executed=True,rust_tests_passed=len(TEST_NAMES)+len(RETIREMENT_TEST_NAMES),legacy_cause_tests_passed=len(TEST_NAMES),retirement_tests_passed=len(RETIREMENT_TEST_NAMES),rust_ignored=0,compiler=version)
+    return dict(rust_harness_executed=True,rust_tests_passed=len(TEST_NAMES)+len(RETIREMENT_TEST_NAMES)+len(TERMINAL_PHASE_TEST_NAMES)+len(RESUME_TAIL_TEST_NAMES),legacy_cause_tests_passed=len(TEST_NAMES),retirement_tests_passed=len(RETIREMENT_TEST_NAMES),terminal_phase_tests_passed=len(TERMINAL_PHASE_TEST_NAMES),resume_tail_tests_passed=len(RESUME_TAIL_TEST_NAMES),rust_ignored=0,compiler=version)
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -411,11 +472,11 @@ def main():
     if not result.wasSuccessful():raise SystemExit(1)
     generated,extracted=build_harness()
     evidence=dict(source_contract_tests_passed=result.testsRun,baseline=BASELINE,
-        execution_kind='actual-source Host boundary/Drop/Slots, Signer result wrapper and retirement ordering; inert ownership/I/O/custody/classifier adapters',
+        execution_kind='actual-source Host boundary/Drop/Slots, Signer result wrapper retirement ordering, terminal report arms and UI resume tail; inert ownership/I/O/custody/classifier/DTO adapters',
         native_actor_execution=False,native_authority_finals_created=False,actual_transport_executed=False,
         actual_reporter_or_writer_executed=False,full_native_qualification=False,
         generated_source_sha256=sha(generated),extracted_item_sha256={k:sha(v) for k,v in extracted.items()},
-        expected_rust_tests=list(TEST_NAMES),retirement_expected_rust_tests=list(RETIREMENT_TEST_NAMES),retirement_dependencies='inert custody/I/O/validation carriers; no actual Origin authority or native Final',producer_scheduling_evidence='source-bound only; no actual worker or Host pump execution',source_tree_written=False)
+        expected_rust_tests=list(TEST_NAMES),retirement_expected_rust_tests=list(RETIREMENT_TEST_NAMES),terminal_phase_expected_rust_tests=list(TERMINAL_PHASE_TEST_NAMES),resume_tail_expected_rust_tests=list(RESUME_TAIL_TEST_NAMES),terminal_phase_dependencies='inert DTO validation/phase storage; actual arms, matching predicates and progress/restriction control; no production authentication',ui_resume_dependencies='inert typed completion/native resume and Serving adapters; actual tail and currentness predicate; real native phase and raw-hook order source-bound only',retirement_dependencies='inert custody/I/O/validation carriers; no actual Origin authority or native Final',producer_scheduling_evidence='source-bound only; no actual worker or Host pump execution',source_tree_written=False)
     if args.source_only:evidence.update(rust_harness_executed=False,rust_test_status='NOT RUN (explicit --source-only)')
     else:evidence.update(native_tests())
     print('P75_CAUSE_BOUNDARY_TRACE '+json.dumps(evidence,sort_keys=True))
@@ -543,6 +604,235 @@ def build_retirement_harness():
     guards+='fn accept_selector_after_inert_validation(slot:&mut SignSlot,valid:bool,host:bool)->Result<()> {if !valid{return Err(rejected(\"inert selector dependency\"));}if host{\n'+e['h_selector_replay']+'\n}else{\n'+e['c_selector_replay']+'\n}slot.activate.wallet.sign.selector_seen=true;Ok(())}\n'
     driver=e['driver_predicate']+'\nfn driver_roles(mut endpoint:&mut CoordinatorFinancialEndpointV1,cancel_sent:bool,revoked:&AtomicBool,admission_retained:[bool;2],witness_disposed:[bool;2],predecessor_retired:&mut[bool;2],witness_close_sent:&mut[bool;2])->Result<()> {let input=();let output=();\n'+e['driver_role_loop']+'\nOk(())}\n'
     rust='\nmod retirement_harness {\n'+P77_RUST_SUPPORT+modules+e['idle_mask']+'\n'+methods+guards+driver+P77_RUST_TESTS+'\n}\nuse retirement_harness::{channel,host_interstage};\n'
+    return rust,e
+
+
+P80_LEGACY_GENERATED_SHA='2099a9d65c2706eefc68c4570ffd34522869aff851d456fd73f47a93fc884956'
+P80_UI='crates/wholepact-financial-coordinator/src/financial_source_ui.rs'
+P80_RESTORATION={'crates/wholepact-financial-coordinator-origin/src/signer_sign_origin.rs': {'baseline_sha256': 'a332e687211fab22484a169dd247814aace1e90da11e128588b3918893a68217', 'exact_inverse': [{'remove': '                slot.wire_phase = 67;\n', 'restore': ''}, {'remove': '                slot.phase = 67;\n', 'restore': ''}]}, 'crates/wholepact-financial-coordinator-origin/src/signer_return_origin.rs': {'baseline_sha256': '9f10b25fc99d47125d8557b6b245c81c5a06c85ef989b08497c14cd80353d5b6', 'exact_inverse': [{'remove': '                slot.wire_phase = 73;\n', 'restore': ''}, {'remove': '                slot.phase = 73;\n', 'restore': ''}]}, 'crates/wholepact-financial-coordinator/src/financial_source_ui.rs': {'baseline_sha256': '6ed6cea68e69fd6c2377ca8d86fa1182ca1f741835dc4c881be0fd0e92d1e82d', 'exact_inverse': [{'remove': '                        // Only this exact nominal custody permits parking. The\n                        // obsolete Serving observer was removed at typed resume.\n', 'restore': '                        // Only this exact nominal completion replaces the now-dead\n                        // Serving observer. Ordinary absence never permits parking.\n'}, {'remove': '                        self.transition(Phase::SignedRetired, ctx.cumulative_frame_nr());\n', 'restore': '                        self.writer_flow.serving.take();\n                        self.transition(Phase::SignedRetired, ctx.cumulative_frame_nr());\n'}, {'remove': '            // Actual Signing retirement ended this check-only Serving observer.\n            // Remove it before ordinary pre-poll currentness resumes; signed\n            // custody and parking still require the later SigningResumed event.\n            if self.phase == Phase::SigningRetiring {\n                self.writer_flow.serving.take();\n            }\n', 'restore': ''}]}}
+def p80_restore(path,source):
+    for change in P80_RESTORATION[path]['exact_inverse']:
+        if source.count(change['remove'])!=1:raise AssertionError(('P80 exact inverse occurrence',path))
+        source=source.replace(change['remove'],change['restore'],1)
+    return source
+
+TERMINAL_PHASE_TEST_NAMES=(
+ 'sign_committed_outer_phase_matches_both_original_consumers',
+ 'return_completed_outer_phase_reaches_normal_notice_after_sign',
+ 'invalid_or_replayed_reports_never_advance_outer_phase',
+ 'coordinator_progress_error_and_restriction_preserve_original_results',
+)
+RESUME_TAIL_TEST_NAMES=('typed_signing_resume_drops_only_obsolete_serving_before_pre_poll_check',)
+
+def terminal_phase_items():
+    sign=(ROOT/(P77_ORIGIN+'signer_sign_origin.rs')).read_text()
+    ret=(ROOT/(P77_ORIGIN+'signer_return_origin.rs')).read_text()
+    workflow=(ROOT/PATHS['relay']).read_text()
+    state=(ROOT/(P77_ORIGIN+'signer_continue_state.rs')).read_text()
+    normal=(ROOT/(P77_ORIGIN+'financial_normal_completion_origin.rs')).read_text()
+    e={}
+    for kind,source,anchor,variant,field,to in (
+        ('c_sign',sign,'pub(in crate::financial_workflow_origin) fn receive_sign_event(', 'SignCommitted','wire_phase',67),
+        ('h_sign',sign,'pub(in crate::financial_workflow_origin) fn up_sign(', 'SignCommitted','phase',67),
+        ('c_return',ret,'pub(in crate::financial_workflow_origin) fn receive_return_event(', 'ReturnCompleted','wire_phase',73),
+        ('h_return',ret,'pub(in crate::financial_workflow_origin) fn up_return(', 'ReturnCompleted','phase',73),
+    ):
+        method=item(source,anchor)
+        arm=item(method,'Packet::'+variant+' { data, .. } =>',body_after_anchor=True)
+        line='                slot.'+field+' = '+str(to)+';\n'
+        if arm.count(line)!=1:raise AssertionError(('outer phase assignment',kind))
+        e[kind]=arm;e[kind+'_old']=arm.replace(line,'',1)
+    e['committed_matches']=item(sign,'fn committed_matches(')
+    e['completed_matches']=item(ret,'fn completed_matches(')
+    e['actual_completed']=item(ret,'pub(super) fn actual_completed(')
+    e['received_progress']=item(workflow,'fn received_workflow_progress(')
+    e['action_restrictions']=item(state,'pub(super) fn check_action_restrictions(')
+    old=retirement_items()
+    e['c_sign_guard']=old['c_sign_guard'];e['h_sign_guard']=old['h_sign_guard']
+    e['normal_guard']=item(normal,'if slot.wire_phase!=73||')
+    return e
+
+def resume_tail_items():
+    source=(ROOT/P80_UI).read_text()
+    e={'tail':item(source,'fn history_retirement_tail(')}
+    old=p80_restore(P80_UI,source)
+    e['old_tail']=item(old,'fn history_retirement_tail(')
+    anchor='self\n                .writer_flow\n                .serving\n                .as_ref()\n                .is_some_and(|t| t.check_current().is_err())'
+    if source.count(anchor)!=1:raise AssertionError('Serving predicate moved')
+    e['serving_predicate']=anchor
+    return e
+
+P80_RUST_SUPPORT=r'''
+// Inert carrier/control adapters, NOT authenticated DTOs, Core/Origin custody,
+// native Finals, permission grants, real workers, sockets, or production I/O.
+use std::{cell::Cell,io,time::{Duration,Instant}};
+type Result<T>=io::Result<T>;
+fn rejected(s:&str)->io::Error{io::Error::new(io::ErrorKind::PermissionDenied,s.to_owned())}
+macro_rules! boundary{($($t:tt)*)=>{{}}} macro_rules! actor_boundary{($($t:tt)*)=>{{}}}
+#[derive(Clone,Copy,Debug,PartialEq,Eq)] enum Target{Signer1,Signer2}
+impl Target{fn index(self)->usize{match self{Self::Signer1=>0,Self::Signer2=>1}}}
+#[derive(Clone,Debug,PartialEq,Eq)] struct Original{fixed_identity_digest:&'static str}
+#[derive(Clone,Debug,PartialEq,Eq)] struct SignFacts{original:Original,authorization:&'static str,authorization_valid:bool}
+impl SignFacts{fn expected_authorization_id(&self)->Result<&'static str>{if self.authorization_valid{Ok(self.authorization)}else{Err(rejected("inert authorization dependency"))}}}
+#[derive(Clone,Debug,PartialEq,Eq)] struct SignerSignExactPresentationV1{presentation_digest:&'static str,facts:SignFacts}
+#[derive(Clone,Debug,PartialEq,Eq)] struct SignerSignCommittedV1{sign_presentation_digest:&'static str,authorization_id:&'static str,fixed_identity_digest:&'static str,result_digest:&'static str,outbox_digest:&'static str,valid:bool}
+impl SignerSignCommittedV1{fn validate(&self)->Result<()>{if self.valid{Ok(())}else{Err(rejected("inert DTO validation dependency"))}}}
+#[derive(Clone,Debug,PartialEq,Eq)] struct ReturnReadFacts{signed:SignerSignCommittedV1}
+#[derive(Clone,Debug,PartialEq,Eq)] struct ReturnRead{facts:ReturnReadFacts}
+#[derive(Clone,Debug,PartialEq,Eq)] struct ReturnFacts{preview_digest:&'static str,read:ReturnRead}
+#[derive(Clone,Debug,PartialEq,Eq)] struct SignerReturnExactPresentationV1{presentation_digest:&'static str,facts:ReturnFacts}
+#[derive(Clone,Debug,PartialEq,Eq)] struct SignerReturnCompletedV1{return_presentation_digest:&'static str,preview_digest:&'static str,result_digest:&'static str,outbox_digest:&'static str,valid:bool}
+impl SignerReturnCompletedV1{fn validate(&self)->Result<()>{if self.valid{Ok(())}else{Err(rejected("inert DTO validation dependency"))}}}
+#[derive(Clone)] struct Slot<P,D>{wire:Option<P>,result:Option<D>,reported:bool,phase:u8}
+#[derive(Clone)] struct ReturnSlots{exact:Slot<SignerReturnExactPresentationV1,SignerReturnCompletedV1>,terminal:bool}
+#[derive(Clone)] struct SignSlots{exact:Slot<SignerSignExactPresentationV1,SignerSignCommittedV1>,returning:ReturnSlots,selector_seen:bool}
+#[derive(Clone)] struct Wallet{sign:SignSlots}
+#[derive(Clone)] struct Activate{wallet:Wallet}
+#[derive(Clone)] struct CSlot{wire_phase:u8,activate:Activate}
+#[derive(Clone)] struct HSlot{phase:u8,activate:Activate}
+#[derive(Clone,Debug,PartialEq,Eq)] enum Packet{SignCommitted{role:Target,data:SignerSignCommittedV1},ReturnCompleted{role:Target,data:SignerReturnCompletedV1}}
+#[derive(Clone,Debug,PartialEq,Eq)] enum CoordinatorFinancialEventV1{SignCommitted{role:Target,data:SignerSignCommittedV1},ReturnCompleted{role:Target,data:SignerReturnCompletedV1}}
+// The actual received_workflow_progress helper executes below. Only its phase
+// storage/currentness/error dependencies are inert deterministic adapters.
+struct Phases{values:[Cell<u8>;2],restricted:Cell<bool>,step_error:Cell<bool>}
+impl Phases{
+ fn source_send_restricted(&self,i:usize,expected:u8)->Result<bool>{if self.values[i].get()!=expected{return Err(rejected("inert unexpected phase"));}Ok(self.restricted.get())}
+ fn step(&self,i:usize,from:u8,to:u8)->Result<()>{if self.step_error.get(){return Err(rejected("inert original step error"));}if self.values[i].get()!=from{return Err(rejected("inert unexpected phase"));}self.values[i].set(to);Ok(())}
+ fn revoked(&self)->bool{self.restricted.get()} fn quiescent(&self)->bool{false} fn normal_phase(&self)->u8{0} fn revoke(&self){self.restricted.set(true);}
+}
+struct Restriction;impl Restriction{fn check_current(&self)->Result<()>{Ok(())}}
+struct Core{phase:Phases,session:Instant,signer_restriction:Option<Restriction>}
+impl Core{fn check(&self)->Result<()>{Ok(())}}
+struct CoordinatorFinancialEndpointV1{slots:[CSlot;2],core:Core}
+struct HostFinancialWorkflowRelayV1{slots:[HSlot;2]}
+struct Notice{returned:[SignerReturnCompletedV1;2]}
+fn sign_data()->SignerSignCommittedV1{SignerSignCommittedV1{sign_presentation_digest:"sign",authorization_id:"authorization",fixed_identity_digest:"fixed",result_digest:"result",outbox_digest:"outbox",valid:true}}
+fn return_data()->SignerReturnCompletedV1{SignerReturnCompletedV1{return_presentation_digest:"return",preview_digest:"preview",result_digest:"result",outbox_digest:"outbox",valid:true}}
+fn activate()->Activate{Activate{wallet:Wallet{sign:SignSlots{
+ exact:Slot{wire:Some(SignerSignExactPresentationV1{presentation_digest:"sign",facts:SignFacts{original:Original{fixed_identity_digest:"fixed"},authorization:"authorization",authorization_valid:true}}),result:None,reported:false,phase:66},
+ returning:ReturnSlots{exact:Slot{wire:Some(SignerReturnExactPresentationV1{presentation_digest:"return",facts:ReturnFacts{preview_digest:"preview",read:ReturnRead{facts:ReturnReadFacts{signed:sign_data()}}}}),result:None,reported:false,phase:72},terminal:false},selector_seen:true}}}
+fn fixture()->(CoordinatorFinancialEndpointV1,HostFinancialWorkflowRelayV1){
+ let c=CoordinatorFinancialEndpointV1{slots:std::array::from_fn(|_|CSlot{wire_phase:55,activate:activate()}),core:Core{phase:Phases{values:std::array::from_fn(|_|Cell::new(66)),restricted:Cell::new(false),step_error:Cell::new(false)},session:Instant::now()+Duration::from_secs(60),signer_restriction:None}};
+ let h=HostFinancialWorkflowRelayV1{slots:std::array::from_fn(|_|HSlot{phase:55,activate:activate()})};(c,h)
+}
+fn set_inert_return_preconditions(c:&mut CoordinatorFinancialEndpointV1,h:&mut HostFinancialWorkflowRelayV1,role:Target){
+ // Execute repaired Sign arms first. The omitted native Return preparation is
+ // represented ONLY by the inert atomic72 input, never as an actual permission.
+ assert!(matches!(c.c_sign(role,sign_data()).unwrap(),CoordinatorFinancialEventV1::SignCommitted{role:r,..} if r==role));
+ assert!(h.h_sign(role,sign_data()).unwrap());c.core.phase.values[role.index()].set(72);
+ assert_eq!(c.slots[role.index()].wire_phase,67);assert_eq!(h.slots[role.index()].phase,67);
+}
+'''
+
+P80_RUST_TESTS=r'''
+#[test]fn sign_committed_outer_phase_matches_both_original_consumers(){for role in [Target::Signer1,Target::Signer2]{
+ let i=role.index();let(c0,h0)=fixture();let(mut old_c,mut old_h)=(c0,h0);
+ assert_eq!(old_c.c_sign_old(role,sign_data()).unwrap(),CoordinatorFinancialEventV1::SignCommitted{role,data:sign_data()});assert!(old_h.h_sign_old(role,sign_data()).unwrap());
+ assert_eq!(old_c.slots[i].wire_phase,55);assert_eq!(old_h.slots[i].phase,55);assert_eq!(old_c.slots[i].activate.wallet.sign.exact.phase,67);
+ assert!(c_sign_guard(&old_c.core,&old_c.slots[i]).is_err());assert!(h_sign_guard(&old_h.slots[i]).is_err());
+ let(mut c,mut h)=fixture();assert_eq!(c.c_sign(role,sign_data()).unwrap(),CoordinatorFinancialEventV1::SignCommitted{role,data:sign_data()});assert!(h.h_sign(role,sign_data()).unwrap());
+ assert_eq!(c.slots[i].wire_phase,67);assert_eq!(h.slots[i].phase,67);assert!(c_sign_guard(&c.core,&c.slots[i]).is_ok());assert!(h_sign_guard(&h.slots[i]).is_ok());
+ assert_eq!(c.slots[1-i].wire_phase,55);assert_eq!(h.slots[1-i].phase,55);
+ c.slots[i].activate.wallet.sign.selector_seen=false;h.slots[i].activate.wallet.sign.selector_seen=false;assert!(c_sign_guard(&c.core,&c.slots[i]).is_err());assert!(h_sign_guard(&h.slots[i]).is_err());
+}}
+#[test]fn return_completed_outer_phase_reaches_normal_notice_after_sign(){for role in [Target::Signer1,Target::Signer2]{
+ let i=role.index();let(mut old_c,mut old_h)=fixture();set_inert_return_preconditions(&mut old_c,&mut old_h,role);
+ assert_eq!(old_c.c_return_old(role,return_data()).unwrap(),CoordinatorFinancialEventV1::ReturnCompleted{role,data:return_data()});assert!(old_h.h_return_old(role,return_data()).unwrap());
+ assert_eq!(old_c.slots[i].wire_phase,67);assert_eq!(old_h.slots[i].phase,67);assert!(normal_guard(&old_c.core,&old_c.slots[i],i,&Notice{returned:[return_data(),return_data()]}).is_err());
+ let(mut c,mut h)=fixture();set_inert_return_preconditions(&mut c,&mut h,role);assert_eq!(c.c_return(role,return_data()).unwrap(),CoordinatorFinancialEventV1::ReturnCompleted{role,data:return_data()});assert!(h.h_return(role,return_data()).unwrap());
+ assert_eq!(c.slots[i].wire_phase,73);assert_eq!(h.slots[i].phase,73);assert!(normal_guard(&c.core,&c.slots[i],i,&Notice{returned:[return_data(),return_data()]}).is_ok());
+ // Host normal completion consumes nested actual_completed; no invented outer73 guard.
+ assert_eq!(h.slots[i].activate.wallet.sign.returning.actual_completed().unwrap(),&return_data());
+ assert_eq!(c.slots[1-i].wire_phase,55);assert_eq!(h.slots[1-i].phase,55);
+}}
+#[test]fn invalid_or_replayed_reports_never_advance_outer_phase(){for role in [Target::Signer1,Target::Signer2]{for returned in [false,true]{for case in 0..9{
+ let(mut c,mut h)=fixture();let i=role.index();if returned{set_inert_return_preconditions(&mut c,&mut h,role);}let prior=if returned{67}else{55};
+ if returned{let mut d=return_data();let a=&mut c.slots[i].activate.wallet.sign.returning.exact;let b=&mut h.slots[i].activate.wallet.sign.returning.exact;
+  match case{0=>d.valid=false,1=>{a.wire=None;b.wire=None;},2=>{a.reported=true;b.reported=true;},3=>{a.phase=73;b.phase=73;},4=>d.return_presentation_digest="crossed",5=>d.preview_digest="crossed",6=>d.result_digest="crossed",7=>d.outbox_digest="crossed",_=>{assert!(c.c_return(role,d.clone()).is_ok());assert!(h.h_return(role,d.clone()).is_ok());}}
+  let before=if case==8{73}else{prior};assert!(c.c_return(role,d.clone()).is_err());assert!(h.h_return(role,d).is_err());assert_eq!(c.slots[i].wire_phase,before);assert_eq!(h.slots[i].phase,before);
+ }else{let mut d=sign_data();let a=&mut c.slots[i].activate.wallet.sign.exact;let b=&mut h.slots[i].activate.wallet.sign.exact;
+  match case{0=>d.valid=false,1=>{a.wire=None;b.wire=None;},2=>{a.reported=true;b.reported=true;},3=>{a.phase=67;b.phase=67;},4=>d.sign_presentation_digest="crossed",5=>d.authorization_id="crossed",6=>d.fixed_identity_digest="crossed",7=>{a.wire.as_mut().unwrap().facts.authorization_valid=false;b.wire.as_mut().unwrap().facts.authorization_valid=false;},_=>{assert!(c.c_sign(role,d.clone()).is_ok());assert!(h.h_sign(role,d.clone()).is_ok());}}
+  let before=if case==8{67}else{prior};assert!(c.c_sign(role,d.clone()).is_err());assert!(h.h_sign(role,d).is_err());assert_eq!(c.slots[i].wire_phase,before);assert_eq!(h.slots[i].phase,before);
+ }
+ assert_eq!(c.slots[1-i].wire_phase,55);assert_eq!(h.slots[1-i].phase,55);
+}}}}
+#[test]fn coordinator_progress_error_and_restriction_preserve_original_results(){for role in [Target::Signer1,Target::Signer2]{for returned in [false,true]{for restricted in [false,true]{
+ let(mut c,mut h)=fixture();let i=role.index();if returned{set_inert_return_preconditions(&mut c,&mut h,role);}let prior=if returned{67}else{55};let expected=if returned{73}else{67};
+ c.core.phase.restricted.set(restricted);c.core.phase.step_error.set(!restricted);
+ let result=if returned{c.c_return(role,return_data())}else{c.c_sign(role,sign_data())};
+ let nested=if returned{&c.slots[i].activate.wallet.sign.returning.exact.reported}else{&c.slots[i].activate.wallet.sign.exact.reported};assert!(*nested);
+ if restricted{
+  // Original Ok(false) helper result was intentionally not an Err at these
+  // report sites. Metadata still settles; the actual restriction guard denies.
+  assert!(result.is_ok());assert_eq!(c.slots[i].wire_phase,expected);assert_eq!(c.core.phase.values[i].get(),if returned{72}else{66});
+  assert!(c.core.check_action_restrictions().is_err());
+  if returned{assert!(normal_guard(&c.core,&c.slots[i],i,&Notice{returned:[return_data(),return_data()]}).is_err());}else{assert!(c_sign_guard(&c.core,&c.slots[i]).is_err());}
+ }else{let e=result.unwrap_err();assert_eq!(e.kind(),io::ErrorKind::PermissionDenied);assert_eq!(e.to_string(),"inert original step error");assert_eq!(c.slots[i].wire_phase,prior);}
+}}}}
+'''
+
+P80_UI_SUPPORT=r'''
+// Explicit inert UI/native/Serving carriers. No real Window, egui process,
+// Origin, signed-result custody, permission, worker, or native Final exists.
+use std::{cell::{Cell,RefCell},rc::Rc,io,time::{Duration,Instant},ops::{Deref,DerefMut}};
+type Result<T>=io::Result<T>;fn rejected(s:&str)->io::Error{io::Error::new(io::ErrorKind::PermissionDenied,s.to_owned())}
+#[derive(Clone,Copy,Debug,PartialEq,Eq)] enum Phase{HistoryRetiring,RetirementBlocked,SigningRetiring,Other}
+#[derive(Clone,Copy,Debug,PartialEq,Eq)] enum Role{One,Two}
+struct Ticket{role:Role,cutoff:Instant}impl Ticket{fn role(&self)->Role{self.role}fn deadline(&self)->Instant{self.cutoff}}
+struct Completion{role:Role,signing:bool}impl Completion{fn role(&self)->Role{self.role}}
+struct Outbound;
+struct Native{gate:Rc<Cell<u8>>,revoked:bool,fail_resume:bool}
+impl Native{fn is_revoked(&self)->bool{self.revoked}fn pause_for_witness_retirement(&self,_:Ticket)->Result<Outbound>{Ok(Outbound)}fn resume_after_witness_retirement(&self,c:Completion)->Result<()>{if self.fail_resume{return Err(rejected("inert failed typed resume"));}if c.signing{self.gate.set(6);}Ok(())}}
+struct Driver;impl Driver{fn send_signing_retirement(&mut self,_:Role,_:Outbound)->Result<()>{Ok(())}fn send_signing_predecessor_retirement(&mut self,_:Role,_:Outbound)->Result<()>{Ok(())}fn send_history_retirement(&mut self,_:Role,_:Outbound)->Result<()>{Ok(())}}
+struct Serving{gate:Rc<Cell<u8>>,drops:Rc<Cell<usize>>}impl Serving{fn check_current(&self)->Result<()>{if self.gate.get()==4{Ok(())}else{Err(rejected("inert G4 observer after G6"))}}}impl Drop for Serving{fn drop(&mut self){self.drops.set(self.drops.get()+1);}}
+struct WriterFlow{serving:Option<Serving>}
+struct Ui{phase:Phase,focused_last:bool,native:Native,history_retirement:Option<Ticket>,active:Option<Role>,retirement_paused:Option<(Role,Instant)>,driver:RefCell<Driver>,history_retired:Option<Completion>,writer_flow:WriterFlow,history_resume_pending:Option<Role>}
+struct LegacyUi{state:Ui}impl Deref for LegacyUi{type Target=Ui;fn deref(&self)->&Ui{&self.state}}impl DerefMut for LegacyUi{fn deref_mut(&mut self)->&mut Ui{&mut self.state}}
+fn fixture(role:Role,phase:Phase)->(Ui,Rc<Cell<usize>>){let gate=Rc::new(Cell::new(4));let drops=Rc::new(Cell::new(0));(Ui{phase,focused_last:true,native:Native{gate:gate.clone(),revoked:false,fail_resume:false},history_retirement:None,active:Some(role),retirement_paused:Some((role,Instant::now()+Duration::from_secs(30))),driver:RefCell::new(Driver),history_retired:Some(Completion{role,signing:phase==Phase::SigningRetiring}),writer_flow:WriterFlow{serving:Some(Serving{gate,drops:drops.clone()})},history_resume_pending:None},drops)}
+'''
+
+P80_UI_TESTS=r'''
+#[test]fn typed_signing_resume_drops_only_obsolete_serving_before_pre_poll_check(){for role in [Role::One,Role::Two]{
+ let(state,old_drops)=fixture(role,Phase::SigningRetiring);let mut old=LegacyUi{state};old.history_retirement_tail().unwrap();assert!(old.retirement_paused.is_none());assert_eq!(old.native.gate.get(),6);assert!(old.serving_rejected());assert_eq!(old_drops.get(),0);
+ let(mut ui,drops)=fixture(role,Phase::SigningRetiring);ui.history_retirement_tail().unwrap();assert!(ui.retirement_paused.is_none());assert_eq!(ui.history_resume_pending,Some(role));assert_eq!(ui.native.gate.get(),6);assert!(!ui.serving_rejected());assert_eq!(drops.get(),1);
+ // Nothing here receives/constructs SigningResumed custody or parks a role.
+ for phase in [Phase::HistoryRetiring,Phase::RetirementBlocked]{let(mut other,d)=fixture(role,phase);other.history_retirement_tail().unwrap();assert!(other.writer_flow.serving.is_some());assert_eq!(d.get(),0);assert!(!other.serving_rejected());}
+ let(mut failed,d)=fixture(role,Phase::SigningRetiring);failed.native.fail_resume=true;assert!(failed.history_retirement_tail().is_err());assert!(failed.writer_flow.serving.is_some());assert!(failed.retirement_paused.is_some());assert!(failed.history_resume_pending.is_none());assert_eq!(d.get(),0);assert_eq!(failed.native.gate.get(),4);
+ let(mut absent,d)=fixture(role,Phase::SigningRetiring);absent.history_retired=None;absent.history_retirement_tail().unwrap();assert!(absent.writer_flow.serving.is_some());assert_eq!(d.get(),0);assert!(absent.history_resume_pending.is_none());
+ let(mut unpaused,d)=fixture(role,Phase::SigningRetiring);unpaused.retirement_paused=None;assert!(unpaused.history_retirement_tail().is_err());assert!(unpaused.writer_flow.serving.is_some());assert_eq!(d.get(),0);
+ let(mut wrong,d)=fixture(role,Phase::SigningRetiring);wrong.history_retired=Some(Completion{role:if role==Role::One{Role::Two}else{Role::One},signing:true});assert!(wrong.history_retirement_tail().is_err());assert!(wrong.writer_flow.serving.is_some());assert!(wrong.retirement_paused.is_some());assert_eq!(d.get(),0);assert_eq!(wrong.native.gate.get(),4);
+ for denied in 0..3{let(mut bad,d)=fixture(role,Phase::SigningRetiring);match denied{0=>bad.focused_last=false,1=>bad.native.revoked=true,_=>bad.phase=Phase::Other};assert!(bad.history_retirement_tail().is_err());assert!(bad.writer_flow.serving.is_some());assert_eq!(d.get(),0);}
+}}
+'''
+
+def build_terminal_phase_harness():
+    e=terminal_phase_items()
+    rust='\nmod terminal_phase_harness {\n'+P80_RUST_SUPPORT
+    rust+='\n'+e['committed_matches']+'\n'+e['completed_matches']+'\n'+e['received_progress']+'\nimpl Core {\n'+e['action_restrictions']+'\n}\nimpl ReturnSlots {\n'+e['actual_completed']+'\n}\n'
+    for owner in ('c','h'):
+        rust+='impl '+('CoordinatorFinancialEndpointV1' if owner=='c' else 'HostFinancialWorkflowRelayV1')+' {\n'
+        for kind,variant,data_type in [('sign','SignCommitted','SignerSignCommittedV1'),('return','ReturnCompleted','SignerReturnCompletedV1')]:
+            for suffix in ('','_old'):
+                key=owner+'_'+kind+suffix
+                rust+='fn '+key+'(&mut self,role:Target,data:'+data_type+')->Result<'+('CoordinatorFinancialEventV1' if owner=='c' else 'bool')+'> {let i=role.index();let slot=&mut self.slots[i];let s=&mut slot.activate.wallet.sign'+('.returning' if kind=='return' else '')+';let packet=Packet::'+variant+'{role,data};match '+('packet' if owner=='c' else '&packet')+' {\n'+e[key]+'\n_=>Err(rejected("inert unselected packet")),\n}}\n'
+        rust+='}\n'
+    rust+='fn c_sign_guard(core:&Core,slot:&CSlot)->Result<()> {core.check_action_restrictions()?;\n'+e['c_sign_guard']+'\nOk(())}\nfn h_sign_guard(slot:&HSlot)->Result<()> {\n'+e['h_sign_guard']+'\nOk(())}\n'
+    rust+='fn normal_guard(core:&Core,slot:&CSlot,i:usize,notice:&Notice)->Result<()> {core.check_action_restrictions()?;\n'+e['normal_guard']+'\nOk(())}\n'+P80_RUST_TESTS+'\n}\n'
+    return rust,e
+
+def build_resume_tail_harness():
+    e=resume_tail_items()
+    rust='\nmod resume_tail_harness {\n'+P80_UI_SUPPORT+'\nimpl Ui {\n'+e['tail']+'\nfn serving_rejected(&self)->bool {\n'+e['serving_predicate']+'\n}\n}\nimpl LegacyUi {\n'+e['old_tail']+'\n}\n'+P80_UI_TESTS+'\n}\n'
+    return rust,e
+
+def build_harness():
+    rust,e=build_legacy_harness()
+    extra,items=build_terminal_phase_harness()
+    anchor='\n}\nuse retirement_harness::{channel,host_interstage};\n'
+    if not rust.endswith(anchor):raise AssertionError('legacy retirement module boundary moved')
+    rust=rust[:-len(anchor)]+extra+anchor
+    e.update({'p80_'+k:v for k,v in items.items()})
+    extra,items=build_resume_tail_harness();rust+=extra;e.update({'p80_ui_'+k:v for k,v in items.items()})
     return rust,e
 
 if __name__=='__main__':main()

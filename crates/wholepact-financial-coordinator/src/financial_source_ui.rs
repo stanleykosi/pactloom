@@ -3637,10 +3637,9 @@ impl Window {
                         self.history_resume_pending = None;
                         self.signing_disposed[index(role)] = true;
                         self.signing_closed[index(role)] = true;
-                        // Only this exact nominal completion replaces the now-dead
-                        // Serving observer. Ordinary absence never permits parking.
+                        // Only this exact nominal custody permits parking. The
+                        // obsolete Serving observer was removed at typed resume.
                         self.sign_flow.retired = Some(custody);
-                        self.writer_flow.serving.take();
                         self.transition(Phase::SignedRetired, ctx.cumulative_frame_nr());
                         self.message = "This original Signing service was actually disposed and normally retired, and the Host resumed. Its signed-result custody is retained; the next role may now be selected.";
                     }
@@ -6974,6 +6973,12 @@ impl Window {
                 return Err(rejected("History retirement completion changed"));
             }
             self.native.resume_after_witness_retirement(completion)?;
+            // Actual Signing retirement ended this check-only Serving observer.
+            // Remove it before ordinary pre-poll currentness resumes; signed
+            // custody and parking still require the later SigningResumed event.
+            if self.phase == Phase::SigningRetiring {
+                self.writer_flow.serving.take();
+            }
             self.retirement_paused = None;
             self.history_resume_pending = Some(role);
             // The sole endpoint still must consume its private actual resume

@@ -931,6 +931,7 @@ impl CoordinatorFinancialEndpointV1 {
                 t.reported = true;
                 t.phase = 67;
                 received_workflow_progress(&self.core.phase, i, 66, 67)?;
+                slot.wire_phase = 67;
                 Ok(CoordinatorFinancialEventV1::SignCommitted { role, data })
             }
             Packet::SignFailed { data, .. } => {
@@ -1121,6 +1122,7 @@ impl HostFinancialWorkflowRelayV1 {
                 t.result = Some(data.clone());
                 t.reported = true;
                 t.phase = 67;
+                slot.phase = 67;
                 Ok(true)
             }
             Packet::SignFailed { data, .. } => {
