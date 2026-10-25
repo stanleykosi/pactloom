@@ -1682,7 +1682,11 @@ fn drive(
                     witness_disposed[i],
                     predecessor_retired[i],
                 ) {
-                    let ticket = endpoint.prepare_witness_retirement(role)?;
+                    // None retains ordinary receive for the automatic Writer
+                    // Read display, under the same original disposal cutoff.
+                    let Some(ticket) = endpoint.try_prepare_witness_retirement(role)? else {
+                        continue;
+                    };
                     retire_signing_predecessor_exclusively(
                         &mut endpoint,
                         &input,

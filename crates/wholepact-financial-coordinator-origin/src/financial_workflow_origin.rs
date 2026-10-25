@@ -979,7 +979,7 @@ impl HostFinancialWorkflowRelayV1 {
                         if slot.phase!=HISTORY_RETAINED||slot.continue_review_ms.is_none()||request.binding_digest!=read.presentation_digest{return Err(rejected("Host retirement before actual history retention"));}
                     },
                     crate::host_interstage::RetirementPurpose::FinancialSigning=>{
-                        if slot.phase!=67{return Err(rejected("Host Signing retirement before actual Sign"));}
+                        if slot.phase!=67||!slot.activate.wallet.sign.selector_seen{return Err(rejected("Host Signing retirement before actual Sign and selector"));}
                         let(_,signed)=slot.activate.wallet.sign.return_predecessor()?;
                         let(_,_,service,_)=slot.writer_acquire.retained_result()?;
                         let binding=request.signing.as_ref().ok_or_else(||rejected("Host Signing retirement lacks actual result"))?;
@@ -987,7 +987,9 @@ impl HostFinancialWorkflowRelayV1 {
                     },
                     crate::host_interstage::RetirementPurpose::FinancialContinuation=>{
                         let(p,_)=slot.admission.retained_result()?;
-                        if (slot.phase!=admit::AWAITING_NEXT_READ&&!slot.writer_acquire.signing_setup_pending(slot.phase))||request.binding_digest!=p.presentation_digest{return Err(rejected("Host retirement before actual admitted response"));}
+                        if !slot.writer_acquire.signing_setup_pending(slot.phase)
+                            ||self.slots.iter().flatten().any(|s|matches!(s.phase,SOURCE_RETAINED|AWAITING_ADMISSION|admit::AWAITING_NEXT_READ))
+                            ||request.binding_digest!=p.presentation_digest{return Err(rejected("Host retirement before actual admitted response"));}
                     }
                 }
                 self.lifecycle.request(request.clone())?;self.retirement=Some(request.clone());self.quiescent_sent=false;Ok(true)

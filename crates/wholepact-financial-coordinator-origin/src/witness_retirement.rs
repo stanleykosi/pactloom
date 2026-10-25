@@ -54,9 +54,10 @@ impl CoordinatorFinancialNativeV1{
 }
 impl CoordinatorFinancialEndpointV1{
     /// Only authenticated matching S/W successful results plus actual W
-    /// Disposed create this fixed-purpose ticket. Other W purposes have no
-    /// conversion until their real source disposal adapter is joined.
-    pub fn prepare_witness_retirement(&mut self,role:Target)->Result<CoordinatorWitnessRetirementTicketV1>{
+    /// Disposed and the received, unadmitted Writer Read create this ticket.
+    /// While its automatic display is still in flight, retain ordinary receive
+    /// and the original W cleanup cutoff; do not enter exclusive grammar yet.
+    pub fn try_prepare_witness_retirement(&mut self,role:Target)->Result<Option<CoordinatorWitnessRetirementTicketV1>>{
         self.core.check_action_restrictions()?;let phases=self.core.phase.snapshot();self.retirement_idle(phases,RetirementPurpose::FinancialContinuation,role)?;
         let slot=self.slots[role.index()].as_ref().ok_or_else(||rejected("retirement Signer missing"))?;
         if slot.wire_phase!=admit::AWAITING_NEXT_READ&&!slot.writer_acquire.signing_setup_pending(slot.wire_phase){return Err(rejected("retirement before exact S response"));}
@@ -68,17 +69,23 @@ impl CoordinatorFinancialEndpointV1{
             _=>return Err(rejected("retirement S/W committed heads differ")),
         }
         self.witnesses[role.index()].retirement_matches_admit(p)?;
+        // Exclusive H traffic is shared by both original owners. A different
+        // owner can also have an automatic, not-yet-received display in flight.
+        if self.slots.iter().flatten().any(|s|matches!(s.wire_phase,SOURCE_RETAINED|AWAITING_ADMISSION|admit::AWAITING_NEXT_READ)) {
+            crate::channel::require_time(cutoff)?;
+            return Ok(None);
+        }
         let request=RetirementRequest{profile:PROFILE.into(),coordinator:self.coordinator.clone(),session:self.session.clone(),target:role,purpose:RetirementPurpose::FinancialContinuation,binding_digest:p.presentation_digest.clone(),
             witness_instance:instance.to_owned(),challenge:state::nonce()?,cleanup_ceiling_ms:self.clocks.cleanup_offset(cutoff)?,signing:None};
         let cutoff=request.validate(self.clocks)?.min(cutoff);crate::channel::require_time(cutoff)?;
-        Ok(CoordinatorWitnessRetirementTicketV1{core:Arc::clone(&self.core),entries:self.slots.iter().flatten().filter_map(|s|s.entry.as_ref().map(Arc::clone)).collect(),request,cutoff,
-            phases,consumed:false})
+        Ok(Some(CoordinatorWitnessRetirementTicketV1{core:Arc::clone(&self.core),entries:self.slots.iter().flatten().filter_map(|s|s.entry.as_ref().map(Arc::clone)).collect(),request,cutoff,
+            phases,consumed:false}))
     }
     pub fn prepare_signing_retirement(&mut self,role:Target)->Result<CoordinatorWitnessRetirementTicketV1>{
         self.core.check_action_restrictions()?;
         let phases=self.core.phase.snapshot();self.retirement_idle(phases,RetirementPurpose::FinancialSigning,role)?;
         let slot=self.slots[role.index()].as_ref().ok_or_else(||rejected("Signing retirement Source absent"))?;
-        if slot.wire_phase!=67{return Err(rejected("Signing retirement before actual committed Sign"));}
+        if slot.wire_phase!=67||!slot.activate.wallet.sign.selector_seen{return Err(rejected("Signing retirement before actual committed Sign and selector"));}
         let (activation,_)=slot.activate.wallet_predecessor()?;
         let (_,signed)=slot.activate.wallet.sign.return_predecessor()?;
         let (_,service,deadline)=self.signing_services[role.index()].retirement_source()?;

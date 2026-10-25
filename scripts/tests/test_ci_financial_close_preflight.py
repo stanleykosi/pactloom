@@ -26,6 +26,7 @@ class ExactHistorySourceRestorationTests(unittest.TestCase):
   import hashlib
   spec=importlib.util.spec_from_file_location('p72_selector_restoration',P.parent/'ci-financial-admit-read-source-audit.py');audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
   raw=(P.parent.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
+  raw=audit.restore_signing_retirement_ui(raw)
   raw=audit.restore_admission_scroll_ui(raw)
   self.assertEqual(hashlib.sha256(audit.restore_selector_export_ui(raw).encode()).hexdigest(),'930e2e54c6429bde08d5bddd6dc671c5a8b335777cb5e00bcc7763b6d11d5a27')
   for old,new in [('selector_export_phase(painted_phase)','selector_export_phase(self.phase)'),('!host_entry_blocks_source(host_entry) && has_selector','has_selector'),('self.retained_continue.iter().any(Option::is_some)','true'),('scrub_unrequested_payloads(&mut input.raw.events);','input.raw.events.clear();')]:
@@ -36,6 +37,7 @@ class ExactHistorySourceRestorationTests(unittest.TestCase):
   import hashlib
   spec=importlib.util.spec_from_file_location('p73_scroll_restoration',P.parent/'ci-financial-admit-read-source-audit.py');audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
   raw=(P.parent.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
+  raw=audit.restore_signing_retirement_ui(raw)
   self.assertEqual(hashlib.sha256(audit.restore_admission_scroll_ui(raw).encode()).hexdigest(),'a04c0d0394c63ffe1e93ca1a1f7295c570e5346576c9f018fc2f00dd8ffd88ce')
   for old,new in [('.id_salt(_ci_tag)','.id_salt("same")'),('.max_height(390.0)','.max_height(391.0)'),('eligible && ui.is_rect_visible(end.rect)','eligible')]:
    self.assertIn(old,raw)
@@ -139,11 +141,11 @@ class RepaintExecutionPreflightTests(unittest.TestCase):
  def test_no_run_then_exact_lists_and_runs_reject_missing_or_ignored_tests(self):
   from unittest import mock
   import contextlib,io
-  names=C.REPAINT_TESTS+C.COORDINATOR_DIAGNOSTIC_TESTS+C.SELECTOR_EXPORT_TESTS+C.ADMISSION_SCROLL_TESTS+C.WITNESS_FIRST_FAILURE_TESTS;good='test result: ok. 1 passed; 0 failed; 0 ignored;'
+  names=C.REPAINT_TESTS+C.COORDINATOR_DIAGNOSTIC_TESTS+C.SELECTOR_EXPORT_TESTS+C.ADMISSION_SCROLL_TESTS+C.WITNESS_FIRST_FAILURE_TESTS+C.SIGNING_RETIREMENT_UI_TESTS;good='test result: ok. 1 passed; 0 failed; 0 ignored;'
   for listings,result,ok in [([n+': test\n' for n in names],good,True),(['']+[n+': test\n' for n in names[1:]],good,False),([n+': test\n' for n in names],'test result: ok. 0 passed; 0 failed; 1 ignored;',False)]:
    outputs=[b'compiler']+[x.encode() for x in listings]+[result.encode()]*len(names)
    with mock.patch.object(C.S,'select_build_environment',return_value={}),mock.patch.object(C,'coordinator_test_executable',return_value=self.executable),mock.patch.object(C.S,'checked',side_effect=outputs) as checked,contextlib.redirect_stdout(io.StringIO()):
-    if ok:self.assertEqual(C.run_coordinator_tests(self.target,{}),11)
+    if ok:self.assertEqual(C.run_coordinator_tests(self.target,{}),12)
     else:
      with self.assertRaises(AssertionError):C.run_coordinator_tests(self.target,{})
     command=checked.call_args_list[0].args[0]
@@ -483,7 +485,7 @@ class OriginalFailureSelectionTests(unittest.TestCase):
   for names,name,path in checks:
    self.assertEqual(names.count(name),1)
    self.assertIn('fn '+name.rsplit('::',1)[-1]+'(', (P.parent.parent/'crates'/path).read_text())
-  self.assertEqual(len(C.REPAINT_TESTS+C.COORDINATOR_DIAGNOSTIC_TESTS+C.SELECTOR_EXPORT_TESTS+C.ADMISSION_SCROLL_TESTS+C.WITNESS_FIRST_FAILURE_TESTS),11)
+  self.assertEqual(len(C.REPAINT_TESTS+C.COORDINATOR_DIAGNOSTIC_TESTS+C.SELECTOR_EXPORT_TESTS+C.ADMISSION_SCROLL_TESTS+C.WITNESS_FIRST_FAILURE_TESTS+C.SIGNING_RETIREMENT_UI_TESTS),12)
 
  def test_cause_trace_is_mandatory_and_all_semantic_reporters_are_executed(self):
   import ast,re
@@ -514,3 +516,16 @@ class FinancialContinuationReplaySelectionTests(unittest.TestCase):
   source=(root/'durable_financial_continuation_journal_v1.rs').read_text()
   for name in expected:self.assertEqual(source.count('fn '+name.rsplit('::',1)[-1]+'('),1)
   self.assertIn('#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]\n#[path = "durable_financial_continuation_journal_v1.rs"]\nmod durable_financial_continuation_journal_v1;', (root/'journal.rs').read_text())
+
+class SigningRetirementSelectorPreflightTests(unittest.TestCase):
+ def test_actual_selector_guard_has_exact_ui_inverse_and_native_execution_binding(self):
+  import hashlib
+  spec=importlib.util.spec_from_file_location('p77_signing_ui_audit',P.parent/'ci-financial-admit-read-source-audit.py');audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
+  raw=(P.parent.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
+  self.assertEqual(hashlib.sha256(audit.restore_signing_retirement_ui(raw).encode()).hexdigest(),'564479de74dffffc910e0860a6b51100270fb31fa197de30dcdcccc148946ab6')
+  for old,new in [('self.result_selectors[index(role)].is_some()','true'),('later_frame && selector_present','later_frame'),('data.actor.signer_role != role','false')]:
+   self.assertIn(old,raw)
+   with self.assertRaises(AssertionError):audit.restore_signing_retirement_ui(raw.replace(old,new,1))
+  name='financial_source_ui::signing_retirement_action_tests::signing_retirement_requires_actual_commit_and_fresh_explicit_action'
+  self.assertEqual(C.SIGNING_RETIREMENT_UI_TESTS,(name,));self.assertEqual(raw.count('fn '+name.rsplit('::',1)[-1]+'('),1)
+  self.assertIn('mod signing_retirement_action_tests {',raw)

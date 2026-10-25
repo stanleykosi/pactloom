@@ -4958,7 +4958,7 @@ impl Window {
                 self.intent = Some(Intent::PrepareCompletedPair);
             }
             if matches!(self.phase,Phase::SignedRetired|Phase::ReturnCompleted) && ci_response!(ui, ui.add_enabled(later_frame,egui::Button::new("Keep this retired original result and return to role selection")), "ParkFinancial", self.active).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::ParkFinancial);}
-            if self.phase == Phase::SignCommitted && ci_response!(ui, ui.add_enabled(later_frame && !host_entry_blocks_source(self.host_entry), egui::Button::new("Finish and retire this original Signing service")), "RetireSigning", self.active).clicked_by(egui::PointerButton::Primary) { self.intent = Some(Intent::RetireSigning); }
+            if self.phase == Phase::SignCommitted && ci_response!(ui, ui.add_enabled(later_frame && !host_entry_blocks_source(self.host_entry) && self.active.is_some_and(|role| self.result_selectors[index(role)].is_some()), egui::Button::new("Finish and retire this original Signing service")), "RetireSigning", self.active).clicked_by(egui::PointerButton::Primary) { self.intent = Some(Intent::RetireSigning); }
             if self.phase==Phase::Selecting {for role in [Role::Signer1,Role::Signer2] {if self.financial_parked[index(role)].is_some()&&ci_response!(ui, ui.add_enabled(later_frame,egui::Button::new(format!("Review {} retained financial custody",role_name(role)))), "ResumeFinancial", Some(role)).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::ResumeFinancial(role));}}}
             if matches!(self.phase,Phase::Selecting|Phase::V3Audited){
                 for role in [Role::Signer1,Role::Signer2] {if self.v3_audit_result[index(role)].is_some()&&!self.financial_setup_selected[index(role)]&&ci_response!(ui, ui.add_enabled(later_frame,egui::Button::new(format!("Select {} ordinary financial configurations",role_name(role)))), "ConfigureFinancialSetup", Some(role)).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::ConfigureFinancialSetup(role));}}
@@ -6625,7 +6625,7 @@ impl Window {
                 if signing_retirement_action_eligible(self.phase, self.sign_flow.committed.is_some(),
                     self.sign_flow.retirement_requested, self.password.is_some(),
                     host_entry_blocks_source(self.host_entry), self.focused_last,
-                    self.native.is_revoked(), frame > self.phase_frame) =>
+                    self.native.is_revoked(), frame > self.phase_frame, self.active.is_some_and(|role| self.result_selectors[index(role)].is_some())) =>
             {
                 let role = self.active.ok_or_else(|| rejected("Signing retirement role missing"))?;
                 self.writer_flow.serving.as_ref()
@@ -9495,26 +9495,51 @@ fn continuation_selector_json(p: &SignerContinuePresentationV1) -> Result<String
 // Review of this action is an explicit request to finish a current service,
 // never a substitute for Origin's actual signed result and normal-reap proof.
 fn signing_retirement_action_eligible(phase: Phase, committed: bool, attempted: bool,
-    password: bool, host_editing: bool, focused: bool, revoked: bool, later_frame: bool) -> bool {
+    password: bool, host_editing: bool, focused: bool, revoked: bool, later_frame: bool, selector_present: bool) -> bool {
     phase == Phase::SignCommitted && committed && !attempted && !password
-        && !host_editing && focused && !revoked && later_frame
+        && !host_editing && focused && !revoked && later_frame && selector_present
 }
 #[cfg(test)]
 mod signing_retirement_action_tests {
     use super::*;
     #[test]
     fn signing_retirement_requires_actual_commit_and_fresh_explicit_action() {
-        assert!(signing_retirement_action_eligible(Phase::SignCommitted,true,false,false,false,true,false,true));
+        assert!(signing_retirement_action_eligible(Phase::SignCommitted,true,false,false,false,true,false,true,true));
         for p in [Phase::SigningExact,Phase::SignPrepared,Phase::SigningRetiring,Phase::SignedRetired,Phase::Selecting] {
-            assert!(!signing_retirement_action_eligible(p,true,false,false,false,true,false,true));
+            assert!(!signing_retirement_action_eligible(p,true,false,false,false,true,false,true,true));
         }
-        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,false,false,false,false,true,false,true));
-        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,true,false,false,true,false,true));
-        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,false,true,false,true,false,true));
-        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,false,false,true,true,false,true));
-        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,false,false,false,false,false,true));
-        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,false,false,false,true,true,true));
-        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,false,false,false,true,false,false));
+        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,false,false,false,false,true,false,true,true));
+        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,true,false,false,true,false,true,true));
+        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,false,true,false,true,false,true,true));
+        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,false,false,true,true,false,true,true));
+        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,false,false,false,false,false,true,true));
+        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,false,false,false,true,true,true,true));
+        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,false,false,false,true,false,false,true));
+        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,false,false,false,true,false,true,false));
+        // Bind the predicate to the actual active owner's authenticated metadata,
+        // not a file save, another owner's selector, or an invented authority.
+        let source = include_str!("financial_source_ui.rs").split("mod signing_retirement_action_tests {").next().unwrap();
+        let render = source.lines().find(|line| line.contains("egui::Button::new(\"Finish and retire this original Signing service\")")).unwrap();
+        assert!(render.contains("later_frame && !host_entry_blocks_source(self.host_entry) && self.active.is_some_and(|role| self.result_selectors[index(role)].is_some())"));
+        let consume = source.split("            Intent::RetireSigning\n").nth(1).unwrap().split("            Intent::ParkFinancial\n").next().unwrap();
+        assert!(consume.contains("signing_retirement_action_eligible(self.phase, self.sign_flow.committed.is_some(),\n                    self.sign_flow.retirement_requested, self.password.is_some(),\n                    host_entry_blocks_source(self.host_entry), self.focused_last,\n                    self.native.is_revoked(), frame > self.phase_frame, self.active.is_some_and(|role| self.result_selectors[index(role)].is_some()))"));
+        let producer = source.split("    fn accept_result_selector(").nth(1).unwrap().split("    fn accept_sign(").next().unwrap();
+        assert!(producer.contains(r#"&mut self, role: Role, data: SignerFinancialResultSelectorV1) -> Result<()> {
+        data.selector_json()?;
+        let flow = if self.financial_loaded == Some(role) { &self.sign_flow }
+            else { &self.financial_parked[index(role)].as_ref().ok_or_else(|| rejected("result selector owner absent"))?.sign_flow };
+        let sign = flow.exact_display.as_ref().ok_or_else(|| rejected("result selector exact Sign absent"))?;
+        let actual = flow.committed.as_ref().ok_or_else(|| rejected("result selector actual Sign absent"))?;
+        if self.result_selectors[index(role)].is_some() || data.actor != sign.actor
+            || data.actor.signer_role != role || data.sign_presentation_digest != actual.sign_presentation_digest
+            || data.sign_presentation_digest != sign.presentation_digest
+            || data.source_identity_digest != sign.facts.original.activation.facts.original.source_identity_digest {
+            return Err(rejected("result selector original correlation changed"));
+        }
+        self.result_selectors[index(role)] = Some(data);
+        Ok(())
+    }
+"#));
     }
     #[test]
     fn absent_retirement_custody_never_makes_parked_owner_current() {
