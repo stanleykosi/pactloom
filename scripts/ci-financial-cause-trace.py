@@ -247,6 +247,8 @@ class SourceContracts(unittest.TestCase):
         for path,record in P80_RESTORATION.items():
             self.assertEqual(sha(p80_restore(path,(ROOT/path).read_text())),record['baseline_sha256'],path)
         rust,e=build_terminal_phase_harness()
+        # Catch an unclosed inert helper before attempting the mandatory compiler.
+        self.assertEqual(item(rust,'mod terminal_phase_harness {'),rust.strip())
         for name,value in e.items():self.assertEqual(rust.count(value),1,name)
         for owner,field in [('c','wire_phase'),('h','phase')]:
             for kind,to in [('sign',67),('return',73)]:
@@ -710,7 +712,7 @@ fn sign_data()->SignerSignCommittedV1{SignerSignCommittedV1{sign_presentation_di
 fn return_data()->SignerReturnCompletedV1{SignerReturnCompletedV1{return_presentation_digest:"return",preview_digest:"preview",result_digest:"result",outbox_digest:"outbox",valid:true}}
 fn activate()->Activate{Activate{wallet:Wallet{sign:SignSlots{
  exact:Slot{wire:Some(SignerSignExactPresentationV1{presentation_digest:"sign",facts:SignFacts{original:Original{fixed_identity_digest:"fixed"},authorization:"authorization",authorization_valid:true}}),result:None,reported:false,phase:66},
- returning:ReturnSlots{exact:Slot{wire:Some(SignerReturnExactPresentationV1{presentation_digest:"return",facts:ReturnFacts{preview_digest:"preview",read:ReturnRead{facts:ReturnReadFacts{signed:sign_data()}}}}),result:None,reported:false,phase:72},terminal:false},selector_seen:true}}}
+ returning:ReturnSlots{exact:Slot{wire:Some(SignerReturnExactPresentationV1{presentation_digest:"return",facts:ReturnFacts{preview_digest:"preview",read:ReturnRead{facts:ReturnReadFacts{signed:sign_data()}}}}),result:None,reported:false,phase:72},terminal:false},selector_seen:true}}}}
 fn fixture()->(CoordinatorFinancialEndpointV1,HostFinancialWorkflowRelayV1){
  let c=CoordinatorFinancialEndpointV1{slots:std::array::from_fn(|_|CSlot{wire_phase:55,activate:activate()}),core:Core{phase:Phases{values:std::array::from_fn(|_|Cell::new(66)),restricted:Cell::new(false),step_error:Cell::new(false)},session:Instant::now()+Duration::from_secs(60),signer_restriction:None}};
  let h=HostFinancialWorkflowRelayV1{slots:std::array::from_fn(|_|HSlot{phase:55,activate:activate()})};(c,h)
