@@ -547,3 +547,27 @@ class ProviderTlsProbeGateTests(unittest.TestCase):
   self.assertLess(source.index('executable=coordinator_test_executable('),source.index('run_provider_tls_probe(root,selected,raw)'))
   self.assertLess(source.index('run_provider_tls_probe(root,selected,raw)'),source.index('deadline=time.monotonic()+60'))
   self.assertEqual(source.count('run_provider_tls_probe('),1)
+
+class ResultSelectorDomainPreflightTests(unittest.TestCase):
+ def test_existing_production_origin_executes_all_actual_selector_domain_regressions(self):
+  import ast,re
+  root=P.parent.parent
+  workflow=(root/'.github/workflows/deadline-preflight.yml').read_text()
+  expected=('actual_selector_preserves_closed_request_and_original_endpoint', 'selector_cannot_replace_result_source_or_socket', 'selector_cannot_replace_fixed_authorization_consent_or_account', 'selector_rejects_unknown_request_fields_and_relative_or_control_paths', 'distinct_financial_and_delivery_sources_join_without_relabelling', 'selector_binds_each_original_v3_observation_field_independently', 'selector_join_is_bound_to_actual_source_domains_and_retained_callers')
+  marker="          names += ['financial_workflow_origin::financial_selector::tests::'+n for n in "
+  lines=[line for line in workflow.splitlines() if line.startswith(marker)]
+  self.assertEqual(len(lines),1)
+  self.assertEqual(tuple(ast.literal_eval(lines[0][len(marker):-1])),expected)
+  self.assertEqual(len(expected),7);self.assertEqual(len(set(expected)),7)
+  origin=root/'crates/wholepact-financial-coordinator-origin/src'
+  self.assertIn('#[cfg(feature = "coordinated-financial-workflow-v1")]\nmod financial_workflow_origin;', (origin/'lib.rs').read_text())
+  self.assertIn('#[path="financial_selector_origin.rs"]\nmod financial_selector;', (origin/'financial_workflow_origin.rs').read_text())
+  source=(origin/'financial_selector_origin.rs').read_text()
+  self.assertIn('#[cfg(test)]\nmod tests {',source)
+  self.assertEqual(tuple(re.findall(r'#\[test\]\s+fn (\w+)\(',source)),expected)
+  for name in expected:self.assertEqual(source.count('fn '+name+'('),1)
+  self.assertEqual(workflow.count('assert len(names) == 26 and len(set(names)) == 26'),1)
+  self.assertLess(workflow.index("env = environments['production']"),workflow.index(marker))
+  self.assertLess(workflow.index(marker),workflow.index("env = environments['observed-semantic']"))
+  gate=workflow.split('          for name in names:',1)[1].split('          # These actual Origin',1)[0]
+  for token in ("'--list', '--exact'","'--exact', name, '--test-threads=1'",'1 passed; 0 failed; 0 ignored;','timeout=30'):self.assertIn(token,gate)

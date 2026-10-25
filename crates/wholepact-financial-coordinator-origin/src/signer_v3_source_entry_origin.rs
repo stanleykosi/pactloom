@@ -426,16 +426,28 @@ pub(super) struct HV3Entry {
     forwarded: bool,
 }
 impl SV3Entry {
+    /// Cached authenticated V3 observation only; not a new source or grant.
+    pub(super) fn original_source_observation(&self) -> Result<&SignerV3SourceOpenedV1> {
+        self.observation.as_ref().ok_or_else(|| rejected("selector missing original V3 source observation"))
+    }
     pub(super) fn disposal_allowed(&self) -> bool {
         self.start.is_none() || self.terminal || self.opened
     }
 }
 impl CV3Entry {
+    /// Cached authenticated V3 observation only; not a new source or grant.
+    pub(super) fn original_source_observation(&self) -> Result<&SignerV3SourceOpenedV1> {
+        self.observation.as_ref().ok_or_else(|| rejected("selector missing original V3 source observation"))
+    }
     pub(super) fn disposal_allowed(&self) -> bool {
         self.start.is_none() || self.terminal || self.opened
     }
 }
 impl HV3Entry {
+    /// Cached authenticated V3 observation only; not a new source or grant.
+    pub(super) fn original_source_observation(&self) -> Result<&SignerV3SourceOpenedV1> {
+        self.observation.as_ref().ok_or_else(|| rejected("selector missing original V3 source observation"))
+    }
     pub(super) fn disposal_allowed(&self) -> bool {
         self.start.is_none() || self.terminal || self.opened || !self.forwarded
     }

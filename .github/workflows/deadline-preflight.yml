@@ -1,14 +1,14 @@
-name: Ephemeral fixture native trust preflight only
+name: Result selector domain preflight only
 on:
   push:
-    branches: [checkpoint/fixture-trust-preflight-p78]
+    branches: [checkpoint/result-selector-preflight-p79]
 permissions: {}
 concurrency:
-  group: fixture-trust-preflight-p78
+  group: result-selector-preflight-p79
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/fixture-trust-preflight-p78' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/result-selector-preflight-p79' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -171,7 +171,8 @@ jobs:
           names += ['financial_workflow_channel::composition_tests::continue_valid_data_can_exceed_actual_packet_and_original_peer_join_remains_exact']
           names += ['signer_continue_state::shared_wall_tests::delayed_sample_reproduces_legacy_false_rollback_and_existing_helper_repairs_it']
           names += ['financial_workflow_origin::retirement::retirement_error_observation_tests::history_retirement_observation_preserves_operation_and_original_io_error']
-          assert len(names) == 19 and len(set(names)) == 19
+          names += ['financial_workflow_origin::financial_selector::tests::'+n for n in ['actual_selector_preserves_closed_request_and_original_endpoint', 'selector_cannot_replace_result_source_or_socket', 'selector_cannot_replace_fixed_authorization_consent_or_account', 'selector_rejects_unknown_request_fields_and_relative_or_control_paths', 'distinct_financial_and_delivery_sources_join_without_relabelling', 'selector_binds_each_original_v3_observation_field_independently', 'selector_join_is_bound_to_actual_source_domains_and_retained_callers']]
+          assert len(names) == 26 and len(set(names)) == 26
           for name in names:
               listing = run([exe, '--list', '--exact', name], env=env, timeout=30)
               assert [line for line in listing.splitlines() if line.endswith(': test')] == [name+': test'], name
@@ -207,7 +208,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/fixture-trust-preflight-p78' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/result-selector-preflight-p79' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
