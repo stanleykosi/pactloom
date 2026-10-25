@@ -41,6 +41,10 @@ FORMS={'V3Configuring':('v3','BeginV3'),'V3OwnerConfiguring':('owner','SelectV3O
 WITNESS_FIELDS=tuple('Field:'+name for name in ('Endpoint','ServerName','WitnessId',
  'PinnedServerCertificate','NetworkProfile','AccountId','OwnerCertificateDerHex','StorageKey',
  'ServerCertificate','ServerPrivateKey','TrustedClientRoot'))
+# Actual draw_admission order: sibling review panes have NO vertical ordering
+# relative to each other; both precede the two acknowledgements and two arms.
+PAIRED_REVIEW_RANK={'SignerReviewBody':0,'WitnessReviewBody':0,
+ 'SignerReviewAcknowledgement':1,'WitnessReviewAcknowledgement':2,'ArmSigner':3,'ArmWitness':4}
 SELECT=('ReviewV3Pair','ReviewV3Enrollment','ReviewV3Manifest','ReviewV3RedisclosureRead',
         'ReviewV3Redisclose','ConfigureV3Owner','ReviewV3PrepareRead','ReviewV3Receive',
         'ReviewV3AdmitRead','ReviewV3Admit','ReviewV3Audit','ConfigureFinancialSetup','Configure','ConfigureV3')
@@ -406,6 +410,31 @@ class FullFlow:
         self.note_review_observation(s,seek=tag)
         C.require(count<64,'input_widget')
         direction='up' if count<24 else 'down'
+        if s['phase']=='AdmissionReview' and s['subphase']=='None' and tag in PAIRED_REVIEW_RANK:
+            C.require(owner==s['owner'] and owner in ('Signer1','Signer2') and s['focused']
+                      and not(s['secret_input'] or s['host_input']),'input_phase')
+            try:latest=self.native.stable(s['phase'],s['owner'],paired_layout=True)
+            except S.PairedLayoutChanged:
+                # Pre-effect layout deferral consumes this original seek count;
+                # it cannot reset navigation or extend any native/fixture clock.
+                return False
+            h=latest['host_observation'];old=s['host_observation']
+            C.require(latest['subphase']=='None' and latest['owner']==owner,'input_phase')
+            if (not h['context_valid'] or h['entry']!='Idle'
+                    or self.pending_host is not None or self.host_prepared is not None
+                    or (h['revision'],h['nonws_end'])!=(old['revision'],old['nonws_end'])):return False
+            if self.find(latest,tag,owner) is not None:return False
+            target=PAIRED_REVIEW_RANK[tag]
+            anchors=[PAIRED_REVIEW_RANK[w['tag']] for w in latest['widgets']
+                     if w['owner']==owner and w['tag'] in PAIRED_REVIEW_RANK
+                     and PAIRED_REVIEW_RANK[w['tag']]!=target]
+            if anchors:
+                if target<min(anchors):direction='up'
+                elif target>max(anchors):direction='down'
+            # Unknown/equal-level/conflicting anchors retain the original finite
+            # fallback. Only fresh, strictly one-sided anchors change direction.
+            self.scroll(latest,'ScrollRegion',None,direction)
+            return False
         if order is not None and tag in order:
             # Exact native order is body, optional acknowledgement, action. An owed body
             # scroll must not turn downward after repeated action/body trips.
