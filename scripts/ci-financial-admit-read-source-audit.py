@@ -16,6 +16,48 @@ OLD_HISTORY_BLOCK = '        let mut callback_error = None;\n        let result 
 FINISH_SHA = 'b297cdf4bf324809ff50552bdfc4a192029a07c150679e8ffce6133dceba8d9e'
 OLD_FINISH = '    pub fn finish_read(mut self) -> Result<()> {\n        self.check_current()?;\n        self.binding.owner.pair.entry.core.phase.step(\n            self.binding.owner.pair.entry.slot(),\n            151,\n            152,\n        )?;\n        self.consumed = true;\n        Ok(())\n    }'
 
+# Exact P67 worker-result preservation delta. No deadline/currentness change.
+READY_WORKER_CURRENT_SHA = '45ca71f1653973ed6909fc2011506ecef4f88ef291dfe5862857dba6d1f61f8c'
+READY_WORKER_NEW = '            // Sender teardown can precede publication of thread completion.\n            // The unchanged nonblocking driver joins only after is_finished;\n            // its original actor, cancellation and transport checks keep running.\n            Err(std::sync::mpsc::TryRecvError::Disconnected) => Ok(None),'
+READY_WORKER_OLD = '            Err(std::sync::mpsc::TryRecvError::Disconnected) if self.finished() => Ok(None),\n            Err(_) => Err(Error::Unavailable),'
+READY_WORKER_TEST_INCLUDE = '\n#[cfg(test)]\n#[path = "coordinated_delivery_admission_v1/ready_disconnect_tests.rs"]\nmod ready_disconnect_tests;\n'
+def restore_ready_worker(text):
+    assert hashlib.sha256(text.encode()).hexdigest()==READY_WORKER_CURRENT_SHA
+    assert text.count(READY_WORKER_NEW)==1 and text.count(READY_WORKER_TEST_INCLUDE)==1
+    return text.replace(READY_WORKER_NEW,READY_WORKER_OLD,1).replace(READY_WORKER_TEST_INCLUDE,'',1)
+
+
+W_STAGES='HistoryMonitorCheck HistoryCleanupDeadline HistoryRequestReceive HistoryRequestOrder HistoryWorkerStart HistoryServeHandoff HistoryEventOrder HistoryDisplaySend HistoryServingSend HistoryWorkerJoin HistoryWorkerFailure HistoryWorkerUnexpectedReturn HistoryFailureSend HistoryDisposedSend HistoryPurposeClosedSend HistoryCleanupRetain'.split()
+C_ERROR_STAGES='HistoryRetainedReceiveError HistoryFinishError HistoryRetirementPrepareError HistoryRetirementError'.split()
+
+def remove_region(text,start,end,expected):
+    assert text.count(start)==1 and text.count(end)==1,(start,end)
+    a=text.index(start);b=text.index(end,a)
+    assert hashlib.sha256(text[a:b].encode()).hexdigest()==expected,start
+    return text[:a]+text[b:]
+
+def restore_history_observer(text):
+    text=remove_region(text,'/// Failure-only C snapshot after original shared restriction','/// Only the new observation is isolated. This does not catch panic=abort,','875b1b55997c122b9b3a4d4266510e9a4aec1ab6ce581a768d597e376b7e10d2')
+    text=remove_region(text,' #[test] fn pre_cleanup_flush_never_waits_for_owned_writer_lock() {',' #[test] fn success_and_unwind_return_to_original_teardown() {','743c06724dc42ded2b678d799339f962dde780bc84ada27dc40f48e4451027bb')
+    new='reporter.flush_failure(crate::financial_ci_actor_diagnostics::sample_failure(),|f|best_effort_diagnostic_append(||emit_locked(w,"ActorFailureBoundary",&f).map_err(|_|())));'
+    old='reporter.flush_failure(crate::financial_ci_actor_diagnostics::sample_failure(),|f|emit_locked(w,"ActorFailureBoundary",&f).map_err(|_|()));'
+    assert text.count(new)==1
+    return text.replace(new,old)
+
+def restore_history_actor(text):
+    stages=','+','.join(W_STAGES+C_ERROR_STAGES)
+    assert text.count(stages)==1
+    text=text.replace(stages,'')
+    return remove_region(text,' #[test] fn early_append_panic_keeps_first_worker_class_without_retry() {',' #[test] fn detail_and_normal_cleanup_never_enable_failure()','deee34a4b48bba22631013dc7e98bfedfe3d9571bab753de1706661089c65db0')
+
+# Exact cfg(test)-only shared-wall regression; production helper stays pinned.
+SHARED_WALL_REGRESSION = '\n    // Atomic-only regression: models the removed fetch_max kernel, not a\n    // protocol ticket, actor, grant, lease, or successful source audit.\n    fn legacy_fetch_max_projection(\n        last: &AtomicU64,\n        deadline: Instant,\n        mut wall_ms: impl FnMut() -> Result<u64>,\n    ) -> Result<Option<u64>> {\n        let wall = wall_ms()?;\n        let prior = last.fetch_max(wall, Ordering::AcqRel);\n        Ok((wall >= prior && Instant::now() < deadline).then_some(wall))\n    }\n\n    fn forced_publication_reordering(legacy: bool) -> (Option<u64>, Option<u64>, u64, usize) {\n        let last = Arc::new(AtomicU64::new(99));\n        let sampled = Arc::new(Barrier::new(2));\n        let release = Arc::new(Barrier::new(2));\n        let deadline = Instant::now() + Duration::from_secs(60);\n        let first = {\n            let last = Arc::clone(&last);\n            let sampled = Arc::clone(&sampled);\n            let release = Arc::clone(&release);\n            std::thread::spawn(move || {\n                let mut samples = 0;\n                let mut sample = || {\n                    samples += 1;\n                    if samples == 1 {\n                        let wall = 100;\n                        sampled.wait();\n                        release.wait();\n                        Ok(wall)\n                    } else {\n                        Ok(101)\n                    }\n                };\n                let observed = if legacy {\n                    legacy_fetch_max_projection(&last, deadline, &mut sample)\n                } else {\n                    observe_shared_wall(&last, deadline, &mut sample)\n                }.unwrap();\n                (observed, samples)\n            })\n        };\n        sampled.wait();\n        let second = if legacy {\n            legacy_fetch_max_projection(&last, deadline, || Ok(101))\n        } else {\n            observe_shared_wall(&last, deadline, || Ok(101))\n        }.unwrap();\n        release.wait();\n        let (first, samples) = first.join().unwrap();\n        (first, second, last.load(Ordering::Acquire), samples)\n    }\n\n    #[test]\n    fn delayed_sample_reproduces_legacy_false_rollback_and_existing_helper_repairs_it() {\n        assert_eq!(forced_publication_reordering(true), (None, Some(101), 101, 1));\n        assert_eq!(forced_publication_reordering(false), (Some(101), Some(101), 101, 2));\n    }\n'
+
+def restore_shared_wall_regression(text):
+    assert hashlib.sha256(text.encode()).hexdigest()=="33c4b1f180f6f4093fd195a65a27921bceea06cde078b9917e22f3a3048b0079"
+    assert text.count(SHARED_WALL_REGRESSION)==1
+    return text.replace(SHARED_WALL_REGRESSION,"",1)
+
 def digest(text): return hashlib.sha256(text.encode()).hexdigest()
 def tokens(text):
     return ''.join(token for token in re.findall(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/|[^\s]', text, re.S)
@@ -59,9 +101,14 @@ def main():
     parser=argparse.ArgumentParser();parser.add_argument('--source',type=Path,required=True)
     root=parser.parse_args().source.resolve(); evidence=[]
     for relative,expected in UNCHANGED_FILES.items():
-        raw=(root/relative).read_bytes();assert hashlib.sha256(raw).hexdigest()==expected,relative
+        raw=(root/relative).read_text()
+        if relative.endswith("/financial_observer.rs"):raw=restore_history_observer(raw)
+        if relative.endswith("/signer_continue_state.rs"):raw=restore_shared_wall_regression(raw)
+        assert hashlib.sha256(raw.encode()).hexdigest()==expected,relative
     for relative,expected in BASE_TOKEN_HASHES.items():
         raw=(root/relative).read_text(); restored=raw
+        if relative.endswith('/runtime/coordinated_delivery_admission_v1.rs'):
+            restored=restore_ready_worker(restored)
         restored=restored.replace('        #[cfg(wholepact_financial_rendered_host_semantic_ci)]\n        let _observation = crate::financial_ci_actor::AdmitReadObservation::enter();\n','')
         if relative.endswith('coordinated_admit_read_v1.rs'):
             start=restored.index('        let mut callback_error = None;')

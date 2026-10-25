@@ -57,11 +57,16 @@ def main():
  assert counts==CALLSITE_COUNTS
  for relative,expected in UNCHANGED.items():
   raw=(root/relative).read_text()
+  if relative.endswith('/runtime/coordinated_delivery_admission_v1.rs'):
+   raw=prior.restore_ready_worker(raw)
+  if relative.endswith("/signer_continue_state.rs"):
+   raw=prior.restore_shared_wall_regression(raw)
   if relative.endswith('/financial_ci_actor.rs'):
    assert raw.count(TEST_PEEK)==1
    raw=raw.replace(TEST_PEEK,'')
   assert hashlib.sha256(raw.encode()).hexdigest()==expected,relative
  enum=(root/'crates/wholepact-financial-coordinator-origin/src/financial_ci_actor_diagnostics.rs').read_text()
+ enum=prior.restore_history_actor(enum)
  for label in ADDED_STAGES:assert re.search(r'\b'+label+r'\b',enum),label
  restored_enum=enum.replace(','+','.join(ADDED_STAGES),'')
  assert hashlib.sha256(restored_enum.encode()).hexdigest()==ENUM_BASE_SHA

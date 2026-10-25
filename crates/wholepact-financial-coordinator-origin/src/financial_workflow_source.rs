@@ -3,7 +3,7 @@
 use crate::{rejected, Result, financial_workflow_channel::{EntryOffer, SignerFinancialReadPresentationV1,
     SignerSourceEntryPresentationV1}, financial_workflow_clock::FullWorkflowClocksV1,
     signer_continue_state::{self as state, Core}, source_entry_envelope::{Envelope,RecipientKey}};
-use std::{sync::{Arc,atomic::{AtomicU64,Ordering}},time::{Duration,Instant}};
+use std::{sync::{Arc,atomic::AtomicU64},time::{Duration,Instant}};
 use zeroize::Zeroizing;
 
 pub(super) const V3_HELD:u8=15;
@@ -42,15 +42,18 @@ impl EntryReviewed {
     /// Private retirement only. The sole driver separately checks every
     /// original actor except its owned exiting target. This grants no action.
     pub(super) fn retirement_clock_bounds(&self)->Result<()>{
-        let now=Instant::now();let wall=state::wall_ms()?;let prior=self.last_wall.fetch_max(wall,Ordering::AcqRel);
-        if now>=self.original_source||now>=self.clocks.supervision()||wall<prior||wall<self.wire.presentation.facts.reviewed_at_ms
+        let now=Instant::now();
+        let wall=state::observe_shared_wall(&self.last_wall,self.original_source.min(self.clocks.supervision()),state::wall_ms)?
+            .ok_or_else(||rejected("retirement original source clock elapsed"))?;
+        if now>=self.original_source||now>=self.clocks.supervision()||wall<self.wire.presentation.facts.reviewed_at_ms
             ||wall>=self.wire.presentation.facts.source_expires_at_ms{return Err(rejected("retirement original source clock elapsed"));}Ok(())
     }
     fn observe_custody(&self)->Result<u64> {
         let result=(||{
-            self.core.check()?;let now=Instant::now();let wall=state::wall_ms()?;
-            let prior=self.last_wall.fetch_max(wall,Ordering::AcqRel);
-            if now>=self.original_source||now>=self.clocks.supervision()||wall<prior||wall<self.wire.presentation.facts.reviewed_at_ms
+            self.core.check()?;let now=Instant::now();
+            let wall=state::observe_shared_wall(&self.last_wall,self.original_source.min(self.clocks.supervision()),state::wall_ms)?
+                .ok_or_else(||rejected("original financial custody expired"))?;
+            if now>=self.original_source||now>=self.clocks.supervision()||wall<self.wire.presentation.facts.reviewed_at_ms
                 ||wall>=self.wire.presentation.facts.source_expires_at_ms{return Err(rejected("original financial custody expired"));}Ok(wall)
         })();if result.is_err(){self.core.phase.revoke();}result
     }
@@ -167,9 +170,12 @@ impl ReadReviewed {
         let read=Arc::new(Self{entry,wire,original_read,ceiling,last_wall:AtomicU64::new(wall)});read.check_bounds()?;Ok(read)
     }
     pub(super) fn check_bounds(&self)->Result<()> {
-        let result=(||{let wall=self.entry.observe_custody()?;let prior=self.last_wall.fetch_max(wall,Ordering::AcqRel);
+        let result=(||{
+            self.entry.observe_custody()?;
+            let wall=state::observe_shared_wall(&self.last_wall,self.original_read.min(self.ceiling),||self.entry.observe_custody())?
+                .ok_or_else(||rejected("initial Read original action bound elapsed"))?;
             if Instant::now()>=self.original_read||Instant::now()>=self.ceiling
-                ||wall<prior||wall<self.wire.facts.reviewed_at_ms||wall>=self.wire.facts.expires_at_ms
+                ||wall<self.wire.facts.reviewed_at_ms||wall>=self.wire.facts.expires_at_ms
             {return Err(rejected("initial Read original action bound elapsed"));}Ok(())})();
         if result.is_err(){self.entry.core.phase.revoke();}result
     }

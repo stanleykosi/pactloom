@@ -2,6 +2,25 @@
 import copy,importlib.util,json,pathlib,tempfile,unittest
 P=pathlib.Path(__file__).resolve().parents[1]/'ci-close-preflight-contexts.py'
 spec=importlib.util.spec_from_file_location('close_context_preflight',P);C=importlib.util.module_from_spec(spec);spec.loader.exec_module(C)
+class ExactHistorySourceRestorationTests(unittest.TestCase):
+ def test_only_exact_diagnostic_and_test_additions_restore_historical_bytes(self):
+  import hashlib
+  path=P.parent/'ci-financial-admit-read-source-audit.py'
+  spec=importlib.util.spec_from_file_location('fixed_p70_source_restoration',path);audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
+  base=P.parent.parent/'crates'
+  cases=[
+   (base/'wholepact-signer/src/native_ui/runtime/coordinated_delivery_admission_v1.rs',audit.restore_ready_worker,'59c9fc8331a83323fab2d85ae4f0de853888af1eadcf090561d01b574846ef46','Ok(None)','Ok(Some(v))'),
+   (base/'wholepact-financial-coordinator-origin/src/financial_observer.rs',audit.restore_history_observer,'67a92e04a03df01257be85ee99c8544be4f627c05c3800a6b5ae9b82cbd6dc4a','WRITER.try_lock()','WRITER.lock()'),
+   (base/'wholepact-financial-coordinator-origin/src/financial_ci_actor_diagnostics.rs',audit.restore_history_actor,'84ebadcad2265ff1945995ffbb0e0c8c90ae5bcb7658bf3524b4c6a3700a80e4','HistoryMonitorCheck','HistoryUnknown'),
+   (base/'wholepact-financial-coordinator-origin/src/signer_continue_state.rs',audit.restore_shared_wall_regression,'f22c0ad3452dc038b0e34f45f8fbd1182c11113d6977d15b1bb347e838fe6cea','wall < prior','wall <= prior'),
+  ]
+  for source,restore,expected,old,new in cases:
+   raw=source.read_text()
+   def verify(text):self.assertEqual(hashlib.sha256(restore(text).encode()).hexdigest(),expected)
+   verify(raw);self.assertIn(old,raw)
+   for bad in (raw+'// unrelated source change\n',raw.replace(old,new,1)):
+    with self.assertRaises(AssertionError):verify(bad)
+
 class ContextPreflightTests(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.target=pathlib.Path(self.tmp.name);self.rows=[]
@@ -207,7 +226,8 @@ class IntentValidationExecutionPreflightTests(unittest.TestCase):
 
  def test_intent_feature_union_is_exact_and_does_not_replace_old_target(self):
   self.assertEqual(set(C.INTENT_FEATURES),set(C.SIGNER_FEATURES)|{'synthetic-qualification'})
-  self.assertEqual(len(C.HANDOFF_SECURITY_TESTS),50)
+  self.assertEqual(len(C.HANDOFF_SECURITY_TESTS),51)
+  self.assertEqual(C.HANDOFF_SECURITY_TESTS[0],'native_ui::runtime::financial_v1::coordinated_v3_delivery::coordinated_delivery_admission_v1::ready_disconnect_tests::ready_disconnect_preserves_pending_worker_error_and_panic_without_fabricating_ready')
   self.assertEqual(len(C.INTENT_VALIDATION_TESTS),20)
   self.assertTrue(set(C.INTENT_VALIDATION_TESTS).isdisjoint(C.HANDOFF_SECURITY_TESTS))
   rows=copy.deepcopy(self.rows);rows[-1]['features']=list(C.SIGNER_FEATURES)

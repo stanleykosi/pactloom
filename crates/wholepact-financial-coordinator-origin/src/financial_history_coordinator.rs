@@ -49,9 +49,9 @@ impl HReview {
     fn check_bounds(&self) -> Result<()> {
         self.setup.read.check_bounds()?;
         crate::channel::require_time(self.ceiling)?;
-        let wall = state::wall_ms()?;
-        let old = self.last_wall.fetch_max(wall, Ordering::AcqRel);
-        if wall < old || wall < self.data.prepared_at_ms || wall >= self.data.expires_at_ms {
+        let wall = state::observe_shared_wall(&self.last_wall, self.ceiling, state::wall_ms)?
+            .ok_or_else(|| rejected("initial history native source clock"))?;
+        if wall < self.data.prepared_at_ms || wall >= self.data.expires_at_ms {
             return Err(rejected("initial history native source clock"));
         }
         Ok(())

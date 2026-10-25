@@ -541,6 +541,18 @@ pub(super) fn split_coordinator(tree:InertTreeV1,phases:PhaseDeadlinesV1,
     Ok((CoordinatorFinancialNativeV1{core:Arc::clone(&core),_thread:PhantomData},CoordinatorFinancialEndpointV1{
         normal:normal_completion::NormalCState::default(),v3_entries:std::array::from_fn(|_|CV3Entry::default()),core,clocks,tree:Some(tree),coordinator,session,image,host_terminal:Some(host_terminal),retirement_resume:None,witnesses:std::array::from_fn(|_|witness::CWSlot::default()),histories:std::array::from_fn(|_|history::CHSlot::default()),signing_services:std::array::from_fn(|_|signing::CGSlot::default()),pair_service:completed_pair::CPState::default(),slots:[None,None],cancel_sent:false,disposed:[false;2],cleanup:None}))
 }
+// Observation only: the same original receive error and operation order survive.
+// Earlier grammar/slot failures remain the ordinary SourceReceiveError boundary.
+fn observed_history_retained_receive<T>(result: Result<T>) -> Result<T> {
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    if let Err(error)=&result {
+        use crate::financial_ci_failure_boundary as n;
+        n::latch(n::Boundary::Driver(n::Driver::HistoryRetainedReceiveError));
+        crate::financial_ci_actor_diagnostics::work_fallback(
+            crate::financial_ci_actor_diagnostics::DriverStage::HistoryRetainedReceiveError,error);
+    }
+    result
+}
 impl CoordinatorFinancialEndpointV1 {
     /// One C-only transport handoff to the sole owned driver, never authority.
     /// The terminal is privately bound to this same Core before it can escape.
@@ -776,7 +788,7 @@ impl CoordinatorFinancialEndpointV1 {
                     if !received_workflow_progress(&self.core.phase,i,SOURCE_RETAINED,READ_REVIEW)?{return Ok(Some(CoordinatorFinancialEventV1::Restricted(role)));}
                     CoordinatorFinancialEventV1::InitialReadOffer(SignerFinancialReadTicketV1{read,consumed:false})
             }
-            Packet::HistoryRetained{start,presentation_digest,read_digest,continue_review_ceiling_ms}=>{
+            Packet::HistoryRetained{start,presentation_digest,read_digest,continue_review_ceiling_ms}=>observed_history_retained_receive((||{
                 let read=slot.read.as_ref().ok_or_else(||rejected("history retention before Read"))?;
                 if start!=slot.start||slot.wire_phase!=READ_ADMITTED||presentation_digest!=read.wire.presentation_digest||read_digest!=read.wire.facts.read_digest{return Err(rejected("history retention binding"));}
                 retained_history=Some(Arc::clone(read));
@@ -785,9 +797,9 @@ impl CoordinatorFinancialEndpointV1 {
                     read.entry.check_custody()?;
                     let continue_deadline=self.clocks.restrict_received(PROFILE,continue_review_ceiling_ms,read.entry.original_source,Instant::now())?;
                     slot.continue_deadline=Some(continue_deadline);slot.continue_review_ms=Some(continue_review_ceiling_ms);
-                    if !received_workflow_progress(&self.core.phase,i,READ_ADMITTED,HISTORY_RETAINED)?{CoordinatorFinancialEventV1::Restricted(role)}else{CoordinatorFinancialEventV1::HistoryRetained{role,continue_deadline}}
+                    Ok(if !received_workflow_progress(&self.core.phase,i,READ_ADMITTED,HISTORY_RETAINED)?{CoordinatorFinancialEventV1::Restricted(role)}else{CoordinatorFinancialEventV1::HistoryRetained{role,continue_deadline}})
 
-            }
+            })())?,
             Packet::ContinueDisplay{binding}=>{
                 binding.validate()?;let read=slot.read.as_ref().ok_or_else(||rejected("Continue display without Read"))?;
                 let c=slot.continuation.as_mut().ok_or_else(||rejected("unsolicited full Continue display"))?;
@@ -828,7 +840,7 @@ impl CoordinatorFinancialEndpointV1 {
                 CoordinatorFinancialEventV1::Failed{role,stage}
             }
             _=>return Err(rejected("wrong coordinator workflow response")),
-        };if let Some(read)=retained_history{self.note_history_retained(role,&read)?;}Ok(Some(event))
+        };if let Some(read)=retained_history{observed_history_retained_receive(self.note_history_retained(role,&read))?;}Ok(Some(event))
     }
     pub fn is_disposed(&self)->bool{self.disposed==[true;2]&&self.witnesses.iter().all(witness::CWSlot::closed)&&self.histories.iter().all(history::CHSlot::closed)&&self.signing_services.iter().all(signing::CGSlot::closed)&&self.pair_service.closed()}
     pub fn stop_and_reap(mut self)->Result<()>{

@@ -1,14 +1,14 @@
-name: Correct exact composition fixture fields preflight only
+name: Initial history failure evidence preflight only
 on:
   push:
-    branches: [checkpoint/handoff-composition-preflight-p59b]
+    branches: [checkpoint/history-failure-evidence-preflight-p70]
 permissions: {}
 concurrency:
-  group: handoff-composition-preflight-p59b
+  group: history-failure-evidence-preflight-p70
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/handoff-composition-preflight-p59b' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/history-failure-evidence-preflight-p70' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -81,6 +81,7 @@ jobs:
           assert 'host: x86_64-unknown-linux-gnu' in run(rustup+['rustc', '-Vv'], timeout=30)
           env = dict(os.environ)
           env['WHOLEPACT_FINANCIAL_BUILD_MODE'] = 'production'
+          print(run(rustup+['python3', '-I', '-B', 'scripts/tests/test_initial_history_failure_boundaries.py'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/tests/test_v3_deadline_identity.py'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-close-trace.py', '--source', str(repo), '--out', str(root/'close-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-preparation-client-trace.py', '--source', str(repo), '--out', str(root/'readiness-client-traces'), '--run'], env=env, timeout=180))
@@ -134,8 +135,11 @@ jobs:
                       assert errors[0]['code']['code'] == 'E0432' and symbol in errors[0]['message'], (profile, symbol, p.stderr)
               probe('bootstrap_common_image_v1', True)
               probe('SignerV3EnrollmentFinalV1', profile != 'minimal')
+              probe('HistoryFailureStageV1', profile != 'minimal')
+              probe('HistoryFailureClassV1', profile != 'minimal')
               probe('financial_ci_snapshot', profile in ['observed-pixel', 'observed-semantic'])
               probe('financial_ci_clear_host_view', profile == 'observed-semantic')
+              probe('financial_ci_flush_failure_before_owned_cleanup', profile == 'observed-semantic')
               if profile != 'minimal':
                   method = 'financial_ci_close_for_failed_admit_read_v1'
                   src = root/('admit-close-probe-'+profile+'.rs')
@@ -164,18 +168,38 @@ jobs:
           names += ['financial_workflow_origin::v3_entry::delivery::tests::'+n for n in ['delivery_custody_wall_preserves_long_originals_without_widening_actions', 'delivery_custody_reconstruction_keeps_shorter_channel_epoch_and_expiry']]
           names += ['completed_pair_origin::tests::'+n for n in ['completed_pair_received_service_preserves_original_long_horizon_and_review120', 'completed_pair_received_service_keeps_epoch_both_sources_and_supervision_without_pair900']]
           names += ['financial_workflow_channel::composition_tests::continue_valid_data_can_exceed_actual_packet_and_original_peer_join_remains_exact']
-          assert len(names) == 17 and len(set(names)) == 17
+          names += ['signer_continue_state::shared_wall_tests::delayed_sample_reproduces_legacy_false_rollback_and_existing_helper_repairs_it']
+          assert len(names) == 18 and len(set(names)) == 18
           for name in names:
               listing = run([exe, '--list', '--exact', name], env=env, timeout=30)
               assert [line for line in listing.splitlines() if line.endswith(': test')] == [name+': test'], name
               result = run([exe, '--exact', name, '--test-threads=1'], env=env, timeout=30)
               assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in result, name
               print(name+': passed')
-          print('Four clock, four actual packet round-trip, two actual Pair DTO, two Pair wall-helper tests, two delivery custody and two completed-Pair service clock tests, one actual Continue packet/peer composition test, and four source-extracted inert-carrier regressions passed. Compiler/API preflight only; not authority-flow, native/full qualification, deployment or settlement.')
+          # These actual Origin writer/reporter tests are semantic-only: the
+          # production executable above cannot establish their execution.
+          env = environments['observed-semantic']
+          rows = [json.loads(line) for line in run(args, env=env).splitlines() if line.startswith('{')]
+          executables = [row['executable'] for row in rows if row.get('reason') == 'compiler-artifact' and row.get('target', {}).get('name') == 'wholepact_financial_coordinator_origin' and row.get('profile', {}).get('test') and row.get('executable')]
+          assert len(executables) == 1
+          exe = executables[0]
+          semantic_names = [
+              'financial_ci_failure_boundary::tests::early_append_panic_keeps_attempted_state_and_never_retries',
+              'financial_ci_actor_diagnostics::tests::early_append_panic_keeps_first_worker_class_without_retry',
+              'financial_observer::early_actor_observation_tests::pre_cleanup_flush_never_waits_for_owned_writer_lock',
+          ]
+          assert len(semantic_names) == 3 and len(set(semantic_names)) == 3
+          for name in semantic_names:
+              listing = run([exe, '--list', '--exact', name], env=env, timeout=30)
+              assert [line for line in listing.splitlines() if line.endswith(': test')] == [name+': test'], name
+              result = run([exe, '--exact', name, '--test-threads=1'], env=env, timeout=30)
+              assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in result, name
+              print(name+': passed')
+          print('Four clock, four actual packet round-trip, two actual Pair DTO, two Pair wall-helper tests, two delivery custody and two completed-Pair service clock tests, one actual Continue packet/peer composition test, one actual shared-wall publication-order regression, three actual semantic Origin reporter/writer-lock regressions, and four source-extracted inert-carrier regressions passed. Compiler/API preflight only; not authority-flow, native/full qualification, deployment or settlement.')
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/handoff-composition-preflight-p59b' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/history-failure-evidence-preflight-p70' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

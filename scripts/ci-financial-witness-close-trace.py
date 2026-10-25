@@ -66,7 +66,7 @@ mod financial_ci_actor_diagnostics {
  pub fn sample_failure()->Option<FailureFacts>{GATE.load(Ordering::Acquire).then_some(FailureFacts)}
 }
 mod financial_observer {use super::*;
-''',block(obs,'pub(crate) fn financial_ci_flush_actor_failure_before_edge_close'), '\n',block(obs,'fn best_effort_actor_observation'),'\n}\n']
+''',block(obs,'pub(crate) fn financial_ci_flush_actor_failure_before_edge_close'), '\n',block(obs,'pub(crate) fn best_effort_diagnostic_append'), '\n',block(obs,'fn best_effort_actor_observation'),'\n}\n']
 for filename,core,origin,request in [
  ('financial_history_origin.rs','HistoryCore','WitnessFinancialHistoryOriginV1','FinancialHistoryRequestV1'),
  ('financial_signing_origin.rs','SigningCore','WitnessFinancialSigningOriginV1','FinancialSigningRequestV1'),

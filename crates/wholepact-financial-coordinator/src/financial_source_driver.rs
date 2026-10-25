@@ -16,6 +16,19 @@ macro_rules! boundary {
     }};
 }
 
+macro_rules! history_error {
+    ($stage:ident, $operation:expr) => {{
+        let result = $operation;
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error) = &result {
+            boundary!(Driver, $stage);
+            use wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics as diagnostic;
+            diagnostic::work_fallback(diagnostic::DriverStage::$stage,error);
+        }
+        result
+    }};
+}
+
 use crate::{rejected, Result};
 use std::{
     sync::{
@@ -1563,7 +1576,7 @@ fn drive(
                 }
                 if let CoordinatorFinancialEventV1::HistoryRetained { role, .. } = &event {
                     history_retained[index(*role)] = true;
-                    record_send_progress(endpoint.try_finish_history_read(*role)?, &revoked);
+                    record_send_progress(history_error!(HistoryFinishError, endpoint.try_finish_history_read(*role))?, &revoked);
                 }
                 if matches!(
                     &event,
@@ -1587,8 +1600,12 @@ fn drive(
                     CoordinatorFinancialHistoryEventV1::Disposed(role) => {
                         history_disposed[index(*role)] = true;
                     }
+                    CoordinatorFinancialHistoryEventV1::ServiceFailed(_) => {
+                        // The authenticated packet has no original error class.
+                        boundary!(Driver, HistoryServiceFailedObserved);
+                        revoked.store(true, Ordering::Release);
+                    }
                     CoordinatorFinancialHistoryEventV1::PreparationFailed(_)
-                    | CoordinatorFinancialHistoryEventV1::ServiceFailed(_)
                     | CoordinatorFinancialHistoryEventV1::Restricted(_) => {
                         revoked.store(true, Ordering::Release);
                     }
@@ -1608,8 +1625,8 @@ fn drive(
                     .try_send(Outcome::History(event))
                     .map_err(|error| { match &error { mpsc::TrySendError::Full(_)=>boundary!(Driver, OutcomeChannelFull), mpsc::TrySendError::Disconnected(_)=>boundary!(Driver, OutcomeChannelDisconnected) }; rejected("History native receiver unavailable") })?;
                 if let Some(role) = normal_retirement {
-                    let ticket = endpoint.prepare_history_retirement(role)?;
-                    retire_history_exclusively(&mut endpoint, &input, &output, &revoked, ticket)?;
+                    let ticket = history_error!(HistoryRetirementPrepareError, endpoint.prepare_history_retirement(role))?;
+                    history_error!(HistoryRetirementError, retire_history_exclusively(&mut endpoint, &input, &output, &revoked, ticket))?;
                     // The real retirement internally consumed exact PurposeClosed
                     // and normal reap; do not send a second terminal request.
                     history_close_sent[index(role)] = true;
@@ -1771,6 +1788,8 @@ fn drive(
     // terminal failure never skipped the security drain above. Any retained
     // output prefix is incomplete observation, not successful Host execution.
     host.close(&revoked);
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    wholepact_financial_coordinator_origin::financial_ci_flush_failure_before_owned_cleanup();
     drop(host_input);
     drop(host);
     drop(host_output);

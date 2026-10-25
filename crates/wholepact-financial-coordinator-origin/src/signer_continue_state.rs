@@ -758,4 +758,63 @@ mod shared_wall_tests {
             assert_eq!(last.load(Ordering::Acquire), if contend {102} else {100});
         }
     }
+
+    // Atomic-only regression: models the removed fetch_max kernel, not a
+    // protocol ticket, actor, grant, lease, or successful source audit.
+    fn legacy_fetch_max_projection(
+        last: &AtomicU64,
+        deadline: Instant,
+        mut wall_ms: impl FnMut() -> Result<u64>,
+    ) -> Result<Option<u64>> {
+        let wall = wall_ms()?;
+        let prior = last.fetch_max(wall, Ordering::AcqRel);
+        Ok((wall >= prior && Instant::now() < deadline).then_some(wall))
+    }
+
+    fn forced_publication_reordering(legacy: bool) -> (Option<u64>, Option<u64>, u64, usize) {
+        let last = Arc::new(AtomicU64::new(99));
+        let sampled = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let first = {
+            let last = Arc::clone(&last);
+            let sampled = Arc::clone(&sampled);
+            let release = Arc::clone(&release);
+            std::thread::spawn(move || {
+                let mut samples = 0;
+                let mut sample = || {
+                    samples += 1;
+                    if samples == 1 {
+                        let wall = 100;
+                        sampled.wait();
+                        release.wait();
+                        Ok(wall)
+                    } else {
+                        Ok(101)
+                    }
+                };
+                let observed = if legacy {
+                    legacy_fetch_max_projection(&last, deadline, &mut sample)
+                } else {
+                    observe_shared_wall(&last, deadline, &mut sample)
+                }.unwrap();
+                (observed, samples)
+            })
+        };
+        sampled.wait();
+        let second = if legacy {
+            legacy_fetch_max_projection(&last, deadline, || Ok(101))
+        } else {
+            observe_shared_wall(&last, deadline, || Ok(101))
+        }.unwrap();
+        release.wait();
+        let (first, samples) = first.join().unwrap();
+        (first, second, last.load(Ordering::Acquire), samples)
+    }
+
+    #[test]
+    fn delayed_sample_reproduces_legacy_false_rollback_and_existing_helper_repairs_it() {
+        assert_eq!(forced_publication_reordering(true), (None, Some(101), 101, 1));
+        assert_eq!(forced_publication_reordering(false), (Some(101), Some(101), 101, 2));
+    }
 }

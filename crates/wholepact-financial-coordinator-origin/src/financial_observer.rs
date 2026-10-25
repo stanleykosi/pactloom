@@ -396,10 +396,36 @@ pub(crate) fn financial_ci_flush_actor_failure_before_edge_close() {
   if let Ok(mut slot)=WRITER.try_lock(){if let Some(w)=slot.as_mut(){
    if w.pid!=unsafe{libc::getpid()}{return;}
    let mut reporter=w.actor_diagnostic;
-   reporter.flush_failure(crate::financial_ci_actor_diagnostics::sample_failure(),|f|emit_locked(w,"ActorFailureBoundary",&f).map_err(|_|()));
+   reporter.flush_failure(crate::financial_ci_actor_diagnostics::sample_failure(),|f|best_effort_diagnostic_append(||emit_locked(w,"ActorFailureBoundary",&f).map_err(|_|())));
    w.actor_diagnostic=reporter;
   }}
  });
+}
+/// Failure-only C snapshot after original shared restriction and before owned
+/// queue/drop/reap can block. No successful path calls this helper. Empty slots,
+/// contention, panic, and append failure cannot skip or replace original cleanup.
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+pub fn financial_ci_flush_failure_before_owned_cleanup() {
+ best_effort_actor_observation(|| {
+  if let Ok(mut slot)=WRITER.try_lock(){if let Some(w)=slot.as_mut(){
+   if w.pid!=unsafe{libc::getpid()} || w.role!=Role::Coordinator{return;}
+   let mut boundary=w.boundary;
+   boundary.flush(crate::financial_ci_failure_boundary::sample(),|f|best_effort_diagnostic_append(|| {
+    emit_locked(w,"NativeFailureBoundary",&json!({"version":f.version,"ui":f.ui,"driver":f.driver,"transport":f.transport,"core":f.core})).map_err(|_|())
+   }));
+   w.boundary=boundary;
+   let mut reporter=w.actor_diagnostic;
+   reporter.flush_failure(crate::financial_ci_actor_diagnostics::sample_failure(),|f|best_effort_diagnostic_append(||emit_locked(w,"ActorFailureBoundary",&f).map_err(|_|())));
+   w.actor_diagnostic=reporter;
+  }}
+ });
+}
+
+/// Isolate append before returning to the copied reporter, so even a panic
+/// retains attempted-once/failed state when the reporter is written back.
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+pub(crate) fn best_effort_diagnostic_append(append: impl FnOnce() -> std::result::Result<(),()>) -> std::result::Result<(),()> {
+ std::panic::catch_unwind(std::panic::AssertUnwindSafe(append)).unwrap_or(Err(()))
 }
 /// Only the new observation is isolated. This does not catch panic=abort,
 /// allocation aborts or process death, and never changes an original failure.
@@ -410,6 +436,11 @@ fn best_effort_actor_observation(observe: impl FnOnce()) {
 #[cfg(all(test,wholepact_financial_rendered_host_semantic_ci))]
 mod early_actor_observation_tests {
  use super::*;
+ #[test] fn pre_cleanup_flush_never_waits_for_owned_writer_lock() {
+  let held=WRITER.lock().unwrap();
+  financial_ci_flush_failure_before_owned_cleanup();
+  drop(held); // This actual helper must return even while the writer is busy.
+ }
  #[test] fn success_and_unwind_return_to_original_teardown() {
   for panics in [false,true] {
    let calls=std::cell::Cell::new(0);

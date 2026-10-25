@@ -36,11 +36,11 @@ jobs:
         run: |
           set -euo pipefail
           mode="$(cat scripts/qualification-gate-mode)"
-          [[ "$mode" == origin || "$mode" == full || "$mode" == financial || "$mode" == bootstrap || "$mode" == ui || "$mode" == financial-ui || "$mode" == financial-semantic || "$mode" == financial-semantic-reuse || "$mode" == financial-preparation-diagnostic || "$mode" == financial-semantic-p59b-reuse ]]
+          [[ "$mode" == origin || "$mode" == full || "$mode" == financial || "$mode" == bootstrap || "$mode" == ui || "$mode" == financial-ui || "$mode" == financial-semantic || "$mode" == financial-semantic-reuse || "$mode" == financial-preparation-diagnostic ]]
           [[ "$(wc -l < scripts/qualification-gate-mode)" -eq 1 ]]
           printf 'gate=%s\n' "$mode" >> "$GITHUB_OUTPUT"
       - name: Minimal real production origin integration (not full qualification)
-        if: steps.mode.outputs.gate != 'bootstrap' && steps.mode.outputs.gate != 'ui' && steps.mode.outputs.gate != 'financial-ui' && steps.mode.outputs.gate != 'financial-semantic' && steps.mode.outputs.gate != 'financial-semantic-reuse' && steps.mode.outputs.gate != 'financial-preparation-diagnostic' && steps.mode.outputs.gate != 'financial-semantic-p59b-reuse'
+        if: steps.mode.outputs.gate != 'bootstrap' && steps.mode.outputs.gate != 'ui' && steps.mode.outputs.gate != 'financial-ui' && steps.mode.outputs.gate != 'financial-semantic' && steps.mode.outputs.gate != 'financial-semantic-reuse' && steps.mode.outputs.gate != 'financial-preparation-diagnostic'
         shell: bash
         working-directory: source
         run: bash scripts/ci-origin-integration-linux.sh
@@ -193,94 +193,6 @@ jobs:
         shell: bash
         run: |
           echo 'Fresh coordinated-financial-rendered-host-semantic-v1 synthetic two-signer qualification passed using read-only same-rendered-Host-text observation. All native authority, full proof, retirements, Returns, normal close and cleanup checks remain required. This is NOT pixel-only UI qualification; the original financial-ui gate remains separately callable and is not upgraded. No dispatch, public-chain settlement, deployment or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
-      - name: Fetch fixed P59b native producer and exact reviewed H69 harness without credentials
-        if: steps.mode.outputs.gate == 'financial-semantic-p59b-reuse'
-        shell: bash
-        env:
-          GIT_TERMINAL_PROMPT: '0'
-          GIT_CONFIG_NOSYSTEM: '1'
-          GIT_CONFIG_GLOBAL: /dev/null
-        run: |
-          set -euo pipefail
-          umask 022
-          fetch_fixed() {
-            local destination="$1" commit="$2"
-            mkdir "$destination"
-            git -C "$destination" init --quiet
-            git -C "$destination" -c credential.helper= -c http.extraheader= fetch --no-tags --depth=1 https://github.com/stanleykosi/pactloom.git "$commit"
-            git -C "$destination" checkout --quiet --detach FETCH_HEAD
-            test "$(git -C "$destination" rev-parse HEAD)" = "$commit"
-            test -z "$(git -C "$destination" status --porcelain --untracked-files=all)"
-          }
-          fetch_fixed P59b 6dab2eb6e4ef29b74f54b5678ac3815276b72490
-          fetch_fixed H69 c190ff60a11b60f6b9f923248f91a00e97826d1e
-      - name: Fixed P59b reuse identity archive and cleanup boundary tests (no native execution)
-        if: steps.mode.outputs.gate == 'financial-semantic-p59b-reuse'
-        timeout-minutes: 5
-        shell: bash
-        run: env -i PATH="$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 python3 -I -B -m unittest discover -s source/scripts/tests -p 'test_ci_financial_p59b_reuse.py'
-      - name: Acquire only fixed P59b build using existing isolated read token
-        if: steps.mode.outputs.gate == 'financial-semantic-p59b-reuse'
-        timeout-minutes: 6
-        shell: bash
-        env:
-          FINANCIAL_ARTIFACT_READ_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          python3 -I -B "$GITHUB_WORKSPACE/source/scripts/ci-financial-p59b-reuse.py" acquire "$GITHUB_WORKSPACE/source"
-      - name: Verify fixed P59b archive H69 closure and independent cleanup (no native execution)
-        if: steps.mode.outputs.gate == 'financial-semantic-p59b-reuse'
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          set -euo pipefail
-          env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
-            RUNNER_OS="$RUNNER_OS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
-            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REF="$GITHUB_REF" \
-            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_SHA="$GITHUB_SHA" \
-            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" GITHUB_JOB="$GITHUB_JOB" \
-            python3 -I -B "$GITHUB_WORKSPACE/source/scripts/ci-financial-p59b-reuse.py" verify \
-            "$GITHUB_WORKSPACE/source" "$GITHUB_WORKSPACE/P59b" "$GITHUB_WORKSPACE/H69"
-      - name: Fresh H69 tests image and synthetic runtime using verified P59b native binaries
-        id: p59b_reuse_runtime
-        if: steps.mode.outputs.gate == 'financial-semantic-p59b-reuse'
-        timeout-minutes: 200
-        shell: bash
-        run: |
-          set -euo pipefail
-          env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
-            RUNNER_OS="$RUNNER_OS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
-            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REF="$GITHUB_REF" \
-            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_SHA="$GITHUB_SHA" \
-            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" GITHUB_JOB="$GITHUB_JOB" \
-            python3 -I -B "$GITHUB_WORKSPACE/source/scripts/ci-financial-p59b-reuse.py" run \
-            "$GITHUB_WORKSPACE/source" "$GITHUB_WORKSPACE/P59b" "$GITHUB_WORKSPACE/H69"
-      - name: Always reconcile fixed P59b reuse resources using independently pinned cleanup
-        if: always() && steps.mode.outputs.gate == 'financial-semantic-p59b-reuse'
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          set -euo pipefail
-          env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
-            RUNNER_OS="$RUNNER_OS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
-            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REF="$GITHUB_REF" \
-            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_SHA="$GITHUB_SHA" \
-            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" GITHUB_JOB="$GITHUB_JOB" \
-            python3 -I -B "$GITHUB_WORKSPACE/source/scripts/ci-financial-p59b-reuse.py" cleanup "$GITHUB_WORKSPACE/source"
-      - name: Remove exact fixed P59b acquisition directory (no runtime output upload)
-        if: always() && steps.mode.outputs.gate == 'financial-semantic-p59b-reuse'
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,5}$ ]]
-          directory="$RUNNER_TEMP/wholepact-financial-p59b-download-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          test ! -L "$directory"
-          rm -rf -- "$directory"
-      - name: Fixed P59b reuse evidence boundary after runtime and all cleanup
-        if: success() && steps.mode.outputs.gate == 'financial-semantic-p59b-reuse' && steps.p59b_reuse_runtime.outcome == 'success'
-        shell: bash
-        run: |
-          echo 'Fresh exact H69 Python tests and semantic-assisted synthetic external-Witness runtime passed using verified P59b native binaries. Native producer is P59b 6dab2eb6e4ef29b74f54b5678ac3815276b72490, runtime harness is H69 c190ff60a11b60f6b9f923248f91a00e97826d1e, and this event is the independent launcher. Unchanged P59b native gates were reused, not rerun or freshly compiled for H69. Both owned runtime cleanup and independent cleanup passed; the acquisition directory was removed. No pixel-only UI, full-product, public-chain, deployment or dispatch claim is made.' >> "$GITHUB_STEP_SUMMARY"
       - name: Fetch exact independent producer P and reviewed harness H without credentials
         if: steps.mode.outputs.gate == 'financial-semantic-reuse' || steps.mode.outputs.gate == 'financial-preparation-diagnostic'
         shell: bash

@@ -98,7 +98,7 @@ pub use bootstrap::FinancialWitnessPurposeV1;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 pub use financial_history_data::{FinancialHistoryInputsV1,FinancialHistoryReadBindingV1,FinancialHistoryPresentationV1,FINANCIAL_HISTORY_PURPOSE,FINANCIAL_HISTORY_MODE};
 #[cfg(feature = "coordinated-financial-workflow-v1")]
-pub use financial_history_origin::{WitnessFinancialHistoryOriginV1,WitnessFinancialHistorySetupV1,WitnessFinancialHistoryServeV1,FinancialHistoryRequestV1};
+pub use financial_history_origin::{WitnessFinancialHistoryOriginV1,WitnessFinancialHistorySetupV1,WitnessFinancialHistoryServeV1,FinancialHistoryRequestV1,HistoryFailureStageV1,HistoryFailureClassV1};
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 pub use financial_signing_data::{FinancialSigningInputsV1,FinancialSigningOriginalV1,FinancialSigningPresentationV1,FinancialSigningServiceV1,FINANCIAL_SIGNING_PURPOSE,FINANCIAL_SIGNING_MODE};
 #[cfg(feature = "coordinated-financial-workflow-v1")]
@@ -286,7 +286,7 @@ pub use financial_observer::financial_ci_clear_host_view;
 #[cfg(wholepact_financial_rendered_host_semantic_ci)]
 pub mod financial_ci_failure_boundary;
 #[cfg(wholepact_financial_rendered_host_semantic_ci)]
-pub use financial_observer::financial_ci_flush_failure_boundaries;
+pub use financial_observer::{financial_ci_flush_failure_boundaries,financial_ci_flush_failure_before_owned_cleanup};
 
 #[cfg(wholepact_financial_rendered_host_semantic_ci)]
 pub mod financial_ci_host_diagnostics;

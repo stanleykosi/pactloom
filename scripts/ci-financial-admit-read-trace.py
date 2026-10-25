@@ -338,7 +338,7 @@ def generate(source,out):
     scope=texts['actor'][scope_start:texts['actor'].index(terminal)+len(terminal)]
     reporter='impl Reporter {\n'+item(texts['diagnostic'],'pub(crate) fn flush_failure(')+'\n}'
     close='\n'.join(item(texts['core'],key) for key in ['pub(super) fn close(&self)','pub(super) fn close_with_failure_observation','fn close_after_restriction'])
-    observer='\n'.join(item(texts['observer'],key) for key in ['pub(crate) fn financial_ci_flush_actor_failure_before_edge_close()', 'fn best_effort_actor_observation('])
+    observer='\n'.join(item(texts['observer'],key) for key in ['pub(crate) fn financial_ci_flush_actor_failure_before_edge_close()', 'pub(crate) fn best_effort_diagnostic_append(', 'fn best_effort_actor_observation('])
     hook=item(texts['final'],'pub fn financial_ci_close_for_failed_admit_read_v1(')
     final_drop=item(texts['final'],'impl Drop for SignerV3AdmitReadFinalV1 {')
     declarations='\n'.join(visibility(item(texts[key],needle)) for key,needle in [

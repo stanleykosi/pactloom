@@ -89,6 +89,7 @@ def check_signer_absence(root,env):
     return done
 # Exact reviewed maintained names; no caller-controlled selector.
 HANDOFF_SECURITY_TESTS=(
+    'native_ui::runtime::financial_v1::coordinated_v3_delivery::coordinated_delivery_admission_v1::ready_disconnect_tests::ready_disconnect_preserves_pending_worker_error_and_panic_without_fabricating_ready',
     'consent_journal::authority::coordinated_preconstruction_v1::handoff_security_tests::handoff_mint_rejects_either_missing_original_nonce',
     'consent_journal::authority::coordinated_preconstruction_v1::handoff_security_tests::handoff_mint_rejects_either_expired_original_nonce',
     'consent_journal::authority::coordinated_preconstruction_v1::handoff_security_tests::handoff_mint_rejects_either_receipt_wall_expiry_or_rollback',

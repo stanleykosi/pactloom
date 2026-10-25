@@ -15,8 +15,52 @@ use std::{
 use wholepact_financial_coordinator_origin::{
     FinancialHistoryPresentationV1 as Presentation, FinancialHistoryRequestV1 as Request,
     WitnessFinancialHistoryOriginV1 as Origin, WitnessFinancialHistoryServeV1 as Serve,
-    WitnessFinancialHistorySetupV1 as Setup, FINANCIAL_HISTORY_MODE, FINANCIAL_HISTORY_PURPOSE,
+    WitnessFinancialHistorySetupV1 as Setup, HistoryFailureStageV1, HistoryFailureClassV1,
+    FINANCIAL_HISTORY_MODE, FINANCIAL_HISTORY_PURPOSE,
 };
+// This bridge is deliberately always compiled with the history role: only the
+// receiving Origin crate owns the semantic cfg. No diagnostic result is used.
+macro_rules! history_io {
+    ($origin:expr, $stage:ident, $operation:expr) => {{
+        let result = $operation;
+        if let Err(error) = &result {
+            $origin.observe_history_io_failure_detail_v1(HistoryFailureStageV1::$stage, error.kind());
+        }
+        result
+    }};
+}
+fn history_authority_error(origin: &Origin, stage: HistoryFailureStageV1, error: AuthorityError) -> AuthorityError {
+    origin.observe_history_failure_detail_v1(stage, history_authority_class(&error));
+    error
+}
+fn history_authority_class(error: &AuthorityError) -> HistoryFailureClassV1 {
+    match error {
+        AuthorityError::InvalidBinding => HistoryFailureClassV1::InvalidBinding,
+        AuthorityError::Permission => HistoryFailureClassV1::Permission,
+        AuthorityError::StaleHead => HistoryFailureClassV1::StaleHead,
+        AuthorityError::Conflict => HistoryFailureClassV1::Conflict,
+        AuthorityError::Inactive => HistoryFailureClassV1::Inactive,
+        AuthorityError::RecoveryRequired => HistoryFailureClassV1::RecoveryRequired,
+        AuthorityError::Expired => HistoryFailureClassV1::Expired,
+        AuthorityError::PolicyDenied => HistoryFailureClassV1::PolicyDenied,
+        AuthorityError::BudgetExceeded => HistoryFailureClassV1::BudgetExceeded,
+        AuthorityError::InputReserved => HistoryFailureClassV1::InputReserved,
+        AuthorityError::ObligationReserved => HistoryFailureClassV1::ObligationReserved,
+        AuthorityError::Limit => HistoryFailureClassV1::Limit,
+        AuthorityError::Storage => HistoryFailureClassV1::Storage,
+        AuthorityError::CorruptHistory => HistoryFailureClassV1::CorruptHistory,
+        AuthorityError::PermanentStopUnavailable => HistoryFailureClassV1::PermanentStopUnavailable,
+        AuthorityError::OfflineHistoryUnsupported => HistoryFailureClassV1::OfflineHistoryUnsupported,
+        AuthorityError::ConstructionHistoryUnsupported => HistoryFailureClassV1::ConstructionHistoryUnsupported,
+        AuthorityError::UnsupportedVersion => HistoryFailureClassV1::UnsupportedVersion,
+        AuthorityError::Authentication => HistoryFailureClassV1::Authentication,
+        AuthorityError::Uncertain => HistoryFailureClassV1::Uncertain,
+        AuthorityError::ResolutionUnavailable => HistoryFailureClassV1::ResolutionUnavailable,
+        AuthorityError::SessionRequired => HistoryFailureClassV1::SessionRequired,
+        AuthorityError::SessionPending => HistoryFailureClassV1::SessionPending,
+    }
+}
+
 const POLL: Duration = Duration::from_millis(5);
 const MAX_PAGES: usize = 4096;
 const MAX_ENTRIES: usize = 65536;
@@ -55,35 +99,35 @@ fn monitor(owned: &mut super::coordinated_service_worker_v1::ServiceWorkerOwnerV
     let mut disposed = false;
     let mut failure_reported = false;
     let mut ordered_terminal = false;
+    let mut pending_currentness = None;
     loop {
-        origin
-            .check_original_coordinator_alive()
+        history_io!(origin, HistoryMonitorCheck, origin.check_original_coordinator_alive())
             .map_err(|_| AuthorityError::Permission)?;
         if terminal {
             if Instant::now()
-                >= origin
-                    .original_cleanup_deadline()
+                >= history_io!(origin, HistoryCleanupDeadline, origin.original_cleanup_deadline())
                     .map_err(|_| AuthorityError::Permission)?
             {
                 // A blocked worker cannot be joined honestly. The actual role
                 // exits unsuccessfully; it MUST NOT send a disposal receipt.
-                return Err(AuthorityError::Expired);
+                return Err(history_authority_error(origin, HistoryFailureStageV1::HistoryCleanupDeadline, AuthorityError::Expired));
             }
-        } else if origin.check_current().is_err() {
+        } else if let Err(error) = origin.check_current() {
+            // A later ordered stop can legitimately consume this handled error.
+            // Retain only a finite kind until the existing failure-send branch.
+            pending_currentness = Some(error.kind());
             origin.restrict();
             stopped.store(true, Ordering::Release);
             terminal = true;
-            origin
-                .retain_cleanup_deadline(origin.session_deadline())
+            history_io!(origin, HistoryCleanupRetain, origin.retain_cleanup_deadline(origin.session_deadline()))
                 .map_err(|_| AuthorityError::Permission)?;
         }
-        match origin
-            .try_receive()
+        match history_io!(origin, HistoryRequestReceive, origin.try_receive())
             .map_err(|_| AuthorityError::Permission)?
         {
             Some(Request::PrepareOnce(setup)) => {
                 if started || terminal {
-                    return Err(AuthorityError::Permission);
+                    return Err(history_authority_error(origin, HistoryFailureStageV1::HistoryRequestOrder, AuthorityError::Permission));
                 }
                 started = true;
                 let (tx, rx) = mpsc::sync_channel(1);
@@ -94,18 +138,18 @@ fn monitor(owned: &mut super::coordinated_service_worker_v1::ServiceWorkerOwnerV
                     thread::Builder::new()
                         .name("original-owner-history".into())
                         .spawn(move || worker_main(setup, rx, events, stop))
-                        .map_err(|_| AuthorityError::Storage)?,
+                        .map_err(|_| history_authority_error(origin, HistoryFailureStageV1::HistoryWorkerStart, AuthorityError::Storage))?,
                 );
             }
             Some(Request::Serve(grant)) => {
                 if terminal || !prepared {
-                    return Err(AuthorityError::Permission);
+                    return Err(history_authority_error(origin, HistoryFailureStageV1::HistoryRequestOrder, AuthorityError::Permission));
                 }
                 serve_tx
                     .take()
-                    .ok_or(AuthorityError::Permission)?
+                    .ok_or_else(|| history_authority_error(origin, HistoryFailureStageV1::HistoryServeHandoff, AuthorityError::Permission))?
                     .try_send(grant)
-                    .map_err(|_| AuthorityError::Permission)?;
+                    .map_err(|_| history_authority_error(origin, HistoryFailureStageV1::HistoryServeHandoff, AuthorityError::Permission))?;
             }
             Some(Request::FinishRead | Request::Cancel) => {
                 // Origin already latched its genuine local restriction before
@@ -113,14 +157,14 @@ fn monitor(owned: &mut super::coordinated_service_worker_v1::ServiceWorkerOwnerV
                 stopped.store(true, Ordering::Release);
                 terminal = true;
                 ordered_terminal = true;
+                pending_currentness = None;
                 drop(serve_tx.take());
             }
             Some(Request::ClosePurpose) => {
                 if !disposed {
-                    return Err(AuthorityError::Permission);
+                    return Err(history_authority_error(origin, HistoryFailureStageV1::HistoryRequestOrder, AuthorityError::Permission));
                 }
-                origin
-                    .send_purpose_closed()
+                history_io!(origin, HistoryPurposeClosedSend, origin.send_purpose_closed())
                     .map_err(|_| AuthorityError::Permission)?;
                 return Ok(());
             }
@@ -129,47 +173,49 @@ fn monitor(owned: &mut super::coordinated_service_worker_v1::ServiceWorkerOwnerV
         match event_rx.try_recv() {
             Ok(WorkerEvent::Prepared(data)) => {
                 if prepared {
-                    return Err(AuthorityError::Permission);
+                    return Err(history_authority_error(origin, HistoryFailureStageV1::HistoryEventOrder, AuthorityError::Permission));
                 }
                 if !terminal {
-                    origin
-                        .send_display(data)
+                    history_io!(origin, HistoryDisplaySend, origin.send_display(data))
                         .map_err(|_| AuthorityError::Permission)?;
                     prepared = true;
                 }
             }
             Ok(WorkerEvent::Serving) => {
                 if !terminal {
-                    origin
-                        .acknowledge_serving()
+                    history_io!(origin, HistoryServingSend, origin.acknowledge_serving())
                         .map_err(|_| AuthorityError::Permission)?;
                 }
             }
             Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => return Err(AuthorityError::Permission),
+            Err(TryRecvError::Disconnected) => return Err(history_authority_error(origin, HistoryFailureStageV1::HistoryEventOrder, AuthorityError::Permission)),
         }
         if worker.as_ref().is_some_and(JoinHandle::is_finished) {
             // Join consumes the only handle. All worker locals are already
             // dropped, including accepted socket and protected source custody.
             let result = worker
                 .take()
-                .ok_or(AuthorityError::Storage)?
+                .ok_or_else(|| history_authority_error(origin, HistoryFailureStageV1::HistoryWorkerJoin, AuthorityError::Storage))?
                 .join()
-                .map_err(|_| AuthorityError::Storage)?;
+                .map_err(|_| history_authority_error(origin, HistoryFailureStageV1::HistoryWorkerJoin, AuthorityError::Storage))?;
             if result.is_err() && !terminal {
+                // Only this existing failure branch may enable the worker detail.
+                // Ordered FinishRead/Cancel deliberately suppress worker errors.
+                origin.observe_history_failure_detail_v1(HistoryFailureStageV1::HistoryWorkerFailure,
+                    history_authority_class(result.as_ref().unwrap_err()));
                 origin.restrict();
                 stopped.store(true, Ordering::Release);
                 terminal = true;
-                if prepared {
+                history_io!(origin, HistoryFailureSend, if prepared {
                     origin.send_service_failed()
                 } else {
                     origin.send_preparation_failed()
-                }
+                })
                 .map_err(|_| AuthorityError::Permission)?;
                 failure_reported = true;
             }
             if !terminal {
-                return Err(AuthorityError::Permission);
+                return Err(history_authority_error(origin, HistoryFailureStageV1::HistoryWorkerUnexpectedReturn, AuthorityError::Permission));
             }
         }
         if terminal && !disposed && worker.is_none() {
@@ -180,16 +226,18 @@ fn monitor(owned: &mut super::coordinated_service_worker_v1::ServiceWorkerOwnerV
                     thread::sleep(POLL);
                     continue;
                 }
-                if prepared {
+                if let Some(kind) = pending_currentness.take() {
+                    origin.observe_history_io_failure_detail_v1(HistoryFailureStageV1::HistoryMonitorCheck, kind);
+                }
+                history_io!(origin, HistoryFailureSend, if prepared {
                     origin.send_service_failed()
                 } else {
                     origin.send_preparation_failed()
-                }
+                })
                 .map_err(|_| AuthorityError::Permission)?;
                 failure_reported = true;
             }
-            origin
-                .send_disposed()
+            history_io!(origin, HistoryDisposedSend, origin.send_disposed())
                 .map_err(|_| AuthorityError::Permission)?;
             disposed = true;
         }

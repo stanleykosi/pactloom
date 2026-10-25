@@ -25,6 +25,112 @@ use std::{
     },
     time::Instant,
 };
+/// Content-free diagnostic bridge for the genuine history monitor. These values
+/// never grant authority, change a clock, or expose error strings. Authority has
+/// no semantic build cfg; the Origin implementation below is a production no-op.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryFailureStageV1 {
+    HistoryMonitorCheck,
+    HistoryCleanupDeadline,
+    HistoryRequestReceive,
+    HistoryRequestOrder,
+    HistoryWorkerStart,
+    HistoryServeHandoff,
+    HistoryEventOrder,
+    HistoryDisplaySend,
+    HistoryServingSend,
+    HistoryWorkerJoin,
+    HistoryWorkerFailure,
+    HistoryWorkerUnexpectedReturn,
+    HistoryFailureSend,
+    HistoryDisposedSend,
+    HistoryPurposeClosedSend,
+    HistoryCleanupRetain,
+ }
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryFailureClassV1 {
+    InvalidBinding,
+    Permission,
+    StaleHead,
+    Conflict,
+    Inactive,
+    RecoveryRequired,
+    Expired,
+    PolicyDenied,
+    BudgetExceeded,
+    InputReserved,
+    ObligationReserved,
+    Limit,
+    Storage,
+    CorruptHistory,
+    PermanentStopUnavailable,
+    OfflineHistoryUnsupported,
+    ConstructionHistoryUnsupported,
+    UnsupportedVersion,
+    Authentication,
+    Uncertain,
+    ResolutionUnavailable,
+    SessionRequired,
+    SessionPending,
+ }
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+impl HistoryFailureStageV1 {
+    fn diagnostic(self) -> crate::financial_ci_actor_diagnostics::DriverStage {
+        use crate::financial_ci_actor_diagnostics::DriverStage as D;
+        match self {
+            Self::HistoryMonitorCheck => D::HistoryMonitorCheck,
+            Self::HistoryCleanupDeadline => D::HistoryCleanupDeadline,
+            Self::HistoryRequestReceive => D::HistoryRequestReceive,
+            Self::HistoryRequestOrder => D::HistoryRequestOrder,
+            Self::HistoryWorkerStart => D::HistoryWorkerStart,
+            Self::HistoryServeHandoff => D::HistoryServeHandoff,
+            Self::HistoryEventOrder => D::HistoryEventOrder,
+            Self::HistoryDisplaySend => D::HistoryDisplaySend,
+            Self::HistoryServingSend => D::HistoryServingSend,
+            Self::HistoryWorkerJoin => D::HistoryWorkerJoin,
+            Self::HistoryWorkerFailure => D::HistoryWorkerFailure,
+            Self::HistoryWorkerUnexpectedReturn => D::HistoryWorkerUnexpectedReturn,
+            Self::HistoryFailureSend => D::HistoryFailureSend,
+            Self::HistoryDisposedSend => D::HistoryDisposedSend,
+            Self::HistoryPurposeClosedSend => D::HistoryPurposeClosedSend,
+            Self::HistoryCleanupRetain => D::HistoryCleanupRetain,
+        }
+    }
+}
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+impl HistoryFailureClassV1 {
+    fn diagnostic(self) -> crate::financial_ci_actor_diagnostics::Class {
+        use crate::financial_ci_actor_diagnostics::Class as C;
+        match self {
+            Self::InvalidBinding => C::AuthorityInvalidBinding,
+            Self::Permission => C::AuthorityPermission,
+            Self::StaleHead => C::AuthorityStaleHead,
+            Self::Conflict => C::AuthorityConflict,
+            Self::Inactive => C::AuthorityInactive,
+            Self::RecoveryRequired => C::AuthorityRecoveryRequired,
+            Self::Expired => C::AuthorityExpired,
+            Self::PolicyDenied => C::AuthorityPolicyDenied,
+            Self::BudgetExceeded => C::AuthorityBudgetExceeded,
+            Self::InputReserved => C::AuthorityInputReserved,
+            Self::ObligationReserved => C::AuthorityObligationReserved,
+            Self::Limit => C::AuthorityLimit,
+            Self::Storage => C::AuthorityStorage,
+            Self::CorruptHistory => C::AuthorityCorruptHistory,
+            Self::PermanentStopUnavailable => C::AuthorityPermanentStopUnavailable,
+            Self::OfflineHistoryUnsupported => C::AuthorityOfflineHistoryUnsupported,
+            Self::ConstructionHistoryUnsupported => C::AuthorityConstructionHistoryUnsupported,
+            Self::UnsupportedVersion => C::AuthorityUnsupportedVersion,
+            Self::Authentication => C::AuthorityAuthentication,
+            Self::Uncertain => C::AuthorityUncertain,
+            Self::ResolutionUnavailable => C::AuthorityResolutionUnavailable,
+            Self::SessionRequired => C::AuthoritySessionRequired,
+            Self::SessionPending => C::AuthoritySessionPending,
+        }
+    }
+}
+
 const SETUP: u8 = 1;
 const REVIEW: u8 = 2;
 const SERVING: u8 = 3;
@@ -268,6 +374,32 @@ impl WitnessFinancialHistoryOriginV1 {
             setup.setup_current()
         } else {
             self.core.action()
+        }
+    }
+
+    /// Detail only: expected ordered stop errors never enable a failure record.
+    /// The genuine monitor calls this before its existing error conversion.
+    #[doc(hidden)]
+    pub fn observe_history_failure_detail_v1(&self, stage: HistoryFailureStageV1, class: HistoryFailureClassV1) {
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        crate::financial_ci_actor_diagnostics::driver_detail(stage.diagnostic(), class.diagnostic());
+        #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
+        let _ = (stage, class);
+    }
+    #[doc(hidden)]
+    pub fn observe_history_io_failure_detail_v1(&self, stage: HistoryFailureStageV1, kind: std::io::ErrorKind) {
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        crate::financial_ci_actor_diagnostics::driver_detail(stage.diagnostic(), crate::financial_ci_actor_diagnostics::classify_io(kind));
+        #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
+        let _ = (stage, kind);
+    }
+    /// Called only after the existing failure-send branch published restriction.
+    /// A busy writer or failed append cannot replace the original cleanup/error.
+    fn observe_reported_history_failure(&self) {
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        {
+            crate::financial_ci_actor_diagnostics::mark_failed();
+            crate::financial_observer::financial_ci_flush_actor_failure_before_edge_close();
         }
     }
 
@@ -575,6 +707,7 @@ impl WitnessFinancialHistoryOriginV1 {
         }
         self.core.restrict();
         self.failed = true;
+        self.observe_reported_history_failure();
         self.first_cleanup()?;
         let setup = self
             .setup
@@ -590,6 +723,7 @@ impl WitnessFinancialHistoryOriginV1 {
         }
         self.core.restrict();
         self.failed = true;
+        self.observe_reported_history_failure();
         self.first_cleanup()?;
         let b = self
             .review

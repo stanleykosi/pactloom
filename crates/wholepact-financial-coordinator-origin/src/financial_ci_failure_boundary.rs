@@ -14,7 +14,7 @@ macro_rules! codes {
     };
 }
 codes!(Ui {Unobserved, ViewportMissing, FocusLost, Blur, Escape, CloseRequested, InputGuardRejected, ObserverRejected, DriverRestrictionObserved, NativeCheckRejected, FinishedObserved, HostTransportRejected, HostOutputRejected, HostContextChanged, PublicInputRejected, NormalProofRejected, OtherUiRestriction});
-codes!(Driver {Unobserved, OriginalTreeCheckError, SessionExpired, EndpointRestrictionObserved, CommandChannelDisconnected, CommandOperationError, CancelSendError, SourceReceiveError, HistoryReceiveError, SigningReceiveError, PairReceiveError, OutcomeChannelFull, OutcomeChannelDisconnected, WorkErrorUnclassified});
+codes!(Driver {Unobserved, OriginalTreeCheckError, SessionExpired, EndpointRestrictionObserved, CommandChannelDisconnected, CommandOperationError, CancelSendError, SourceReceiveError, HistoryReceiveError, SigningReceiveError, PairReceiveError, OutcomeChannelFull, OutcomeChannelDisconnected, WorkErrorUnclassified,HistoryRetainedReceiveError,HistoryFinishError,HistoryServiceFailedObserved,HistoryRetirementPrepareError,HistoryRetirementError});
 codes!(Transport {Unobserved, RestrictedObserved, InputChannelDisconnected, QueueInputRejected, StatusFull, StatusDisconnected, OutputChannelDisconnected, CoreCheckRejected, PtyOutputEof, PtyReadError, PtyWriteError, PtyOwnerMismatch, PtyHostLifetimeLost, PtyModeRejected});
 codes!(Core {Unobserved, CustodyMismatch, AlreadyClosedObserved, PeerProcessExit, PeerProcessPollError, PeerEdgeClosed, PeerEdgePollError, RootProcessExit, RootProcessPollError, SessionExpired});
 
@@ -117,6 +117,17 @@ mod tests {
         r.flush(s.sample(11),|_|Err(()));original_cleanup+=1;
         s.latch(11,Boundary::Driver(Driver::WorkErrorUnclassified));r.flush(s.sample(11),|_|panic!("retry"));
         assert_eq!(original_cleanup,1);assert_eq!(r.attempts,1);assert!(r.failed);
+    }
+    #[test] fn early_append_panic_keeps_attempted_state_and_never_retries() {
+        let s=state();s.latch(11,Boundary::Driver(Driver::HistoryFinishError));
+        let mut reporter=Reporter::default();let mut calls=0;
+        reporter.flush(s.sample(11),|_|crate::financial_observer::best_effort_diagnostic_append(|| {
+            calls+=1;panic!("synthetic uncertain diagnostic append");
+        }));
+        assert_eq!(calls,1);assert!(reporter.failed);assert_eq!(reporter.attempts,1);
+        s.latch(11,Boundary::Ui(Ui::OtherUiRestriction));
+        reporter.flush(s.sample(11),|_|panic!("uncertain append retried"));
+        assert_eq!(calls,1);
     }
     #[test] fn rewrites_are_never_emitted() {let mut r=Reporter::default();r.flush(Snapshot([1,0,0,0]),|_|Ok(()));r.flush(Snapshot([2,1,0,0]),|_|panic!("rewrite"));assert_eq!(r.attempts,1);}
     #[test] fn concurrent_latches_never_rewrite_a_slot() {
