@@ -69,7 +69,19 @@ UI_REPAINT_INSERTED = '        // Poll inside every egui pass, including retirem
 UI_REPAINT_TEST_INCLUDE = '\n#[cfg(test)]\n#[path = "financial_source_ui/repaint_tests.rs"]\nmod repaint_tests;\n'
 UI_REPAINT_BOTTOM = '        ctx.request_repaint_after(Duration::from_millis(20));\n'
 UI_REPAINT_BOUNDARY = '    }\n    fn apply_intent(&mut self, intent: Intent, frame: u64, ctx: &egui::Context) -> Result<()> {'
+# Exact P72 ordinary-selector routing delta; no source region is ignored.
+UI_SELECTOR_EXPORT_CURRENT_SHA = 'a04c0d0394c63ffe1e93ca1a1f7295c570e5346576c9f018fc2f00dd8ffd88ce'
+UI_SELECTOR_EXPORT_INVERSE_PAIRS = (('                | Phase::FinancialSetupConfiguring\n        ) {\n            ctx.input_mut(|input| {\n                scrub_unrequested_payloads(&mut input.events);', '                | Phase::FinancialSetupConfiguring\n        ) || selector_export_phase(painted_phase) {\n            ctx.input_mut(|input| {\n                scrub_unrequested_payloads(&mut input.events);'), ('        } else if self.phase == Phase::Configuring && self.focused_last && !self.native.is_revoked()\n        {\n            if !selector_events_bounded(&raw.events) {', '        } else if (self.phase == Phase::Configuring && self.focused_last && !self.native.is_revoked())\n            || selector_export_input_allowed(\n                self.phase,\n                self.focused_last,\n                self.native.is_revoked(),\n                self.host_entry,\n                self.retained_continue.iter().any(Option::is_some)\n                    || self.result_selectors.iter().any(Option::is_some),\n            )\n        {\n            if !selector_events_bounded(&raw.events) {'), ('', 'fn selector_export_phase(phase: Phase) -> bool {\n    matches!(phase, Phase::SetupNeeded | Phase::Selecting | Phase::SignCommitted\n        | Phase::SignedRetired | Phase::ReturnCompleted)\n}\nfn selector_export_input_allowed(\n    phase: Phase,\n    focused: bool,\n    revoked: bool,\n    host_entry: HostEntry,\n    has_selector: bool,\n) -> bool {\n    // Ordinary destinations for actual retained metadata only. Protected input\n    // routing stays first; editing a path is not consent or a deadline renewal.\n    selector_export_phase(phase) && focused && !revoked\n        && !host_entry_blocks_source(host_entry) && has_selector\n}\n'), ('', '\n#[cfg(test)]\n#[path = "financial_source_ui/selector_export_tests.rs"]\nmod selector_export_tests;\n'))
+def restore_selector_export_ui(text):
+    assert hashlib.sha256(text.encode()).hexdigest()==UI_SELECTOR_EXPORT_CURRENT_SHA
+    for before,after in reversed(UI_SELECTOR_EXPORT_INVERSE_PAIRS):
+        assert text.count(after)==1
+        text=text.replace(after,before,1)
+    assert hashlib.sha256(text.encode()).hexdigest()==UI_REPAINT_CURRENT_SHA
+    return text
+
 def restore_ui_repaint(text):
+    text=restore_selector_export_ui(text)
     assert hashlib.sha256(text.encode()).hexdigest()==UI_REPAINT_CURRENT_SHA
     assert text.count(UI_REPAINT_INSERTED)==1 and text.count(UI_REPAINT_TEST_INCLUDE)==1
     assert text.count(UI_REPAINT_BOUNDARY)==1

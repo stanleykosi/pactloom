@@ -5544,7 +5544,7 @@ impl Window {
                 | Phase::V3Configuring
                 | Phase::V3OwnerConfiguring
                 | Phase::FinancialSetupConfiguring
-        ) {
+        ) || selector_export_phase(painted_phase) {
             ctx.input_mut(|input| {
                 scrub_unrequested_payloads(&mut input.events);
                 scrub_unrequested_payloads(&mut input.raw.events);
@@ -7059,7 +7059,15 @@ impl eframe::App for Window {
                 self.revoke("V3 public selection event exceeded fixed bounds.");
                 scrub_unrequested_payloads(&mut raw.events);
             }
-        } else if self.phase == Phase::Configuring && self.focused_last && !self.native.is_revoked()
+        } else if (self.phase == Phase::Configuring && self.focused_last && !self.native.is_revoked())
+            || selector_export_input_allowed(
+                self.phase,
+                self.focused_last,
+                self.native.is_revoked(),
+                self.host_entry,
+                self.retained_continue.iter().any(Option::is_some)
+                    || self.result_selectors.iter().any(Option::is_some),
+            )
         {
             if !selector_events_bounded(&raw.events) {
                 if self.phase != Phase::Finished { boundary!(Ui, PublicInputRejected); }
@@ -7199,6 +7207,22 @@ fn selectors_valid(p: &FinancialWitnessInputsV1) -> bool {
         ]
         .iter()
         .all(|v| v.starts_with('/'))
+}
+fn selector_export_phase(phase: Phase) -> bool {
+    matches!(phase, Phase::SetupNeeded | Phase::Selecting | Phase::SignCommitted
+        | Phase::SignedRetired | Phase::ReturnCompleted)
+}
+fn selector_export_input_allowed(
+    phase: Phase,
+    focused: bool,
+    revoked: bool,
+    host_entry: HostEntry,
+    has_selector: bool,
+) -> bool {
+    // Ordinary destinations for actual retained metadata only. Protected input
+    // routing stays first; editing a path is not consent or a deadline renewal.
+    selector_export_phase(phase) && focused && !revoked
+        && !host_entry_blocks_source(host_entry) && has_selector
 }
 fn selector_events_bounded(events: &[egui::Event]) -> bool {
     let mut bytes = 0usize;
@@ -9550,3 +9574,7 @@ mod normal_finish_tail_tests {
 #[cfg(test)]
 #[path = "financial_source_ui/repaint_tests.rs"]
 mod repaint_tests;
+
+#[cfg(test)]
+#[path = "financial_source_ui/selector_export_tests.rs"]
+mod selector_export_tests;

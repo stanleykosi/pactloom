@@ -42,6 +42,7 @@ REPAINT_TESTS=(
     'financial_source_ui::repaint_tests::draw_poll_request_precedes_every_early_return',
 )
 COORDINATOR_DIAGNOSTIC_TESTS=('financial_source_driver::history_retirement_detail_tests::retirement_handoff_observation_preserves_operation_and_original_io_error',)
+SELECTOR_EXPORT_TESTS=('financial_source_ui::selector_export_tests::export_payloads_reach_focused_textedit_only_after_native_gate', 'financial_source_ui::selector_export_tests::export_input_gate_denies_wrong_phase_focus_revocation_host_and_missing_selector', 'financial_source_ui::selector_export_tests::export_payload_bounds_prevent_normalization_and_preserve_path_limit', 'financial_source_ui::selector_export_tests::export_routing_is_bound_to_native_fields_and_postpass_scrub')
 def coordinator_test_executable(raw,target):
     rows=[json.loads(line) for line in raw.splitlines() if line.startswith(b'{')]
     packages={};executables=[]
@@ -76,8 +77,9 @@ def coordinator_test_executable(raw,target):
 def run_coordinator_tests(root,env):
     assert len(REPAINT_TESTS)==2 and len(set(REPAINT_TESTS))==2
     assert len(COORDINATOR_DIAGNOSTIC_TESTS)==1
-    names=REPAINT_TESTS+COORDINATOR_DIAGNOSTIC_TESTS
-    assert len(set(names))==3
+    assert len(SELECTOR_EXPORT_TESTS)==4
+    names=REPAINT_TESTS+COORDINATOR_DIAGNOSTIC_TESTS+SELECTOR_EXPORT_TESTS
+    assert len(set(names))==7
     selected=S.select_build_environment(env,'coordinator-observed',S.A.SEMANTIC_PROFILE)
     args=['rustup','run','1.99.0','cargo','test','--locked','--bin','wholepact-financial-coordinator','--no-run','--no-default-features','--message-format=json','-p','wholepact-financial-coordinator','--features',','.join(S.A.RECIPE['artifact_features']['coordinator-observed'])]
     raw=S.checked(args,'compile',env=selected,seconds=900,limit=32*1024*1024)
@@ -92,10 +94,11 @@ def run_coordinator_tests(root,env):
     for name in names:
         output=fixed([str(executable),'--exact',name,'--test-threads=1'])
         assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in output
-        marker='CI_REPAINT_TEST ' if name in REPAINT_TESTS else 'CI_RETIREMENT_HANDOFF_TEST '
+        marker='CI_REPAINT_TEST ' if name in REPAINT_TESTS else 'CI_RETIREMENT_HANDOFF_TEST ' if name in COORDINATOR_DIAGNOSTIC_TESTS else 'CI_SELECTOR_EXPORT_TEST '
         print(marker+json.dumps(dict(name=name,passed=True,ignored=0),sort_keys=True))
     print('CI_REPAINT_TESTS '+json.dumps(dict(actual_maintained_tests=len(REPAINT_TESTS),passed=True,headless_egui=True,fullflow=False),sort_keys=True))
     print('CI_RETIREMENT_HANDOFF_TESTS '+json.dumps(dict(actual_maintained_tests=len(COORDINATOR_DIAGNOSTIC_TESTS),passed=True,fullflow=False),sort_keys=True))
+    print('CI_SELECTOR_EXPORT_TESTS '+json.dumps(dict(actual_maintained_tests=len(SELECTOR_EXPORT_TESTS),passed=True,headless_egui=True,fullflow=False),sort_keys=True))
     return len(names)
 
 SIGNER_SCRIPTS=('wholepact-financial-coordinator-origin','wholepact-signer')
@@ -539,7 +542,7 @@ def main():
         args+=['--features',','.join(FEATURES)]
         raw=S.checked(args,'compile',env=selected,seconds=900,limit=32*1024*1024)
         validate(raw,root/'target-shared');executed=run_handoff_security_tests(root,env);intent_executed=run_intent_validation_tests(root,env);fixture_executed=run_fixture_lifetime_tests(root,env);absence=check_signer_absence(root,env);S.exact_source(sha)
-        print('CI_CLOSE_PREFLIGHT_CONTEXTS '+json.dumps(dict(schema_version=2,actual_test_contexts=list(PACKAGES),actual_semantic_script_crates=list(SCRIPTS),typecheck_passed=True,coordinator_selected_tests_executed=coordinator_executed,repaint_schedule_tests_executed=len(REPAINT_TESTS),retirement_handoff_tests_executed=len(COORDINATOR_DIAGNOSTIC_TESTS),signer_observed_api_absent_profiles=absence,selected_maintained_tests_executed=executed,intent_validation_tests_executed=intent_executed,fixture_lifetime_maintained_tests_executed=fixture_executed,full_native_execution=False,fullflow=False),sort_keys=True))
+        print('CI_CLOSE_PREFLIGHT_CONTEXTS '+json.dumps(dict(schema_version=2,actual_test_contexts=list(PACKAGES),actual_semantic_script_crates=list(SCRIPTS),typecheck_passed=True,coordinator_selected_tests_executed=coordinator_executed,repaint_schedule_tests_executed=len(REPAINT_TESTS),retirement_handoff_tests_executed=len(COORDINATOR_DIAGNOSTIC_TESTS),selector_export_tests_executed=len(SELECTOR_EXPORT_TESTS),signer_observed_api_absent_profiles=absence,selected_maintained_tests_executed=executed,intent_validation_tests_executed=intent_executed,fixture_lifetime_maintained_tests_executed=fixture_executed,full_native_execution=False,fullflow=False),sort_keys=True))
     except S.Failure as error:
         # Pre-credential compiler text only; same bounded sanitizer as fresh build.
         try:

@@ -1,14 +1,14 @@
-name: UI in-pass repaint preflight only
+name: Public selector input preflight only
 on:
   push:
-    branches: [checkpoint/ui-repaint-preflight-p71]
+    branches: [checkpoint/selector-input-preflight-p72]
 permissions: {}
 concurrency:
-  group: ui-repaint-preflight-p71
+  group: selector-input-preflight-p72
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/ui-repaint-preflight-p71' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/selector-input-preflight-p72' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -202,7 +202,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/ui-repaint-preflight-p71' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/selector-input-preflight-p72' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
