@@ -62,6 +62,7 @@ def main():
   if relative.endswith("/signer_continue_state.rs"):
    raw=prior.restore_shared_wall_regression(raw)
   if relative.endswith('/financial_ci_actor.rs'):
+   raw=prior.restore_original_failure_cause(raw,'signer_actor')
    assert raw.count(TEST_PEEK)==1
    raw=raw.replace(TEST_PEEK,'')
   assert hashlib.sha256(raw.encode()).hexdigest()==expected,relative

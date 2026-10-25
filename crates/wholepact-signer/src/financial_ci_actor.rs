@@ -242,3 +242,104 @@ mod admit_read_observation_tests {
 pub(crate) fn admit_read_detail_for_test() -> Option<(DriverStage, Class)> {
     ADMIT_READ_DETAIL.with(|slot| slot.get().flatten())
 }
+
+// Actual failed admission observations only; all outer error/outcome mappings
+// remain unchanged. Existing slots are first-wins and emit only under failure.
+pub(crate) fn admit_commit_failure_detail(transport_entered:bool,error:&crate::Error)->(DriverStage,Class) {
+    (if transport_entered{DriverStage::AdmitCommitAfterTransport}else{DriverStage::AdmitCommitBeforeTransport},error.finite_class())
+}
+pub(crate) fn admit_commit_failure(transport_entered:bool,error:&crate::Error) {
+    let(stage,class)=admit_commit_failure_detail(transport_entered,error);
+    diagnostic::driver(stage,class);
+}
+#[cfg(not(feature="synthetic-qualification"))]
+pub(crate) fn admit_transport_plain_result<T>(result:wholepact_authority::Result<T>,callback:Option<Class>)->wholepact_authority::Result<T> {
+    if let Err(error)=&result {
+        let callback=if *error==wholepact_authority::AuthorityError::Permission{callback}else{None};
+        diagnostic::driver(if callback.is_some(){DriverStage::AdmitTransportSourceCallback}else{DriverStage::AdmitTransport},callback.unwrap_or_else(||error.finite_class()));
+    }
+    result
+}
+#[cfg(feature="synthetic-qualification")]
+fn admit_transport_detail(
+    stage:wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryStageV1,
+    io:Option<wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryIoKindV1>,
+    error:wholepact_authority::AuthorityError,callback:Option<Class>,
+)->(DriverStage,Class) {
+    use wholepact_authority::transport::history_diagnostics_v1::{CheckedHistoryStageV1 as S,CheckedHistoryIoKindV1 as I};
+    let mapped=match stage {
+        S::CallerDeadline=>DriverStage::AdmitTransportCallerDeadline,
+        S::ExchangeDeadline=>DriverStage::AdmitTransportExchangeDeadline,
+        S::SourceCallback=>DriverStage::AdmitTransportSourceCallback,
+        S::AdmissionRequestValidation=>DriverStage::AdmitTransportRequestValidation,
+        S::AdmissionBinding=>DriverStage::AdmitTransportBinding,
+        S::AdmissionConnect=>DriverStage::AdmitTransportConnect,
+        S::AdmissionHandshake=>DriverStage::AdmitTransportHandshake,
+        S::AdmissionPeerBinding=>DriverStage::AdmitTransportPeerBinding,
+        S::AdmissionRequestBuild=>DriverStage::AdmitTransportRequestBuild,
+        S::AdmissionRequestWrite=>DriverStage::AdmitTransportRequestWrite,
+        S::AdmissionResponseRead=>DriverStage::AdmitTransportResponseRead,
+        S::AdmissionResponse=>DriverStage::AdmitTransportResponse,
+        S::AdmissionSnapshotValidation=>DriverStage::AdmitTransportSnapshotValidation,
+        S::AdmissionCommittedHeadValidation=>DriverStage::AdmitTransportCommittedHeadValidation,
+        S::AdmissionFinalValidation=>DriverStage::AdmitTransportFinalValidation,
+        _=>DriverStage::AdmitTransport,
+    };
+    let class=if stage==S::SourceCallback&&callback.is_some(){callback.unwrap()}else{match io {
+        Some(I::Timeout)=>Class::IoTimedOut,Some(I::Closed)=>Class::IoUnexpectedEof,
+        Some(I::Refused)=>Class::IoConnectionRefused,Some(I::Other)=>Class::IoOther,
+        None=>error.finite_class(),
+    }};
+    (mapped,class)
+}
+#[cfg(feature="synthetic-qualification")]
+pub(crate) fn admit_transport_diagnosed_result<T>(result:std::result::Result<T,wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryFailureV1>,callback:Option<Class>)->wholepact_authority::Result<T> {
+    result.map_err(|failure| {
+        let (stage,class)=admit_transport_detail(failure.stage(),failure.io_kind(),failure.error(),callback);
+        diagnostic::driver(stage,class);
+        // into_error() is the first observed category, NOT the original kernel
+        // return. Preserve the latter through the unchanged outer mapping.
+        failure.returned_error()
+    })
+}
+
+#[cfg(all(test,feature="synthetic-qualification"))]
+mod admit_transport_observation_tests {
+    use super::*;
+    use wholepact_authority::{AuthorityError as E,transport::history_diagnostics_v1::{CheckedHistoryStageV1 as S,CheckedHistoryIoKindV1 as I}};
+    #[test]
+    fn checked_admission_stages_and_callback_precedence_are_finite() {
+        let cases=[(S::CallerDeadline,DriverStage::AdmitTransportCallerDeadline),(S::ExchangeDeadline,DriverStage::AdmitTransportExchangeDeadline),(S::SourceCallback,DriverStage::AdmitTransportSourceCallback),
+            (S::AdmissionRequestValidation,DriverStage::AdmitTransportRequestValidation),
+            (S::AdmissionBinding,DriverStage::AdmitTransportBinding),
+            (S::AdmissionConnect,DriverStage::AdmitTransportConnect),
+            (S::AdmissionHandshake,DriverStage::AdmitTransportHandshake),
+            (S::AdmissionPeerBinding,DriverStage::AdmitTransportPeerBinding),
+            (S::AdmissionRequestBuild,DriverStage::AdmitTransportRequestBuild),
+            (S::AdmissionRequestWrite,DriverStage::AdmitTransportRequestWrite),
+            (S::AdmissionResponseRead,DriverStage::AdmitTransportResponseRead),
+            (S::AdmissionResponse,DriverStage::AdmitTransportResponse),
+            (S::AdmissionSnapshotValidation,DriverStage::AdmitTransportSnapshotValidation),
+            (S::AdmissionCommittedHeadValidation,DriverStage::AdmitTransportCommittedHeadValidation),
+            (S::AdmissionFinalValidation,DriverStage::AdmitTransportFinalValidation),
+        ];
+        for(stage,expected)in cases {assert_eq!(admit_transport_detail(stage,None,E::Expired,None),(expected,Class::AuthorityExpired));}
+        assert_eq!(admit_transport_detail(S::SourceCallback,None,E::Permission,Some(Class::JournalConflict)),(DriverStage::AdmitTransportSourceCallback,Class::JournalConflict));
+        assert_eq!(admit_transport_detail(S::AdmissionResponseRead,Some(I::Timeout),E::Uncertain,Some(Class::JournalConflict)),(DriverStage::AdmitTransportResponseRead,Class::IoTimedOut));
+        assert_eq!(admit_transport_detail(S::PageValidation,None,E::InvalidBinding,Some(Class::SignerLocked)),(DriverStage::AdmitTransport,Class::AuthorityInvalidBinding));
+        for(kind,class)in[(I::Closed,Class::IoUnexpectedEof),(I::Refused,Class::IoConnectionRefused),(I::Other,Class::IoOther)] {assert_eq!(admit_transport_detail(S::AdmissionResponseRead,Some(kind),E::Uncertain,None).1,class);}
+    }
+}
+
+#[cfg(all(test,not(feature="synthetic-qualification")))]
+mod admit_transport_plain_observation_tests {
+    use super::*;
+    #[test]
+    fn plain_admission_result_retains_success_and_original_error_variants() {
+        use wholepact_authority::AuthorityError as E;
+        assert_eq!(admit_transport_plain_result(Ok(7u8),Some(Class::JournalConflict)),Ok(7));
+        for error in [E::Permission,E::Expired,E::Authentication,E::Uncertain] {
+            assert_eq!(admit_transport_plain_result::<()>(Err(error),Some(Class::JournalConflict)),Err(error));
+        }
+    }
+}

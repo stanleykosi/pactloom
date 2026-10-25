@@ -6,7 +6,7 @@ macro_rules! codes { ($name:ident {$($code:ident),+ $(,)?}) => {
  pub enum $name {$($code),+}
  impl $name {const NAMES:&'static [&'static str]=&[$(stringify!($code)),+];}
 }; }
-codes!(Stage {TerminalSetup, OriginalCustody, RelaySetup, StartupSelection, HostOpen, CommandsPath, CommandsFileRead, CommandsDecode, CommandsCheck, Reviewer1Message, Reviewer1EndpointWait, LaterWorkflow, NormalClose, RunnerReturn, PairEndpointValidate, PairScopeValidate, PairOriginalCustody, PairConnect, PairEnableCredentials, PairVerifySigner, PairObservePeer, PairCloneObserver, PairRequestWrite, PairResponseRead, PairResponseDecode, PairResponseValidate, PairResponseDigest, PairChannelDigest, PairInitialCurrent, PairStatusOpen, PairStatusRead, PairStatusDecode, PairStatusValidate, PairFinalCurrent, DeliverySourceOpen, DeliverySourceInspection, DeliverySourcePlan, DeliveryRecipientPrepare, DeliveryExportPreview, DeliveryNativeCheck, DeliverySourceCheck, DeliverySourceScopePredicate, DeliveryProofRolePredicate, DeliveryMaterialActionPredicate, DeliveryMaterialScopePredicate, PreparationSourceBefore, PreparationApproval, PreparationSourceAfter, HistoricalApprovalDeadline, HistoricalApprovalForeground, OriginalDisclosureSelector, MaterialRestrictionCapture, PairConfirmation, ExportRecipientBinding, ExportMetadataSource, ExportMetadataMaterials, ExportMetadataApproval, ExportRecipientBind, ExportFinalApproval, ExportConsent, ExportCommit, ExportVerifiedWait, AdmissionAwaitingAudit, AdmissionUnknown, AdmissionAuditRejected, AdmissionRequestDeadline, AdmissionRequestChannel, AdmissionRequestIntent, AdmissionRequestNonce, AdmissionHistoryIntent, AdmissionHistoryOwner, AdmissionHistoryDeadline, AdmissionHistoryNonce, AdmissionHistoryOpen, AdmissionHistoryCurrent, AdmissionHistoryStatus, AdmissionHistoryPrevious, AdmissionHistoryResponseMatch, AdmissionResponseCheckBefore, AdmissionResponsePeerBefore, AdmissionResponseDeadlineBefore, AdmissionResponseFrame, AdmissionResponseCheckAfter, AdmissionResponsePeerAfter, AdmissionResponseDeadlineAfter, AdmissionResponseDecode, PreparationReadinessCheckBefore, PreparationReadinessPeerBefore, PreparationReadinessDeadlineBefore, PreparationReadinessFrame, PreparationReadinessCheckAfter, PreparationReadinessPeerAfter, PreparationReadinessDeadlineAfter, PreparationReadinessDecode});
+codes!(Stage {TerminalSetup, OriginalCustody, RelaySetup, StartupSelection, HostOpen, CommandsPath, CommandsFileRead, CommandsDecode, CommandsCheck, Reviewer1Message, Reviewer1EndpointWait, LaterWorkflow, NormalClose, RunnerReturn, PairEndpointValidate, PairScopeValidate, PairOriginalCustody, PairConnect, PairEnableCredentials, PairVerifySigner, PairObservePeer, PairCloneObserver, PairRequestWrite, PairResponseRead, PairResponseDecode, PairResponseValidate, PairResponseDigest, PairChannelDigest, PairInitialCurrent, PairStatusOpen, PairStatusRead, PairStatusDecode, PairStatusValidate, PairFinalCurrent, DeliverySourceOpen, DeliverySourceInspection, DeliverySourcePlan, DeliveryRecipientPrepare, DeliveryExportPreview, DeliveryNativeCheck, DeliverySourceCheck, DeliverySourceScopePredicate, DeliveryProofRolePredicate, DeliveryMaterialActionPredicate, DeliveryMaterialScopePredicate, PreparationSourceBefore, PreparationApproval, PreparationSourceAfter, HistoricalApprovalDeadline, HistoricalApprovalForeground, OriginalDisclosureSelector, MaterialRestrictionCapture, PairConfirmation, ExportRecipientBinding, ExportMetadataSource, ExportMetadataMaterials, ExportMetadataApproval, ExportRecipientBind, ExportFinalApproval, ExportConsent, ExportCommit, ExportVerifiedWait, AdmissionAwaitingAudit, AdmissionUnknown, AdmissionAuditRejected, AdmissionRequestDeadline, AdmissionRequestChannel, AdmissionRequestIntent, AdmissionRequestNonce, AdmissionHistoryIntent, AdmissionHistoryOwner, AdmissionHistoryDeadline, AdmissionHistoryNonce, AdmissionHistoryOpen, AdmissionHistoryCurrent, AdmissionHistoryStatus, AdmissionHistoryPrevious, AdmissionHistoryResponseMatch, AdmissionResponseCheckBefore, AdmissionResponsePeerBefore, AdmissionResponseDeadlineBefore, AdmissionResponseFrame, AdmissionResponseCheckAfter, AdmissionResponsePeerAfter, AdmissionResponseDeadlineAfter, AdmissionResponseDecode, PreparationReadinessCheckBefore, PreparationReadinessPeerBefore, PreparationReadinessDeadlineBefore, PreparationReadinessFrame, PreparationReadinessCheckAfter, PreparationReadinessPeerAfter, PreparationReadinessDeadlineAfter, PreparationReadinessDecode, RelayPump, RelayFinish});
 codes!(Class {Platform, Terminal, Permission, Locked, Invalid, Authentication, Storage, Quarantined, Unsupported, Receipt, RecoverySemantic, RecoveryBackupUnsupported, RecoveryFinancialUnsupported, CompleteOriginRecoveryUnavailable, HistoricalExportIncomplete, GenerationArchiveIncomplete, IoNotFound, IoPermissionDenied, IoInterrupted, IoWouldBlock, IoInvalidInput, IoInvalidData, IoUnexpectedEof, IoTimedOut, IoOther, BridgeBinding, BridgeConflict, BridgeMissing, BridgeUncertain, BridgeLimit, BridgePermission, BridgeRecoveryRequired, BridgeCompleteOriginRecoveryUnavailable, BridgeVerification, BridgeSignerOriginUnavailable, BridgeJournal, BridgeAuthority, BridgeWallet, BridgeIpc, FrameUnclassified, FrameDeadline, FrameEof, FrameCredentialsMissing, FrameCredentialsMismatch, FrameAncillaryRejected, FrameTruncated, FramePeerNotLive, FrameCurrentCheck, FrameIo, FrameLimit, FrameInvalidFrame, FrameInvalidBudget, EngineDisclosureUnknown, EngineDisclosureDenied, EngineRecoveryRequired, EngineIdempotencyConflict, EngineRevisionConflict, EngineDurableProposalConflict, EngineDurableConstructionUnavailable, EngineDurableProfileUnavailable, EngineResourceExhausted, EngineUnclassified, PredicateDenied});
 codes!(RelayStage {LifecycleCheck, DeadlineCheck, HostAbsent, CoordinatorLifetime, Signer1Lifetime, Signer2Lifetime, CoordinatorReceive, NormalControl, CompletedPairControl, RetirementControl, DownstreamValidation, TargetSelection, Signer1Send, Signer2Send, RetirementObservation, NormalObservation, Signer1Receive, Signer2Receive, Signer1UpstreamValidation, Signer2UpstreamValidation, CoordinatorSend, FinalLifecycleCheck});
 codes!(ReapContext {FinishPath, DropKillAttempted, RetirementTryReap});
@@ -90,6 +90,32 @@ impl Reporter {
    s.failure(101,Stage::DeliveryExportPreview,Class::EngineDisclosureDenied);
    s.failure(101,Stage::LaterWorkflow,Class::Permission);
    let facts=s.sample_failure(101).unwrap(); assert_eq!(facts.stage,Stage::NAMES[stage as usize]); assert_eq!(facts.class,"Permission");
+  }
+ }
+ #[test] fn relay_top_level_failure_preserves_inner_observation_and_first_failure() {
+  for stage in [Stage::RelayPump,Stage::RelayFinish] {
+   let s=Slots::new();s.enter(101,2);
+   s.relay(101,RelayStage::Signer1Lifetime,std::io::ErrorKind::PermissionDenied);
+   s.failure(101,stage,classify_io(std::io::ErrorKind::PermissionDenied));
+   s.failure(101,Stage::RunnerReturn,Class::IoOther);
+   let facts=s.sample_failure(101).unwrap();
+   assert_eq!(facts.stage,Stage::NAMES[stage as usize]);assert_eq!(facts.class,"IoPermissionDenied");
+   assert_eq!(facts.relay,Some(RelayFacts{stage:"Signer1Lifetime",class:"IoPermissionDenied"}));
+  }
+ }
+ #[test] fn copied_reporter_records_panicking_or_failed_append_before_second_flush() {
+  for panics in [false,true] {
+   let s=Slots::new();s.enter(101,2);s.failure(101,Stage::RelayPump,Class::IoPermissionDenied);
+   let mut stored=Reporter::default();let mut calls=0;
+   let mut reporter=stored;
+   reporter.flush(s.sample_failure(101),|_|crate::financial_observer::best_effort_diagnostic_append(|| {
+    calls+=1;if panics{panic!("synthetic Host append panic");}Err(())
+   }));
+   stored=reporter;
+   let mut reporter=stored;
+   reporter.flush(s.sample_failure(101),|_|{calls+=1;Ok(())});
+   stored=reporter;
+   assert!(stored.attempted);assert_eq!(calls,1);
   }
  }
  #[test] fn actual_wait_status_classifier() {

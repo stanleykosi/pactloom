@@ -1655,8 +1655,12 @@ fn drive(
                     CoordinatorFinancialWitnessEventV1::Disposed(role) => {
                         witness_disposed[index(*role)] = true
                     }
-                    CoordinatorFinancialWitnessEventV1::FirstFailure { .. }
-                    | CoordinatorFinancialWitnessEventV1::PreparationFailed(_)
+                    CoordinatorFinancialWitnessEventV1::FirstFailure { role, data } => {
+                        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+                        observe_reported_witness_failure(*role,*data);
+                        revoked.store(true, Ordering::Release)
+                    }
+                    CoordinatorFinancialWitnessEventV1::PreparationFailed(_)
                     | CoordinatorFinancialWitnessEventV1::Restricted(_) => {
                         revoked.store(true, Ordering::Release)
                     }
@@ -2548,5 +2552,151 @@ mod history_retirement_detail_tests {
         let error=failed.unwrap_err();assert_eq!(calls.get(),2);
         assert_eq!(error.kind(),std::io::ErrorKind::PermissionDenied);
         assert_eq!(error.to_string(),"retirement wrapper sentinel");
+    }
+}
+
+// The packet has already passed Origin's exact peer/setup and terminal-state validation.
+// These are C-observed reported W facts, not a claim of global first cause.
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+fn reported_witness_failure_detail(role:Role,data:wholepact_financial_coordinator_origin::DeliveryFailureV1)->(
+    wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::OriginStage,
+    wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::Class,
+    wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::PeerRole,
+) {
+    use wholepact_financial_coordinator_origin::{DeliveryFailureStageV1 as S,DeliveryFailureClassV1 as C,financial_ci_actor_diagnostics::{OriginStage as O,Class,PeerRole}};
+    let stage=match data.stage {
+        S::InputValidation=>O::ReportedWitnessInputValidation,
+        S::RequestDecode=>O::ReportedWitnessRequestDecode,
+        S::EndpointValidation=>O::ReportedWitnessEndpointValidation,
+        S::ServerCertificateRead=>O::ReportedWitnessServerCertificateRead,
+        S::ServerCertificateValidation=>O::ReportedWitnessServerCertificateValidation,
+        S::TrustedClientRootRead=>O::ReportedWitnessTrustedClientRootRead,
+        S::ServerPrivateKeyRead=>O::ReportedWitnessServerPrivateKeyRead,
+        S::TlsConfiguration=>O::ReportedWitnessTlsConfiguration,
+        S::ProtectedNamespaceOpen=>O::ReportedWitnessProtectedNamespaceOpen,
+        S::ListenerBind=>O::ReportedWitnessListenerBind,
+        S::ListenerConfiguration=>O::ReportedWitnessListenerConfiguration,
+        S::PreparedSourceCurrentness=>O::ReportedWitnessPreparedSourceCurrentness,
+        S::ReviewClock=>O::ReportedWitnessReviewClock,
+        S::ReviewFacts=>O::ReportedWitnessReviewFacts,
+        S::ArmCurrentness=>O::ReportedWitnessArmCurrentness,
+        S::TlsAccept=>O::ReportedWitnessTlsAccept,
+        S::TlsHandshake=>O::ReportedWitnessTlsHandshake,
+        S::TlsPeerIdentity=>O::ReportedWitnessTlsPeerIdentity,
+        S::TlsPreparation=>O::ReportedWitnessTlsPreparation,
+        S::TlsReadyWrite=>O::ReportedWitnessTlsReadyWrite,
+        S::TlsRequest=>O::ReportedWitnessTlsRequest,
+        S::FirstPreflight=>O::ReportedWitnessFirstPreflight,
+        S::PreflightRollback=>O::ReportedWitnessPreflightRollback,
+        S::FinalAdmitWait=>O::ReportedWitnessFinalAdmitWait,
+        S::SecondPreflight=>O::ReportedWitnessSecondPreflight,
+        S::FinalCurrentness=>O::ReportedWitnessFinalCurrentness,
+        S::JournalAppend=>O::ReportedWitnessJournalAppend,
+        S::JournalCommit=>O::ReportedWitnessJournalCommit,
+        S::CommitRollback=>O::ReportedWitnessCommitRollback,
+        S::TlsResponse=>O::ReportedWitnessTlsResponse,
+    };
+    let class=match data.class {
+        C::InvalidBinding=>Class::AuthorityInvalidBinding,
+        C::Permission=>Class::AuthorityPermission,
+        C::StaleHead=>Class::AuthorityStaleHead,
+        C::Conflict=>Class::AuthorityConflict,
+        C::Inactive=>Class::AuthorityInactive,
+        C::RecoveryRequired=>Class::AuthorityRecoveryRequired,
+        C::Expired=>Class::AuthorityExpired,
+        C::PolicyDenied=>Class::AuthorityPolicyDenied,
+        C::BudgetExceeded=>Class::AuthorityBudgetExceeded,
+        C::InputReserved=>Class::AuthorityInputReserved,
+        C::ObligationReserved=>Class::AuthorityObligationReserved,
+        C::Limit=>Class::AuthorityLimit,
+        C::Storage=>Class::AuthorityStorage,
+        C::CorruptHistory=>Class::AuthorityCorruptHistory,
+        C::PermanentStopUnavailable=>Class::AuthorityPermanentStopUnavailable,
+        C::OfflineHistoryUnsupported=>Class::AuthorityOfflineHistoryUnsupported,
+        C::ConstructionHistoryUnsupported=>Class::AuthorityConstructionHistoryUnsupported,
+        C::UnsupportedVersion=>Class::AuthorityUnsupportedVersion,
+        C::Authentication=>Class::AuthorityAuthentication,
+        C::Uncertain=>Class::AuthorityUncertain,
+        C::ResolutionUnavailable=>Class::AuthorityResolutionUnavailable,
+        C::SessionRequired=>Class::AuthoritySessionRequired,
+        C::SessionPending=>Class::AuthoritySessionPending,
+    };
+    let peer=match role {Role::Signer1=>PeerRole::Owner1FinancialContinuationAdmission,Role::Signer2=>PeerRole::Owner2FinancialContinuationAdmission};
+    (stage,class,peer)
+}
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+fn observe_reported_witness_failure(role:Role,data:wholepact_financial_coordinator_origin::DeliveryFailureV1) {
+    use wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics as d;
+    let(stage,class,peer)=reported_witness_failure_detail(role,data);
+    d::origin(stage,class,Some(peer));
+    d::driver(d::DriverStage::WitnessFirstFailureObserved,class);
+}
+#[cfg(all(test,wholepact_financial_rendered_host_semantic_ci))]
+mod reported_witness_failure_tests {
+    use super::*;
+    use wholepact_financial_coordinator_origin::{DeliveryFailureV1,DeliveryFailureStageV1 as S,DeliveryFailureClassV1 as C,financial_ci_actor_diagnostics::{OriginStage as O,Class,PeerRole}};
+    #[test]
+    fn authenticated_report_projection_retains_every_finite_stage_class_and_peer() {
+        let stages=[
+            (S::InputValidation,O::ReportedWitnessInputValidation),
+            (S::RequestDecode,O::ReportedWitnessRequestDecode),
+            (S::EndpointValidation,O::ReportedWitnessEndpointValidation),
+            (S::ServerCertificateRead,O::ReportedWitnessServerCertificateRead),
+            (S::ServerCertificateValidation,O::ReportedWitnessServerCertificateValidation),
+            (S::TrustedClientRootRead,O::ReportedWitnessTrustedClientRootRead),
+            (S::ServerPrivateKeyRead,O::ReportedWitnessServerPrivateKeyRead),
+            (S::TlsConfiguration,O::ReportedWitnessTlsConfiguration),
+            (S::ProtectedNamespaceOpen,O::ReportedWitnessProtectedNamespaceOpen),
+            (S::ListenerBind,O::ReportedWitnessListenerBind),
+            (S::ListenerConfiguration,O::ReportedWitnessListenerConfiguration),
+            (S::PreparedSourceCurrentness,O::ReportedWitnessPreparedSourceCurrentness),
+            (S::ReviewClock,O::ReportedWitnessReviewClock),
+            (S::ReviewFacts,O::ReportedWitnessReviewFacts),
+            (S::ArmCurrentness,O::ReportedWitnessArmCurrentness),
+            (S::TlsAccept,O::ReportedWitnessTlsAccept),
+            (S::TlsHandshake,O::ReportedWitnessTlsHandshake),
+            (S::TlsPeerIdentity,O::ReportedWitnessTlsPeerIdentity),
+            (S::TlsPreparation,O::ReportedWitnessTlsPreparation),
+            (S::TlsReadyWrite,O::ReportedWitnessTlsReadyWrite),
+            (S::TlsRequest,O::ReportedWitnessTlsRequest),
+            (S::FirstPreflight,O::ReportedWitnessFirstPreflight),
+            (S::PreflightRollback,O::ReportedWitnessPreflightRollback),
+            (S::FinalAdmitWait,O::ReportedWitnessFinalAdmitWait),
+            (S::SecondPreflight,O::ReportedWitnessSecondPreflight),
+            (S::FinalCurrentness,O::ReportedWitnessFinalCurrentness),
+            (S::JournalAppend,O::ReportedWitnessJournalAppend),
+            (S::JournalCommit,O::ReportedWitnessJournalCommit),
+            (S::CommitRollback,O::ReportedWitnessCommitRollback),
+            (S::TlsResponse,O::ReportedWitnessTlsResponse),
+        ];
+        for(stage,expected)in stages {for(role,peer)in[(Role::Signer1,PeerRole::Owner1FinancialContinuationAdmission),(Role::Signer2,PeerRole::Owner2FinancialContinuationAdmission)] {
+            assert_eq!(reported_witness_failure_detail(role,DeliveryFailureV1{stage,class:C::Permission}),(expected,Class::AuthorityPermission,peer));
+        }}
+        let classes=[
+            (C::InvalidBinding,Class::AuthorityInvalidBinding),
+            (C::Permission,Class::AuthorityPermission),
+            (C::StaleHead,Class::AuthorityStaleHead),
+            (C::Conflict,Class::AuthorityConflict),
+            (C::Inactive,Class::AuthorityInactive),
+            (C::RecoveryRequired,Class::AuthorityRecoveryRequired),
+            (C::Expired,Class::AuthorityExpired),
+            (C::PolicyDenied,Class::AuthorityPolicyDenied),
+            (C::BudgetExceeded,Class::AuthorityBudgetExceeded),
+            (C::InputReserved,Class::AuthorityInputReserved),
+            (C::ObligationReserved,Class::AuthorityObligationReserved),
+            (C::Limit,Class::AuthorityLimit),
+            (C::Storage,Class::AuthorityStorage),
+            (C::CorruptHistory,Class::AuthorityCorruptHistory),
+            (C::PermanentStopUnavailable,Class::AuthorityPermanentStopUnavailable),
+            (C::OfflineHistoryUnsupported,Class::AuthorityOfflineHistoryUnsupported),
+            (C::ConstructionHistoryUnsupported,Class::AuthorityConstructionHistoryUnsupported),
+            (C::UnsupportedVersion,Class::AuthorityUnsupportedVersion),
+            (C::Authentication,Class::AuthorityAuthentication),
+            (C::Uncertain,Class::AuthorityUncertain),
+            (C::ResolutionUnavailable,Class::AuthorityResolutionUnavailable),
+            (C::SessionRequired,Class::AuthoritySessionRequired),
+            (C::SessionPending,Class::AuthoritySessionPending),
+        ];
+        for(class,expected)in classes {assert_eq!(reported_witness_failure_detail(Role::Signer1,DeliveryFailureV1{stage:S::TlsRequest,class}).1,expected);}
     }
 }

@@ -4466,3 +4466,56 @@ class SnapshotFailureReasonTests(unittest.TestCase):
   success=dict(schema=1,profile=runtime.expected_profile,native_oracle_verified=True,fixture_cleaned=True,
     display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)
   with self.assertRaises(supervisor.Failure):runtime(b'CI_FINANCIAL_CANDIDATE '+json.dumps(success).encode())
+
+
+class OriginalFailurePreservationTests(unittest.TestCase):
+    def test_reported_witness_facts_keep_coordinator_provenance_and_closed_fields(self):
+        import re
+        source=(ROOT.parent/'crates/wholepact-financial-coordinator-origin/src/delivery_failure.rs').read_text()
+        stages=set(re.findall(r'\b[A-Z][A-Za-z0-9]+\b',re.search(r'pub enum DeliveryFailureStageV1 \{(.*?)\}',source,re.S).group(1)))
+        self.assertEqual({s for s in O.C.ACTOR_ORIGIN_STAGES if s.startswith('ReportedWitness')},{'ReportedWitness'+s for s in stages})
+        self.assertEqual(len(stages),30)
+        for peer in ('Owner1FinancialContinuationAdmission','Owner2FinancialContinuationAdmission'):
+            for stage in stages:
+                facts=dict(version=1,driver=dict(stage='WitnessFirstFailureObserved',**{'class':'AuthorityExpired'}),listener=None,
+                           origin=dict(stage='ReportedWitness'+stage,**{'class':'AuthorityExpired'},peer=peer))
+                self.assertIs(O.C.validate_actor_failure_facts(facts,'Coordinator'),facts)
+                for slot,key,value in [('origin','stage','ReportedWitness raw'),('origin','peer','untrusted path'),('driver','class','secret')]:
+                    bad=json.loads(json.dumps(facts));bad[slot][key]=value
+                    with self.assertRaises(O.C.Rejected):O.C.validate_actor_failure_facts(bad,'Coordinator')
+                bad=json.loads(json.dumps(facts));bad['origin']['payload']='private'
+                with self.assertRaises(O.C.Rejected):O.C.validate_actor_failure_facts(bad,'Coordinator')
+        for domain in (O.C.ACTOR_DRIVER_STAGES,O.C.ACTOR_ORIGIN_STAGES,O.C.ACTOR_CLASSES,O.C.HOST_FAILURE_STAGES):self.assertLess(len(domain),256)
+        for stage in ('RelayPump','RelayFinish'):
+            O.C.validate_host_failure_facts(dict(version=1,stage=stage,**{'class':'IoPermissionDenied'},relay=None))
+
+    def test_actual_authenticated_witness_branch_observes_before_existing_restriction(self):
+        source=(ROOT.parent/'crates/wholepact-financial-coordinator/src/financial_source_driver.rs').read_text()
+        branch=source.split('let Some(event) = endpoint.try_receive_witness()? else {',1)[1].split('// Both authenticated S completion',1)[0]
+        order=('CoordinatorFinancialWitnessEventV1::FirstFailure { role, data } => {',
+               'observe_reported_witness_failure(*role,*data);','revoked.store(true, Ordering::Release)',
+               '.try_send(Outcome::Witness(event))')
+        positions=[branch.index(token) for token in order];self.assertEqual(positions,sorted(positions))
+        self.assertNotIn('flush_',branch);self.assertNotIn('Instant::now()',branch)
+        observer=source.split('fn observe_reported_witness_failure(',1)[1].split('#[cfg(all(test,',1)[0]
+        self.assertLess(observer.index('d::origin(stage,class,Some(peer));'),observer.index('d::driver(d::DriverStage::WitnessFirstFailureObserved,class);'))
+        cleanup=source.split('host.close(&revoked);',1)[1]
+        self.assertLess(cleanup.index('financial_ci_flush_failure_before_owned_cleanup();'),cleanup.index('drop(host_input);'))
+
+    def test_actual_signer_failure_boundaries_preserve_original_returns_and_order(self):
+        base=ROOT.parent/'crates/wholepact-signer/src'
+        tail=(base/'native_ui/runtime/coordinated_financial_driver_v1/financial_tail_v1.rs').read_text()
+        branch=tail.split('State::Financial(FinancialState::AdmitCommit(v))=>{',1)[1].split('State::Financial(FinancialState::AcquireCommit',1)[0]
+        self.assertLess(branch.index('v.observe_failure();'),branch.index('v.report(&mut self.origin)?;'))
+        self.assertLess(branch.index('v.report(&mut self.origin)?;'),branch.index('return Err(Error::Uncertain)'))
+        commit=(base/'native_ui/runtime/coordinated_financial_admit_v1.rs').read_text()
+        self.assertIn('if let Some(failure)=self.result.as_ref().err()',commit)
+        source=(base/'native_ui/witness_workspace/financial_continuation_v1/coordinated_admit_v1.rs').read_text()
+        order=('let current = check();','drop(final_action);','drop(pending);','drop(pin);','current.map_err(Failure::after_transport)?;','result.map_err(|_| Failure::after_transport(Error::Uncertain))')
+        positions=[source.index(token) for token in order];self.assertEqual(positions,sorted(positions))
+        observer=(base/'financial_ci_actor.rs').read_text()
+        wrapper=observer.split('pub(crate) fn admit_transport_diagnosed_result',1)[1].split('#[cfg(all(test,',1)[0]
+        self.assertIn('failure.returned_error()',wrapper)
+        self.assertNotIn('failure.into_error()',wrapper)
+        self.assertNotIn('flush_',wrapper)
+        self.assertIn('stage==S::SourceCallback&&callback.is_some()',observer)

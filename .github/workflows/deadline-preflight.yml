@@ -1,14 +1,14 @@
-name: Paired review navigation preflight only
+name: Original failure preservation preflight only
 on:
   push:
-    branches: [checkpoint/paired-navigation-preflight-p74]
+    branches: [checkpoint/original-error-preflight-p75]
 permissions: {}
 concurrency:
-  group: paired-navigation-preflight-p74
+  group: original-error-preflight-p75
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/paired-navigation-preflight-p74' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/original-error-preflight-p75' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -81,6 +81,7 @@ jobs:
           assert 'host: x86_64-unknown-linux-gnu' in run(rustup+['rustc', '-Vv'], timeout=30)
           env = dict(os.environ)
           env['WHOLEPACT_FINANCIAL_BUILD_MODE'] = 'production'
+          print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-cause-trace.py'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/tests/test_initial_history_failure_boundaries.py'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/tests/test_v3_deadline_identity.py'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-close-trace.py', '--source', str(repo), '--out', str(root/'close-traces'), '--run'], env=env, timeout=180))
@@ -190,19 +191,23 @@ jobs:
               'financial_observer::early_actor_observation_tests::pre_cleanup_flush_never_waits_for_owned_writer_lock',
               'financial_workflow_origin::retirement::retirement_error_observation_tests::history_retirement_observation_preserves_operation_and_original_io_error',
               'financial_ci_actor_diagnostics::tests::retirement_actual_error_enables_first_finite_detail_without_rewrite',
+              'financial_ci_actor_diagnostics::tests::coordinator_reported_witness_detail_precedes_cascading_peer_exit',
+              'financial_ci_host_diagnostics::tests::relay_top_level_failure_preserves_inner_observation_and_first_failure',
+              'financial_ci_host_diagnostics::tests::copied_reporter_records_panicking_or_failed_append_before_second_flush',
+              'financial_observer::early_actor_observation_tests::host_pre_drop_flush_never_waits_for_owned_writer_lock',
           ]
-          assert len(semantic_names) == 5 and len(set(semantic_names)) == 5
+          assert len(semantic_names) == 9 and len(set(semantic_names)) == 9
           for name in semantic_names:
               listing = run([exe, '--list', '--exact', name], env=env, timeout=30)
               assert [line for line in listing.splitlines() if line.endswith(': test')] == [name+': test'], name
               result = run([exe, '--exact', name, '--test-threads=1'], env=env, timeout=30)
               assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in result, name
               print(name+': passed')
-          print('Four clock, four actual packet round-trip, two actual Pair DTO, two Pair wall-helper tests, two delivery custody and two completed-Pair service clock tests, one actual Continue packet/peer composition test, one actual shared-wall publication-order regression, three actual semantic Origin reporter/writer-lock regressions, one actual retirement wrapper regression in production and semantic, one semantic retirement first-detail regression, and four source-extracted inert-carrier regressions passed. Compiler/API preflight only; not authority-flow, native/full qualification, deployment or settlement.')
+          print('Four clock, four actual packet round-trip, two actual Pair DTO, two Pair wall-helper tests, two delivery custody and two completed-Pair service clock tests, one actual Continue packet/peer composition test, one actual shared-wall publication-order regression, three actual semantic Origin reporter/writer-lock regressions, one actual retirement wrapper regression in production and semantic, one semantic retirement first-detail regression, three actual Host relay/reporter/pre-drop regressions, one reported-Witness first-detail regression, eight actual-source Host/wrapper regressions, and all retained source-extracted inert-carrier regressions passed. Compiler/API preflight only; not authority-flow, native/full qualification, deployment or settlement.')
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/paired-navigation-preflight-p74' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/original-error-preflight-p75' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

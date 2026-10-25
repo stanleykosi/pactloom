@@ -37,7 +37,16 @@ pub(super) enum FinancialState {
 }
 pub(super) struct FinancialWorker { handle:Option<std::thread::JoinHandle<Result<FinancialState>>> }
 impl FinancialWorker {
-    fn join(mut self)->Result<FinancialState> {self.handle.take().ok_or(Error::Unavailable)?.join().map_err(|_|Error::Uncertain)?}
+    fn join(mut self)->Result<FinancialState> {
+        let joined=self.handle.take().ok_or(Error::Unavailable)?.join().map_err(|_| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor::driver(
+                wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::DriverStage::FinancialWorkerJoinPanic,
+                &Error::Uncertain);
+            Error::Uncertain
+        })?;
+        actor_driver_result!(FinancialWorkerResult,joined)
+    }
 }
 impl Drop for FinancialWorker {fn drop(&mut self){if let Some(h)=self.handle.take(){let _=h.join();}}}
 impl Driver {
@@ -72,7 +81,10 @@ impl Driver {
         match &self.state {
             State::Financial(FinancialState::ContinuePrepared(v))=>v.report_read(&mut self.origin)?,
             State::Financial(FinancialState::ContinueCommit(v))=>{v.report(&mut self.origin)?;if !v.succeeded(){return Err(Error::Uncertain)}},
-            State::Financial(FinancialState::AdmitCommit(v))=>{v.report(&mut self.origin)?;if !v.succeeded(){return Err(Error::Uncertain)}},
+            State::Financial(FinancialState::AdmitCommit(v))=>{
+                #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+                v.observe_failure();
+                v.report(&mut self.origin)?;if !v.succeeded(){return Err(Error::Uncertain)}},
             State::Financial(FinancialState::AcquireCommit(v))=>{v.report(&mut self.origin)?;if !v.succeeded(){return Err(Error::Uncertain)}},
             State::Financial(FinancialState::ActivateCommit(v))=>{v.report(&mut self.origin)?;if !v.succeeded(){return Err(Error::Uncertain)}},
             State::Financial(FinancialState::SignCommit(v))=>{v.report(&mut self.origin)?;if !v.succeeded(){return Err(Error::Uncertain)}},
@@ -164,5 +176,28 @@ impl Driver {
             (FinancialState::ReturnExact(v),Request::ReturnExact{final_action})=>self.spawn_financial(move ||Ok(match v.consume_final(final_action){Ok(actual)=>FinancialState::Returned(actual),Err(failed)=>FinancialState::ReturnFailed(failed)})),
             _=>Err(Error::ReviewMismatch),
         }
+    }
+}
+
+#[cfg(test)]
+mod financial_worker_observation_tests {
+    use super::*;
+    #[test]
+    fn actual_join_preserves_worker_error_identity_and_success() {
+        #[derive(Debug)] struct Opaque;
+        impl std::fmt::Display for Opaque {fn fmt(&self,_:&mut std::fmt::Formatter<'_>)->std::fmt::Result{panic!("private error must not be formatted")}}
+        impl std::error::Error for Opaque {}
+        let original=std::io::Error::new(std::io::ErrorKind::PermissionDenied,Opaque);
+        let address=original.get_ref().unwrap() as *const dyn std::error::Error as *const () as usize;
+        let worker=FinancialWorker{handle:Some(std::thread::spawn(move||Err(Error::Io(original))))};
+        let error=match worker.join(){Err(Error::Io(error))=>error,_=>panic!("original worker error changed")};
+        assert_eq!(address,error.get_ref().unwrap() as *const dyn std::error::Error as *const () as usize);
+        let worker=FinancialWorker{handle:Some(std::thread::spawn(||Ok(FinancialState::Taken)))};
+        assert!(matches!(worker.join(),Ok(FinancialState::Taken)));
+    }
+    #[test]
+    fn actual_join_panic_remains_uncertain_without_retry() {
+        let worker=FinancialWorker{handle:Some(std::thread::spawn(||->Result<FinancialState>{panic!("synthetic worker panic")}))};
+        assert!(matches!(worker.join(),Err(Error::Uncertain)));
     }
 }

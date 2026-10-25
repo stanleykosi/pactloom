@@ -95,6 +95,31 @@ impl FinancialWitnessCustodyV1 {
         let deadline = final_action
             .original_admit_deadline()
             .min(source.original_deadline());
+        // Local finite detail only. A borrowed callback never marks failure;
+        // promote it only when this same checked attempt actually fails.
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        let mut callback_failure=None;
+        #[cfg(all(wholepact_financial_rendered_host_semantic_ci,feature="synthetic-qualification"))]
+        let result = {
+            let result=self.client.admit_financial_continuation_v1_diagnosed_checked_until(
+                pending.request(),deadline,||check().map_err(|error| {
+                    use crate::financial_ci_actor::ErrorClass;
+                    callback_failure.get_or_insert(error.finite_class());
+                    wholepact_authority::AuthorityError::Permission
+                }));
+            crate::financial_ci_actor::admit_transport_diagnosed_result(result,callback_failure)
+        };
+        #[cfg(all(wholepact_financial_rendered_host_semantic_ci,not(feature="synthetic-qualification")))]
+        let result = {
+            let result=self.client.admit_financial_continuation_v1_checked_until(
+                pending.request(),deadline,||check().map_err(|error| {
+                    use crate::financial_ci_actor::ErrorClass;
+                    callback_failure.get_or_insert(error.finite_class());
+                    wholepact_authority::AuthorityError::Permission
+                }));
+            crate::financial_ci_actor::admit_transport_plain_result(result,callback_failure)
+        };
+        #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
         let result = self.client.admit_financial_continuation_v1_checked_until(
             pending.request(),
             deadline,
@@ -115,6 +140,22 @@ impl FinancialWitnessCustodyV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    #[test]
+    fn failed_admit_observation_retains_actual_cause_and_transport_boundary() {
+        use wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::{DriverStage,Class};
+        #[derive(Debug)] struct Opaque;
+        impl std::fmt::Display for Opaque {fn fmt(&self,_:&mut std::fmt::Formatter<'_>)->std::fmt::Result{panic!("private cause must not be formatted")}}
+        impl std::error::Error for Opaque {}
+        for(entered,expected)in[(false,DriverStage::AdmitCommitBeforeTransport),(true,DriverStage::AdmitCommitAfterTransport)] {
+            let error=std::io::Error::new(std::io::ErrorKind::PermissionDenied,Opaque);
+            let address=error.get_ref().unwrap() as *const dyn std::error::Error as *const ();
+            let failed=if entered{CoordinatedAdmitFailureV1::after_transport(Error::Io(error))}else{CoordinatedAdmitFailureV1::before_transport(Error::Io(error))};
+            assert_eq!(crate::financial_ci_actor::admit_commit_failure_detail(failed.is_uncertain(),failed.cause()),(expected,Class::IoPermissionDenied));
+            let Error::Io(error)=failed.cause()else{panic!("cause changed")};
+            assert_eq!(address,error.get_ref().unwrap() as *const dyn std::error::Error as *const ());
+        }
+    }
     #[test]
     fn coordinated_admit_transport_classification_is_monotone() {
         let before = CoordinatedAdmitFailureV1::before_transport(Error::ReviewMismatch);

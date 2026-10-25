@@ -24,7 +24,10 @@ impl HostVerifierCustody {
     pub(super) fn new() -> Self { Self { live: Arc::new(AtomicBool::new(true)) } }
 }
 impl Drop for HostVerifierCustody {
-    fn drop(&mut self) { self.live.store(false, Ordering::Release); }
+    fn drop(&mut self) { self.live.store(false, Ordering::Release);
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        crate::financial_observer::financial_ci_flush_host_failure_before_owned_drop();
+    }
 }
 
 // Pure one-shot restriction. Even a failed first issuance cannot be retried.

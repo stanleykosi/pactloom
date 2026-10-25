@@ -385,6 +385,21 @@ pub fn financial_ci_flush_host_diagnostics() {
  if let Ok(mut slot)=WRITER.lock(){if let Some(w)=slot.as_mut(){flush_host_diagnostics_locked(w);}}
 }
 
+/// Host-local failure snapshot after custody invalidation and before owned
+/// channels/children can block in drop. Contention means unavailable evidence;
+/// panic or append failure cannot bypass the original teardown or retry a record.
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+pub(crate) fn financial_ci_flush_host_failure_before_owned_drop() {
+ best_effort_actor_observation(|| {
+  if let Ok(mut slot)=WRITER.try_lock(){if let Some(w)=slot.as_mut(){
+   if w.pid!=unsafe{libc::getpid()} || w.role!=Role::Host{return;}
+   let mut reporter=w.host_diagnostic;
+   reporter.flush(crate::financial_ci_host_diagnostics::sample_failure(),|f|best_effort_diagnostic_append(||emit_locked(w,"HostFailureBoundary",&f).map_err(|_|())));
+   w.host_diagnostic=reporter;
+  }}
+ });
+}
+
 /// Failure-only snapshot after denial publication and before an explicit
 /// failed-worker edge close. A busy/poisoned writer is unavailable, never waited
 /// for here. The original writer bounds and attempted-once reporter apply;
@@ -436,6 +451,11 @@ fn best_effort_actor_observation(observe: impl FnOnce()) {
 #[cfg(all(test,wholepact_financial_rendered_host_semantic_ci))]
 mod early_actor_observation_tests {
  use super::*;
+ #[test] fn host_pre_drop_flush_never_waits_for_owned_writer_lock() {
+  let held=WRITER.lock().unwrap();
+  financial_ci_flush_host_failure_before_owned_drop();
+  drop(held); // Custody drop must continue even while the writer is busy.
+ }
  #[test] fn pre_cleanup_flush_never_waits_for_owned_writer_lock() {
   let held=WRITER.lock().unwrap();
   financial_ci_flush_failure_before_owned_cleanup();

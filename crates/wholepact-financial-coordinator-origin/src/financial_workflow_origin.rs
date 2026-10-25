@@ -903,7 +903,10 @@ impl HostFinancialWorkflowRelayV1 {
     }
     pub fn session_deadline(&self)->Instant{self.clocks.supervision()}
     fn restrict(&mut self)->Result<()>{self.restricted=true;if self.cleanup.is_none(){self.cleanup=Some(self.clocks.first_cleanup_ceiling(Instant::now())?);}Ok(())}
-    pub fn pump(&mut self)->Result<bool>{let result=self.pump_inner();if result.is_err(){self.lifecycle.poison();drop(self.host.take());}result}
+    pub fn pump(&mut self)->Result<bool>{let result=self.pump_inner();if result.is_err(){
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error)=&result {crate::financial_ci_host_diagnostics::latch_failure(crate::financial_ci_host_diagnostics::Stage::RelayPump,crate::financial_ci_host_diagnostics::classify_io(error.kind()));}
+        self.lifecycle.poison();drop(self.host.take());}result}
     fn pump_inner(&mut self)->Result<bool>{
         relay_boundary!(LifecycleCheck,self.lifecycle.check_not_poisoned())?;
         relay_boundary!(DeadlineCheck,crate::channel::require_time(self.cleanup.unwrap_or(self.clocks.hard_cleanup())))?;
@@ -1181,6 +1184,8 @@ impl HostFinancialWorkflowRelayV1 {
     /// joins this result and drops its actual authority before final branch exit.
     /// This method neither exits the process nor transfers/replaces the S reapers.
     pub fn finish(mut self,work:Result<()>)->Result<()>{
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error)=&work {crate::financial_ci_host_diagnostics::latch_failure(crate::financial_ci_host_diagnostics::Stage::RelayFinish,crate::financial_ci_host_diagnostics::classify_io(error.kind()));}
         self.lifecycle.poison();
         let result=work.and_then(|()|if self.cancel_seen&&self.is_disposed(){Ok(())}else{Err(rejected("workflow relay actual disposal missing"))})
             .and_then(|()|bootstrap::finish_host_capped(self.host.take().ok_or_else(||rejected("workflow Host consumed"))?,self.cleanup));

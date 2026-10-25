@@ -139,11 +139,11 @@ class RepaintExecutionPreflightTests(unittest.TestCase):
  def test_no_run_then_exact_lists_and_runs_reject_missing_or_ignored_tests(self):
   from unittest import mock
   import contextlib,io
-  names=C.REPAINT_TESTS+C.COORDINATOR_DIAGNOSTIC_TESTS+C.SELECTOR_EXPORT_TESTS+C.ADMISSION_SCROLL_TESTS;good='test result: ok. 1 passed; 0 failed; 0 ignored;'
+  names=C.REPAINT_TESTS+C.COORDINATOR_DIAGNOSTIC_TESTS+C.SELECTOR_EXPORT_TESTS+C.ADMISSION_SCROLL_TESTS+C.WITNESS_FIRST_FAILURE_TESTS;good='test result: ok. 1 passed; 0 failed; 0 ignored;'
   for listings,result,ok in [([n+': test\n' for n in names],good,True),(['']+[n+': test\n' for n in names[1:]],good,False),([n+': test\n' for n in names],'test result: ok. 0 passed; 0 failed; 1 ignored;',False)]:
    outputs=[b'compiler']+[x.encode() for x in listings]+[result.encode()]*len(names)
    with mock.patch.object(C.S,'select_build_environment',return_value={}),mock.patch.object(C,'coordinator_test_executable',return_value=self.executable),mock.patch.object(C.S,'checked',side_effect=outputs) as checked,contextlib.redirect_stdout(io.StringIO()):
-    if ok:self.assertEqual(C.run_coordinator_tests(self.target,{}),10)
+    if ok:self.assertEqual(C.run_coordinator_tests(self.target,{}),11)
     else:
      with self.assertRaises(AssertionError):C.run_coordinator_tests(self.target,{})
     command=checked.call_args_list[0].args[0]
@@ -325,9 +325,9 @@ class IntentValidationExecutionPreflightTests(unittest.TestCase):
 
  def test_intent_feature_union_is_exact_and_does_not_replace_old_target(self):
   self.assertEqual(set(C.INTENT_FEATURES),set(C.SIGNER_FEATURES)|{'synthetic-qualification'})
-  self.assertEqual(len(C.HANDOFF_SECURITY_TESTS),51)
+  self.assertEqual(len(C.HANDOFF_SECURITY_TESTS),55)
   self.assertEqual(C.HANDOFF_SECURITY_TESTS[0],'native_ui::runtime::financial_v1::coordinated_v3_delivery::coordinated_delivery_admission_v1::ready_disconnect_tests::ready_disconnect_preserves_pending_worker_error_and_panic_without_fabricating_ready')
-  self.assertEqual(len(C.INTENT_VALIDATION_TESTS),20)
+  self.assertEqual(len(C.INTENT_VALIDATION_TESTS),21)
   self.assertTrue(set(C.INTENT_VALIDATION_TESTS).isdisjoint(C.HANDOFF_SECURITY_TESTS))
   rows=copy.deepcopy(self.rows);rows[-1]['features']=list(C.SIGNER_FEATURES)
   with self.assertRaises(AssertionError):self.check(rows)
@@ -454,3 +454,50 @@ class CompositionMeasurementTests(unittest.TestCase):
     with self.assertRaises(C.S.Failure) as caught:C.run_intent_validation_tests(pathlib.Path(td),{})
    self.assertIs(caught.exception,error);self.assertEqual(error.output,b'');self.assertEqual(error.exit_status,101);self.assertTrue(error.cleanup_failed);self.assertIn('--nocapture',checked.call_args_list[-1].args[0])
    self.assertNotIn('PRIVATE',captured.getvalue());value=json.loads(captured.getvalue().split('CI_COMPOSITION_SIZE_V1 ',1)[1]);self.assertEqual(value,dict(test=name,complete=False,test_passed=False,records=rows))
+
+class OriginalFailureSelectionTests(unittest.TestCase):
+ def test_exact_p75_inverse_restores_p74_and_rejects_any_source_mutation(self):
+  import hashlib
+  spec=importlib.util.spec_from_file_location('p75r_original_failure_audit',P.parent/'ci-financial-admit-read-source-audit.py');audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
+  paths={'observer':'wholepact-financial-coordinator-origin/src/financial_observer.rs','origin_actor':'wholepact-financial-coordinator-origin/src/financial_ci_actor_diagnostics.rs','signer_actor':'wholepact-signer/src/financial_ci_actor.rs'}
+  expected={'observer':'d29ce563717f0a53e0406a49d552688fe69a829f4dfb0437fa4f3dbfa15910f5','origin_actor':'e76f5886ae5bf83e183bd1186e5ac58af8c7b7d2b946b5ae23a6e538edf2103e','signer_actor':'69c786b0c086c6fa2b9747a62a3327291a6f3bbe97039ea1b602d95d35394581'}
+  self.assertEqual(set(audit.P75_FAILURE_CAUSE_INVERSES),set(paths))
+  for kind,path in paths.items():
+   raw=(P.parent.parent/'crates'/path).read_text();pin=audit.P75_FAILURE_CAUSE_INVERSES[kind]
+   self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(),pin['candidate_sha256']);self.assertEqual(pin['baseline_sha256'],expected[kind])
+   self.assertEqual(hashlib.sha256(audit.restore_original_failure_cause(raw,kind).encode()).hexdigest(),expected[kind])
+   self.assertTrue(pin['pairs'])
+   for remove,restore in pin['pairs']:
+    self.assertNotEqual(remove,restore);self.assertEqual(raw.count(remove),1)
+    with self.assertRaises(AssertionError):audit.restore_original_failure_cause(raw.replace(remove,restore,1),kind)
+   for mutation in (raw+'\n','// changed\n'+raw,raw.replace('pub(crate)','pub',1)):
+    self.assertNotEqual(mutation,raw)
+    with self.assertRaises(AssertionError):audit.restore_original_failure_cause(mutation,kind)
+
+ def test_new_native_selections_bind_existing_binaries_and_real_functions(self):
+  groups=[(C.HANDOFF_SECURITY_TESTS,55),(C.INTENT_VALIDATION_TESTS,21),(tuple(n for v in C.FIXTURE_TARGETS.values() for n in v[-1]),18)]
+  for names,count in groups:self.assertEqual(len(names),count);self.assertEqual(len(set(names)),count)
+  prefix='native_ui::runtime::financial_v1::coordinated_driver::financial_tail_v1::financial_worker_observation_tests::'
+  checks=[(C.HANDOFF_SECURITY_TESTS,prefix+'actual_join_preserves_worker_error_identity_and_success','wholepact-signer/src/native_ui/runtime/coordinated_financial_driver_v1/financial_tail_v1.rs'),(C.HANDOFF_SECURITY_TESTS,prefix+'actual_join_panic_remains_uncertain_without_retry','wholepact-signer/src/native_ui/runtime/coordinated_financial_driver_v1/financial_tail_v1.rs'),(C.HANDOFF_SECURITY_TESTS,'native_ui::witness_workspace::financial_continuation_v1::coordinated_admit_v1::tests::failed_admit_observation_retains_actual_cause_and_transport_boundary','wholepact-signer/src/native_ui/witness_workspace/financial_continuation_v1/coordinated_admit_v1.rs'),(C.HANDOFF_SECURITY_TESTS,'financial_ci_actor::admit_transport_plain_observation_tests::plain_admission_result_retains_success_and_original_error_variants','wholepact-signer/src/financial_ci_actor.rs'),(C.INTENT_VALIDATION_TESTS,'financial_ci_actor::admit_transport_observation_tests::checked_admission_stages_and_callback_precedence_are_finite','wholepact-signer/src/financial_ci_actor.rs'),(C.FIXTURE_TARGETS['authority'][-1],'transport::history_diagnostics_v1::tests::pure_flow_frame_first_error_and_returned_error_remain_independent','wholepact-authority/src/transport/history_diagnostics_v1.rs'),(C.WITNESS_FIRST_FAILURE_TESTS,'financial_source_driver::reported_witness_failure_tests::authenticated_report_projection_retains_every_finite_stage_class_and_peer','wholepact-financial-coordinator/src/financial_source_driver.rs')]
+  self.assertEqual(len(C.WITNESS_FIRST_FAILURE_TESTS),1)
+  for names,name,path in checks:
+   self.assertEqual(names.count(name),1)
+   self.assertIn('fn '+name.rsplit('::',1)[-1]+'(', (P.parent.parent/'crates'/path).read_text())
+  self.assertEqual(len(C.REPAINT_TESTS+C.COORDINATOR_DIAGNOSTIC_TESTS+C.SELECTOR_EXPORT_TESTS+C.ADMISSION_SCROLL_TESTS+C.WITNESS_FIRST_FAILURE_TESTS),11)
+
+ def test_cause_trace_is_mandatory_and_all_semantic_reporters_are_executed(self):
+  import ast,re
+  workflow=(P.parent.parent/'.github/workflows/deadline-preflight.yml').read_text()
+  command="print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-cause-trace.py'], env=env, timeout=180))"
+  self.assertEqual(workflow.count(command),1)
+  self.assertLess(workflow.index("assert run(rustup+['rustc', '--version']"),workflow.index(command))
+  self.assertLess(workflow.index(command),workflow.index("rustup+['cargo'"))
+  self.assertNotIn('--source-only',workflow)
+  names=ast.literal_eval(re.search(r'semantic_names = (\[.*?\])',workflow,re.S).group(1))
+  self.assertEqual(len(names),9);self.assertEqual(len(set(names)),9)
+  required={'financial_ci_actor_diagnostics::tests::coordinator_reported_witness_detail_precedes_cascading_peer_exit':'financial_ci_actor_diagnostics.rs','financial_ci_host_diagnostics::tests::relay_top_level_failure_preserves_inner_observation_and_first_failure':'financial_ci_host_diagnostics.rs','financial_ci_host_diagnostics::tests::copied_reporter_records_panicking_or_failed_append_before_second_flush':'financial_ci_host_diagnostics.rs','financial_observer::early_actor_observation_tests::host_pre_drop_flush_never_waits_for_owned_writer_lock':'financial_observer.rs'}
+  for name,path in required.items():
+   self.assertIn(name,names)
+   self.assertIn('fn '+name.rsplit('::',1)[-1]+'(', (P.parent.parent/'crates/wholepact-financial-coordinator-origin/src'/path).read_text())
+  gate=workflow.split('for name in semantic_names:',1)[1].split('print(',1)[0]
+  for token in ("'--list', '--exact'","'--exact', name, '--test-threads=1'",'1 passed; 0 failed; 0 ignored;'):self.assertIn(token,gate)

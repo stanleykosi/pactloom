@@ -398,6 +398,14 @@ pub(in crate::native_ui::runtime) struct CoordinatedAdmitCommitV1 {
     failure_report: Option<SignerAdmitOutcomeV1>,
 }
 impl CoordinatedAdmitCommitV1 {
+    // Observe only an actual failed consuming result, before its unchanged
+    // report and generic poll error. This is not a new outcome or retry grant.
+    #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+    pub(in crate::native_ui::runtime) fn observe_failure(&self) {
+        if let Some(failure)=self.result.as_ref().err() {
+            crate::financial_ci_actor::admit_commit_failure(failure.is_uncertain(),failure.cause());
+        }
+    }
     pub(in crate::native_ui::runtime) fn report(
         &self,
         origin: &mut SignerFinancialWorkflowOriginV1,
