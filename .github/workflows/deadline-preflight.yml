@@ -1,14 +1,14 @@
-name: Host editor and submit visibility preflight only
+name: Writer correlation and conservative wall cap preflight only
 on:
   push:
-    branches: [checkpoint/host-controls-preflight-h84]
+    branches: [checkpoint/writer-wall-cap-preflight-p85]
 permissions: {}
 concurrency:
-  group: host-controls-preflight-h84
+  group: writer-wall-cap-preflight-p85
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/host-controls-preflight-h84' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/writer-wall-cap-preflight-p85' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -172,7 +172,9 @@ jobs:
           names += ['signer_continue_state::shared_wall_tests::delayed_sample_reproduces_legacy_false_rollback_and_existing_helper_repairs_it']
           names += ['financial_workflow_origin::retirement::retirement_error_observation_tests::history_retirement_observation_preserves_operation_and_original_io_error']
           names += ['financial_workflow_origin::financial_selector::tests::'+n for n in ['actual_selector_preserves_closed_request_and_original_endpoint', 'selector_cannot_replace_result_source_or_socket', 'selector_cannot_replace_fixed_authorization_consent_or_account', 'selector_rejects_unknown_request_fields_and_relative_or_control_paths', 'distinct_financial_and_delivery_sources_join_without_relabelling', 'selector_binds_each_original_v3_observation_field_independently', 'selector_join_is_bound_to_actual_source_domains_and_retained_callers']]
-          assert len(names) == 26 and len(set(names)) == 26
+          names += ['financial_workflow_origin::writer_acquire::tests::'+n for n in ['writer_receipt_rounding_preserves_identity_and_restricts_permission', 'writer_receipt_bracket_keeps_original_caps_and_rejects_invalid_inputs', 'writer_receipt_cap_is_bound_to_action_checks_not_terminal_forwarding']]
+          names += ['financial_workflow_origin::sign::tests::sign_relay_enforces_retained_wall_cap_without_relabelling', 'financial_workflow_origin::returning::tests::return_relay_enforces_retained_wall_cap_without_relabelling']
+          assert len(names) == 31 and len(set(names)) == 31
           for name in names:
               listing = run([exe, '--list', '--exact', name], env=env, timeout=30)
               assert [line for line in listing.splitlines() if line.endswith(': test')] == [name+': test'], name
@@ -196,8 +198,9 @@ jobs:
               'financial_ci_host_diagnostics::tests::relay_top_level_failure_preserves_inner_observation_and_first_failure',
               'financial_ci_host_diagnostics::tests::copied_reporter_records_panicking_or_failed_append_before_second_flush',
               'financial_observer::early_actor_observation_tests::host_pre_drop_flush_never_waits_for_owned_writer_lock',
+              'financial_ci_actor_diagnostics::tests::writer_receipt_failure_keeps_innermost_original_io_class',
           ]
-          assert len(semantic_names) == 9 and len(set(semantic_names)) == 9
+          assert len(semantic_names) == 10 and len(set(semantic_names)) == 10
           for name in semantic_names:
               listing = run([exe, '--list', '--exact', name], env=env, timeout=30)
               assert [line for line in listing.splitlines() if line.endswith(': test')] == [name+': test'], name
@@ -208,7 +211,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/host-controls-preflight-h84' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/writer-wall-cap-preflight-p85' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

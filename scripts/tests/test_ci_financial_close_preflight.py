@@ -467,6 +467,7 @@ class OriginalFailureSelectionTests(unittest.TestCase):
   self.assertEqual(set(audit.P75_FAILURE_CAUSE_INVERSES),set(paths))
   for kind,path in paths.items():
    raw=(P.parent.parent/'crates'/path).read_text();pin=audit.P75_FAILURE_CAUSE_INVERSES[kind]
+   if kind=='origin_actor':raw=audit.restore_writer_receipt_diagnostic(raw)
    self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(),pin['candidate_sha256']);self.assertEqual(pin['baseline_sha256'],expected[kind])
    self.assertEqual(hashlib.sha256(audit.restore_original_failure_cause(raw,kind).encode()).hexdigest(),expected[kind])
    self.assertTrue(pin['pairs'])
@@ -497,7 +498,7 @@ class OriginalFailureSelectionTests(unittest.TestCase):
   self.assertLess(workflow.index(command),workflow.index("rustup+['cargo'"))
   self.assertNotIn('--source-only',workflow)
   names=ast.literal_eval(re.search(r'semantic_names = (\[.*?\])',workflow,re.S).group(1))
-  self.assertEqual(len(names),9);self.assertEqual(len(set(names)),9)
+  self.assertEqual(len(names),10);self.assertEqual(len(set(names)),10)
   required={'financial_ci_actor_diagnostics::tests::coordinator_reported_witness_detail_precedes_cascading_peer_exit':'financial_ci_actor_diagnostics.rs','financial_ci_host_diagnostics::tests::relay_top_level_failure_preserves_inner_observation_and_first_failure':'financial_ci_host_diagnostics.rs','financial_ci_host_diagnostics::tests::copied_reporter_records_panicking_or_failed_append_before_second_flush':'financial_ci_host_diagnostics.rs','financial_observer::early_actor_observation_tests::host_pre_drop_flush_never_waits_for_owned_writer_lock':'financial_observer.rs'}
   for name,path in required.items():
    self.assertIn(name,names)
@@ -566,7 +567,7 @@ class ResultSelectorDomainPreflightTests(unittest.TestCase):
   self.assertIn('#[cfg(test)]\nmod tests {',source)
   self.assertEqual(tuple(re.findall(r'#\[test\]\s+fn (\w+)\(',source)),expected)
   for name in expected:self.assertEqual(source.count('fn '+name+'('),1)
-  self.assertEqual(workflow.count('assert len(names) == 26 and len(set(names)) == 26'),1)
+  self.assertEqual(workflow.count('assert len(names) == 31 and len(set(names)) == 31'),1)
   self.assertLess(workflow.index("env = environments['production']"),workflow.index(marker))
   self.assertLess(workflow.index(marker),workflow.index("env = environments['observed-semantic']"))
   gate=workflow.split('          for name in names:',1)[1].split('          # These actual Origin',1)[0]
@@ -610,7 +611,7 @@ class HeldSelectionNavigationPreflightTests(unittest.TestCase):
   for token in ('+HELD_SELECTION_TESTS','--no-run','--bin','--list','--exact','--test-threads=1','1 passed; 0 failed; 0 ignored;','deadline=time.monotonic()+60','run_provider_tls_probe(root,selected,raw)'):self.assertIn(token,runner)
   self.assertLess(runner.index('coordinator_test_executable(raw,'),runner.index('for name in names:'))
   workflow=(root/'.github/workflows/deadline-preflight.yml').read_text()
-  self.assertEqual(workflow.count('host-controls-preflight-h84'),4)
+  self.assertEqual(workflow.count('writer-wall-cap-preflight-p85'),4)
   spec=importlib.util.spec_from_file_location('p81_ui_inverse',P.parent/'ci-financial-admit-read-source-audit.py');audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
   self.assertEqual(hashlib.sha256(audit.restore_held_selection_ui(source).encode()).hexdigest(),'22659883eb0eaf88c75e453cbd1272bb6ce8493c75a8f5ddf562f5c78c835a6a')
   mutations=[source+'// unrelated source change\n']
@@ -618,3 +619,49 @@ class HeldSelectionNavigationPreflightTests(unittest.TestCase):
    self.assertIn(old,source);mutations.append(source.replace(old,new,1))
   for bad in mutations:
    with self.assertRaises(AssertionError):audit.restore_held_selection_ui(bad)
+
+class WriterReceiptWallCapPreflightTests(unittest.TestCase):
+ def test_existing_origin_binaries_execute_clock_and_failure_regressions_with_strict_inverses(self):
+  import ast,hashlib,re
+  root=P.parent.parent;origin=root/'crates/wholepact-financial-coordinator-origin/src'
+  workflow=(root/'.github/workflows/deadline-preflight.yml').read_text()
+  expected=('writer_receipt_rounding_preserves_identity_and_restricts_permission','writer_receipt_bracket_keeps_original_caps_and_rejects_invalid_inputs','writer_receipt_cap_is_bound_to_action_checks_not_terminal_forwarding')
+  marker="          names += ['financial_workflow_origin::writer_acquire::tests::'+n for n in "
+  lines=[line for line in workflow.splitlines() if line.startswith(marker)]
+  self.assertEqual(len(lines),1);self.assertEqual(tuple(ast.literal_eval(lines[0][len(marker):-1])),expected)
+  self.assertIn('#[path="signer_writer_read_acquire_origin.rs"]\nmod writer_acquire;', (origin/'financial_workflow_origin.rs').read_text())
+  source=(origin/'signer_writer_read_acquire_origin.rs').read_text()
+  self.assertIn('#[cfg(test)]\nmod tests {',source)
+  for name in expected:self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name+r'\(',source)),1)
+  for module,file,name in [('sign','signer_sign_origin.rs','sign_relay_enforces_retained_wall_cap_without_relabelling'),('returning','signer_return_origin.rs','return_relay_enforces_retained_wall_cap_without_relabelling')]:
+   self.assertIn('#[path="'+file+'"]\nmod '+module+';', (origin/'financial_workflow_origin.rs').read_text())
+   self.assertEqual(workflow.count('financial_workflow_origin::'+module+'::tests::'+name),1)
+   self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name+r'\(', (origin/file).read_text())),1)
+  self.assertEqual(workflow.count('assert len(names) == 31 and len(set(names)) == 31'),1)
+  self.assertLess(workflow.index("env = environments['production']"),workflow.index(marker))
+  self.assertLess(workflow.index(marker),workflow.index("env = environments['observed-semantic']"))
+  diagnostic='financial_ci_actor_diagnostics::tests::writer_receipt_failure_keeps_innermost_original_io_class'
+  semantic=workflow.split('          semantic_names = [',1)[1].split('          ]',1)[0]
+  self.assertEqual(semantic.count(diagnostic),1)
+  self.assertEqual(workflow.count('assert len(semantic_names) == 10 and len(set(semantic_names)) == 10'),1)
+  self.assertEqual((origin/'financial_ci_actor_diagnostics.rs').read_text().count('fn '+diagnostic.rsplit('::',1)[-1]+'('),1)
+  for start,stop in [('          for name in names:','          # These actual Origin'),('          for name in semantic_names:',"          print('Four clock")]:
+   gate=workflow.split(start,1)[1].split(stop,1)[0]
+   for token in ("'--list', '--exact'","'--exact', name, '--test-threads=1'",'1 passed; 0 failed; 0 ignored;','timeout=30'):self.assertIn(token,gate)
+  spec=importlib.util.spec_from_file_location('p85_cause_strict_inverse',P.parent/'ci-financial-cause-trace.py');cause=importlib.util.module_from_spec(spec);spec.loader.exec_module(cause)
+  expected_paths={'signer_sign_origin.rs','signer_return_origin.rs','financial_workflow_origin.rs','witness_retirement.rs'}
+  self.assertEqual({pathlib.Path(path).name for path in cause.P85_RESTORATION},expected_paths)
+  for path,pin in cause.P85_RESTORATION.items():
+   raw=(root/path).read_text()
+   self.assertEqual(hashlib.sha256(cause.p85_restore(path,raw).encode()).hexdigest(),pin['baseline_sha256'])
+   needle=next(n for n in ('writer_wall_deadline','retained_wall_deadline','WriterAcquireReceiveError') if n in raw)
+   self.assertIn(needle,raw)
+   for bad in (raw+'// unrelated source change\n',raw.replace(needle,needle+'Changed',1)):
+    with self.assertRaises(AssertionError):cause.p85_restore(path,bad)
+  generated,_=cause.build_harness()
+  self.assertEqual(hashlib.sha256(generated.encode()).hexdigest(),'4f413444fbfd1ff5acea655a75e53877e6289d08ac5b3bb3f255a39f388073e1')
+  spec=importlib.util.spec_from_file_location('p85_actor_strict_inverse',P.parent/'ci-financial-admit-read-source-audit.py');audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
+  raw=(origin/'financial_ci_actor_diagnostics.rs').read_text()
+  self.assertEqual(hashlib.sha256(audit.restore_writer_receipt_diagnostic(raw).encode()).hexdigest(),'a528e3bc7c76ad1f7cf3f60da82510b93aa25af3e000a8b7ddafb868908bfd60')
+  for bad in (raw+'// unrelated source change\n',raw.replace('WriterAcquireReceiveError','WriterAcquireReceiveChanged',1)):
+   with self.assertRaises(AssertionError):audit.restore_writer_receipt_diagnostic(bad)

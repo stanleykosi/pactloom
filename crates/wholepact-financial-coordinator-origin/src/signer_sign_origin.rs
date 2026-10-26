@@ -94,7 +94,7 @@ impl<P: Presentation> Binding<P> {
             .restrict_received(
                 PROFILE,
                 p.ceiling(),
-                a.read.service.deadline.min(a.read.writer_deadline),
+                a.read.service.deadline.min(a.read.writer_deadline).min(a.read.writer_wall_deadline),
                 now,
             )?
             .min(wall_ceiling(now, state::wall_ms()?, t, e)?);
@@ -948,12 +948,13 @@ fn relay_clock<P: Presentation>(
     p: &P,
     service: Instant,
     writer: Instant,
+    writer_wall: Instant,
     clocks: FullWorkflowClocksV1,
     last: &mut u64,
 ) -> Result<()> {
     p.validate()?;
     let now = Instant::now();
-    clocks.restrict_received(PROFILE, p.ceiling(), service.min(writer), now)?;
+    clocks.restrict_received(PROFILE, p.ceiling(), service.min(writer).min(writer_wall), now)?;
     let wall = state::wall_ms()?;
     let (a, b) = p.times();
     if wall < *last || wall < a || wall >= b {
@@ -972,6 +973,7 @@ impl HostFinancialWorkflowRelayV1 {
             .as_mut()
             .ok_or_else(|| rejected("sign relay missing source"))?;
         let (_, _, service, writer) = slot.activate.wallet_predecessor()?;
+        let writer_wall = slot.activate.retained_wall_deadline()?;
         let deadline = service.deadline;
         let s = &mut slot.activate.wallet.sign;
         if s.terminal {
@@ -990,7 +992,7 @@ impl HostFinancialWorkflowRelayV1 {
                 if t.phase != 62 || presentation_digest != &p.presentation_digest {
                     return Err(rejected("sign relay Final mismatch/replay"));
                 }
-                relay_clock(p, deadline, writer, self.clocks, &mut slot.last_wall)?;
+                relay_clock(p, deadline, writer, writer_wall, self.clocks, &mut slot.last_wall)?;
                 t.phase = 63;
                 Ok(())
             }
@@ -1006,7 +1008,7 @@ impl HostFinancialWorkflowRelayV1 {
                 if t.phase != 65 || presentation_digest != &p.presentation_digest {
                     return Err(rejected("sign relay Final mismatch/replay"));
                 }
-                relay_clock(p, deadline, writer, self.clocks, &mut slot.last_wall)?;
+                relay_clock(p, deadline, writer, writer_wall, self.clocks, &mut slot.last_wall)?;
                 t.phase = 66;
                 Ok(())
             }
@@ -1022,6 +1024,7 @@ impl HostFinancialWorkflowRelayV1 {
             .as_mut()
             .ok_or_else(|| rejected("sign relay missing source"))?;
         let (a, _, service, writer) = slot.activate.wallet_predecessor()?;
+        let writer_wall = slot.activate.retained_wall_deadline()?;
         let service_ceiling = service.correlation().service_ceiling_ms;
         let deadline = service.deadline;
         let writer_ceiling = self
@@ -1050,6 +1053,7 @@ impl HostFinancialWorkflowRelayV1 {
                     presentation,
                     deadline,
                     writer,
+                    writer_wall,
                     self.clocks,
                     &mut slot.last_wall,
                 )?;
@@ -1084,6 +1088,7 @@ impl HostFinancialWorkflowRelayV1 {
                     presentation,
                     deadline,
                     writer,
+                    writer_wall,
                     self.clocks,
                     &mut slot.last_wall,
                 )?;
@@ -1199,6 +1204,35 @@ impl SignSlots {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sign_relay_enforces_retained_wall_cap_without_relabelling() {
+        // Inert time-only Presentation exercises the actual relay clock, not
+        // a wire grant or authority constructor. Unused identity calls panic.
+        #[derive(Clone)] struct ClockOnly;
+        impl Presentation for ClockOnly {
+            fn validate(&self)->Result<()> { Ok(()) }
+            fn original(&self)->&SignerWalletOriginalV1 { panic!("not a grant") }
+            fn observed(&self)->&SignerWalletObservedV1 { panic!("not a grant") }
+            fn actor(&self)->&FinancialActorContextV1 { panic!("not a grant") }
+            fn digest(&self)->&str { panic!("not a grant") }
+            fn ceiling(&self)->u64 { 60_000 }
+            fn times(&self)->(u64,u64) { (0,u64::MAX) }
+            fn service(&self)->u64 { panic!("not a grant") }
+            fn writer(&self)->u64 { panic!("not a grant") }
+        }
+        let epoch=Instant::now();
+        let clocks=FullWorkflowClocksV1::from_initial_epoch(epoch).unwrap();
+        let original=epoch+Duration::from_secs(60);
+        let future_cap=epoch+Duration::from_secs(30);
+        let mut last=0;
+        relay_clock(&ClockOnly,original,original,future_cap,clocks,&mut last).unwrap();
+        assert!(last>0);
+        let retained=last;
+        assert!(relay_clock(&ClockOnly,original,original,epoch,clocks,&mut last).is_err());
+        assert_eq!(last,retained);
+        assert_eq!(clocks.restrictive_offset(original,original).unwrap(),60_000);
+    }
+
     #[test]
     fn actual_result_observation_preserves_r_and_cannot_repeat() {
         let p = Phases::new();

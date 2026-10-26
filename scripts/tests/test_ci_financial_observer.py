@@ -4531,3 +4531,49 @@ class OriginalFailurePreservationTests(unittest.TestCase):
         self.assertNotIn('failure.into_error()',wrapper)
         self.assertNotIn('flush_',wrapper)
         self.assertIn('stage==S::SourceCallback&&callback.is_some()',observer)
+
+
+class WriterReceiptClockDiagnosticsTests(unittest.TestCase):
+    def test_writer_clock_error_domain_is_closed_and_existing_errors_are_preserved(self):
+        stages=('WriterReceiptClockRestoreError','WriterAcquireReceiveError','WriterActivateReceiveError')
+        for role in ('Coordinator','Host','Signer1','Signer2'):
+            for stage in stages:
+                facts=dict(version=1,driver=dict(stage=stage,**{'class':'IoPermissionDenied'}),listener=None,origin=None)
+                self.assertIs(O.C.validate_actor_failure_facts(facts,role),facts)
+                for key,value in [('stage',stage+' raw'),('class','private/path'),('payload','secret')]:
+                    bad=json.loads(json.dumps(facts));bad['driver'][key]=value
+                    with self.assertRaises(O.C.Rejected):O.C.validate_actor_failure_facts(bad,role)
+        base=ROOT.parent/'crates/wholepact-financial-coordinator-origin/src'
+        enum=(base/'financial_ci_actor_diagnostics.rs').read_text().split('codes!(DriverStage {',1)[1].split('});',1)[0].split(',')
+        self.assertEqual(enum[-3:],list(stages));self.assertEqual(set(enum),O.C.ACTOR_DRIVER_STAGES)
+        self.assertLess(len(enum),256)
+        acquire=(base/'signer_writer_read_acquire_origin.rs').read_text()
+        wrapper=acquire.split('fn received_writer_session_deadlines(',1)[1].split('// The inherited epoch',1)[0]
+        self.assertIn('.inspect_err(|_error|',wrapper)
+        self.assertIn('DriverStage::WriterReceiptClockRestoreError, _error',wrapper)
+        self.assertNotIn('map_err',wrapper);self.assertNotIn('flush_',wrapper)
+        workflow=(base/'financial_workflow_origin.rs').read_text()
+        self.assertIn('let result=self.receive_inner();if result.is_err(){self.core.close();}result',workflow)
+        for method,stage in [('receive_writer_acquire_event',stages[1]),('receive_activate_event',stages[2])]:
+            wrapped=workflow.split('return self.'+method+'(packet)',1)[1].split('}).map(Some);}',1)[0]
+            self.assertTrue(wrapped.startswith('.inspect_err(|_error|{'))
+            self.assertIn('DriverStage::'+stage+',_error',wrapped)
+            self.assertNotIn('map_err',wrapped);self.assertNotIn('flush_',wrapped)
+
+    def test_terminal_wallet_sign_return_arms_are_unchanged_by_permission_caps(self):
+        import hashlib
+        base=ROOT.parent/'crates/wholepact-financial-coordinator-origin/src'
+        # Full original terminal arms, not mocked authorities or clock execution.
+        expected=[('signer_wallet_origin.rs', 'up_wallet', 'WalletPrepared', 'c1eb3a4d47d2e33bc8b89f67f8a78bc87e9ae0531561ec270d88f21e541353e6'), ('signer_wallet_origin.rs', 'up_wallet', 'WalletObserved', '30083915c367632e594731006b7ae89d7d526eb9f837d4a86920e397c24c156b'), ('signer_wallet_origin.rs', 'up_wallet', 'WalletFailed', 'd13718a41c9facacc0692f686c0dfb016ebda1b617838b887d83d21c2a418e09'), ('signer_sign_origin.rs', 'up_sign', 'SignPrepared', 'e14a802df0f75cef19f690c65e611f98954cc9804984bd472091bf7c1bc0f50f'), ('signer_sign_origin.rs', 'up_sign', 'SignCommitted', '41df5b09d65d5e0953058fcddb45e7a004374c158d9d055fd6b14ff711158993'), ('signer_sign_origin.rs', 'up_sign', 'SignFailed', '3c91f204c78e1983f10740aab2c06fd7fb67947e42201a762aa8e8bb548cae2f'), ('signer_return_origin.rs', 'up_return', 'ReturnPrepared', 'c3339a0824037ada3d06b9398c11def89a36807e67e24127705d581ca1dcc3fb'), ('signer_return_origin.rs', 'up_return', 'ReturnCompleted', '36b97c5a7ee9fc946e8a08fec827e73368843a1762ccb0f794e4e783282f18e4'), ('signer_return_origin.rs', 'up_return', 'ReturnFailed', '3c91f204c78e1983f10740aab2c06fd7fb67947e42201a762aa8e8bb548cae2f')]
+        for filename,method,name,digest in expected:
+            source=(base/filename).read_text().split(' fn '+method+'(',1)[1]
+            pos=source.index('Packet::'+name+' {');start=source.index('=> {',pos)+3;depth=0
+            for end in range(start,len(source)):
+                if source[end]=='{':depth+=1
+                elif source[end]=='}':
+                    depth-=1
+                    if depth==0:break
+            self.assertEqual(hashlib.sha256(source[start:end+1].encode()).hexdigest(),digest)
+        activate=(base/'signer_activate_wallet_origin.rs').read_text()
+        getter=activate.split('pub(super) fn retained_wall_deadline(&self)',1)[1].split('pub(super) fn wallet_predecessor',1)[0]
+        self.assertNotIn('require_time',getter);self.assertNotIn('Instant::now',getter)

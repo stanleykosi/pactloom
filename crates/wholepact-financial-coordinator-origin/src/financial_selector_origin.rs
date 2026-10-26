@@ -68,7 +68,7 @@ impl HostFinancialWorkflowRelayV1 {
         if self.restricted||*actual!=role||data.actor.signer_role!=role {return Err(rejected("selector restricted or changed role"));}
         let slot=self.slots[role.index()].as_mut().ok_or_else(||rejected("relay selector missing source"))?;
         let (_,_,service,writer)=slot.activate.wallet_predecessor()?;
-        service.check()?; crate::channel::require_time(writer)?;
+        service.check()?; crate::channel::require_time(writer.min(slot.activate.retained_wall_deadline()?))?;
         let (exact,committed)=slot.activate.wallet.sign.return_predecessor()?;
         let endpoint=self.v3_entries[role.index()].pair.endpoint.as_ref().ok_or_else(||rejected("relay selector missing endpoint"))?;
         require_actual_selector(data,exact,committed,endpoint,self.v3_entries[role.index()].original_source_observation()?)?;

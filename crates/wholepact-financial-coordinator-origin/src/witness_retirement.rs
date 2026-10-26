@@ -91,7 +91,7 @@ impl CoordinatorFinancialEndpointV1{
         let (_,service,deadline)=self.signing_services[role.index()].retirement_source()?;
         activation.read.service.require_same(&service)?;
         let signing=crate::host_interstage::SigningRetirementBindingV1{original_commitment:service.original.commitment()?,signed:signed.clone()};
-        let cutoff=deadline.min(activation.read.writer_deadline).min(self.clocks.supervision());
+        let cutoff=deadline.min(activation.read.writer_deadline).min(activation.read.writer_wall_deadline).min(self.clocks.supervision());
         let request=RetirementRequest{profile:PROFILE.into(),coordinator:self.coordinator.clone(),session:self.session.clone(),target:role,purpose:RetirementPurpose::FinancialSigning,binding_digest:signing.commitment()?,witness_instance:service.witness_instance,challenge:state::nonce()?,cleanup_ceiling_ms:self.clocks.cleanup_offset(cutoff)?,signing:Some(signing)};
         request.validate(self.clocks)?;
         Ok(CoordinatorWitnessRetirementTicketV1{core:Arc::clone(&self.core),entries:self.slots.iter().flatten().filter_map(|s|s.entry.as_ref().map(Arc::clone)).collect(),request,cutoff,phases,consumed:false})
@@ -164,7 +164,7 @@ impl CoordinatorFinancialEndpointV1{
                 let(a,_)=slot.activate.wallet_predecessor()?;
                 let(_,signed)=slot.activate.wallet.sign.return_predecessor()?;
                 let(entry,correlation,service)=self.signing_services[t.request.target.index()].retirement_source()?;
-                Some((entry,correlation,signed.clone(),service,a.read.writer_deadline,self.signing_services[t.request.target.index()].retirement_wall_bounds()?))
+                Some((entry,correlation,signed.clone(),service,a.read.writer_deadline,a.read.writer_wall_deadline,self.signing_services[t.request.target.index()].retirement_wall_bounds()?))
             }else{None};
             if !Arc::ptr_eq(&self.core,&t.core){return history_retirement_detail!(t.request.purpose,HistoryRetirementHostQuiescence,Err(rejected("foreign retirement outbound")));}
             history_retirement_detail!(t.request.purpose,HistoryRetirementHostQuiescence,self.retirement_bounds(cutoff))?;history_retirement_detail!(t.request.purpose,HistoryRetirementHostQuiescence,self.core.check())?;history_retirement_detail!(t.request.purpose,HistoryRetirementHostQuiescence,self.retirement_idle(t.phases,t.request.purpose,t.request.target))?;
@@ -222,8 +222,8 @@ impl CoordinatorFinancialEndpointV1{
             if t.request.purpose==RetirementPurpose::FinancialSigning{crate::financial_observer::signer(t.request.target,"SigningRetired")?;}
             history_retirement_detail!(t.request.purpose,HistoryRetirementHostResume,self.retirement_send_host(&Packet::RetireResume{request:t.request.clone()},cutoff))?;
             history_retirement_detail!(t.request.purpose,HistoryRetirementHostResume,self.retirement_wait_host(&t.request,true,cutoff,Some(index)))?;
-            if let Some((entry,correlation,signed,service,writer,(service_valid_from_ms,service_valid_until_ms,last_wall)))=signed_record {
-                let record=Arc::new(super::signed_custody::SignedResultRecord{core:Arc::clone(&self.core),entry,correlation,signed,service,writer,retired_index:index,service_valid_from_ms,service_valid_until_ms,last_wall:std::sync::atomic::AtomicU64::new(last_wall)});
+            if let Some((entry,correlation,signed,service,writer,writer_wall,(service_valid_from_ms,service_valid_until_ms,last_wall)))=signed_record {
+                let record=Arc::new(super::signed_custody::SignedResultRecord{core:Arc::clone(&self.core),entry,correlation,signed,service,writer,writer_wall,retired_index:index,service_valid_from_ms,service_valid_until_ms,last_wall:std::sync::atomic::AtomicU64::new(last_wall)});
                 self.signing_services[i].install_retired_result(record)?;
             }
             self.retirement_resume=Some(cutoff);outbound.consumed=true;

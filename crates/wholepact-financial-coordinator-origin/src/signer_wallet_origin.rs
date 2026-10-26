@@ -45,6 +45,7 @@ impl PrepareBinding {
                 activation
                     .read
                     .writer_deadline
+                    .min(activation.read.writer_wall_deadline)
                     .min(activation.read.service.deadline),
                 now,
             )?
@@ -382,6 +383,7 @@ impl ObserveBinding {
                 activation
                     .read
                     .writer_deadline
+                    .min(activation.read.writer_wall_deadline)
                     .min(activation.read.service.deadline),
                 now,
             )?
@@ -944,15 +946,16 @@ fn wallet_relay_clock(
     end: u64,
     service: &super::writer_acquire::ReceivedSigning,
     writer: Instant,
+    writer_wall: Instant,
     clocks: FullWorkflowClocksV1,
     last: &mut u64,
 ) -> Result<()> {
     service.check()?;
-    crate::channel::require_time(writer)?;
+    crate::channel::require_time(writer.min(writer_wall))?;
     clocks.restrict_received(
         PROFILE,
         review,
-        writer.min(service.deadline),
+        writer.min(writer_wall).min(service.deadline),
         Instant::now(),
     )?;
     let wall = state::wall_ms()?;
@@ -975,6 +978,7 @@ impl HostFinancialWorkflowRelayV1 {
             return Err(rejected("wallet terminal relay"));
         }
         let (_, _, service, writer) = slot.activate.wallet_predecessor()?;
+        let writer_wall = slot.activate.retained_wall_deadline()?;
         match p {
             Packet::WalletPrepareFinal {
                 presentation_digest,
@@ -994,6 +998,7 @@ impl HostFinancialWorkflowRelayV1 {
                     p.facts.expires_at_ms,
                     service,
                     writer,
+                    writer_wall,
                     self.clocks,
                     &mut slot.last_wall,
                 )?;
@@ -1018,6 +1023,7 @@ impl HostFinancialWorkflowRelayV1 {
                     p.facts.expires_at_ms,
                     service,
                     writer,
+                    writer_wall,
                     self.clocks,
                     &mut slot.last_wall,
                 )?;
@@ -1036,6 +1042,7 @@ impl HostFinancialWorkflowRelayV1 {
             .as_mut()
             .ok_or_else(|| rejected("wallet relay event before source"))?;
         let (activation, committed, service, writer) = slot.activate.wallet_predecessor()?;
+        let writer_wall = slot.activate.retained_wall_deadline()?;
         if slot.activate.wallet.terminal {
             return Err(rejected("wallet relay terminal"));
         }
@@ -1064,6 +1071,7 @@ impl HostFinancialWorkflowRelayV1 {
                         presentation.facts.expires_at_ms,
                         service,
                         writer,
+                        writer_wall,
                         self.clocks,
                         &mut slot.last_wall,
                     )?;
@@ -1109,6 +1117,7 @@ impl HostFinancialWorkflowRelayV1 {
                         presentation.facts.expires_at_ms,
                         service,
                         writer,
+                        writer_wall,
                         self.clocks,
                         &mut slot.last_wall,
                     )?;

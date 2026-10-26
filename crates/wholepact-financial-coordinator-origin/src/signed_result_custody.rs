@@ -5,12 +5,12 @@ use crate::{FinancialSigningOriginalV1,FinancialSigningServiceV1,SignerSignCommi
 pub(super) struct SignedResultRecord {
     pub(super) core:Arc<Core>,pub(super) entry:Arc<EntryReviewed>,
     pub(super) correlation:FinancialSigningServiceV1,pub(super) signed:SignerSignCommittedV1,
-    pub(super) service:Instant,pub(super) writer:Instant,pub(super) retired_index:usize,
+    pub(super) service:Instant,pub(super) writer:Instant,pub(super) writer_wall:Instant,pub(super) retired_index:usize,
     pub(super) service_valid_from_ms:u64,pub(super) service_valid_until_ms:u64,pub(super) last_wall:std::sync::atomic::AtomicU64,
 }
 impl SignedResultRecord {
     pub(super) fn check(&self)->Result<()> {
-        crate::channel::require_time(self.service.min(self.writer).min(self.entry.original_source))?;
+        crate::channel::require_time(self.service.min(self.writer).min(self.writer_wall).min(self.entry.original_source))?;
         self.entry.retirement_clock_bounds()?;
         let wall=state::wall_ms()?;let prior=self.last_wall.fetch_max(wall,Ordering::AcqRel);
         if wall<prior||wall<self.service_valid_from_ms||wall>=self.service_valid_until_ms{return Err(rejected("retired Signing original wall bounds"));}

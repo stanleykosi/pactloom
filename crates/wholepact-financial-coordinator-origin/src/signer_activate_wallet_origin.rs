@@ -26,6 +26,7 @@ pub(super) struct ActivateRead {
     prepared: AtomicBool,
     pub(super) acquired_presentation: SignerAcquirePresentationV1,
     pub(super) writer_deadline: Instant,
+    pub(super) writer_wall_deadline: Instant,
     pub(super) service: ReceivedSigning,
 }
 impl ActivateRead {
@@ -35,6 +36,7 @@ impl ActivateRead {
         original_read: Instant,
         acquired_presentation: SignerAcquirePresentationV1,
         writer_deadline: Instant,
+        writer_wall_deadline: Instant,
         service: ReceivedSigning,
     ) -> Result<Arc<Self>> {
         wire.validate()?;
@@ -51,6 +53,7 @@ impl ActivateRead {
             .restrict_received(PROFILE, wire.read_ceiling_ms, original_read, now)?
             .min(entry.original_source)
             .min(writer_deadline)
+            .min(writer_wall_deadline)
             .min(service.deadline)
             .min(wall_ceiling(
                 now,
@@ -67,6 +70,7 @@ impl ActivateRead {
             prepared: AtomicBool::new(false),
             acquired_presentation,
             writer_deadline,
+            writer_wall_deadline,
             service,
         });
         b.check_bounds()?;
@@ -82,7 +86,7 @@ impl ActivateRead {
         self.entry.check_custody()?;
         crate::channel::require_time(self.original_read.min(self.ceiling))?;
         self.service.check()?;
-        crate::channel::require_time(self.writer_deadline)?;
+        crate::channel::require_time(self.writer_deadline.min(self.writer_wall_deadline))?;
         observe_wall(
             &self.last_wall,
             self.wire.facts.reviewed_at_ms,
@@ -129,6 +133,7 @@ impl ActivateReview {
             .restrict_received(PROFILE, wire.activate_ceiling_ms, original_activate, now)?
             .min(read.entry.original_source)
             .min(read.writer_deadline)
+            .min(read.writer_wall_deadline)
             .min(read.service.deadline)
             .min(wall_ceiling(
                 now,
@@ -155,7 +160,7 @@ impl ActivateReview {
     fn check_bounds(&self) -> Result<()> {
         self.read.entry.check_custody()?;
         self.read.service()?.check()?;
-        crate::channel::require_time(self.read.writer_deadline)?;
+        crate::channel::require_time(self.read.writer_deadline.min(self.read.writer_wall_deadline))?;
         crate::channel::require_time(self.original_activate.min(self.ceiling))?;
         observe_wall(
             &self.last_wall,
@@ -449,6 +454,7 @@ pub(super) struct HActivate {
     ready: Option<(String, String)>,
     service: Option<ReceivedSigning>,
     writer_deadline: Option<Instant>,
+    writer_wall_deadline: Option<Instant>,
     read_forwarded: bool,
     display_forwarded: bool,
     terminal: bool,
@@ -535,6 +541,7 @@ impl SignerFinancialWorkflowOriginV1 {
             .ok_or_else(|| rejected("Activate Read original Entry missing"))?;
         let (acquired, committed, service, writer_deadline) =
             self.writer_acquire.retained_result()?;
+        let writer_wall_deadline = self.writer_acquire.retained_wall_deadline()?;
         if original_source != entry.original_source {
             return Err(rejected("Activate Read changed original source Instant"));
         }
@@ -566,6 +573,7 @@ impl SignerFinancialWorkflowOriginV1 {
             original_read,
             acquired.clone(),
             writer_deadline,
+            writer_wall_deadline,
             service.retained_restriction(),
         )?;
         b.check()?;
@@ -1126,6 +1134,7 @@ impl CoordinatorFinancialEndpointV1 {
                 data.validate()?;
                 let (acquired, committed, service, writer_deadline) =
                     slot.writer_acquire.retained_result()?;
+                let writer_wall_deadline = slot.writer_acquire.retained_wall_deadline()?;
                 if slot.wire_phase != AWAITING_ACTIVATE_READ
                     || slot.activate.read_wire.is_some()
                     || !read_links_acquired(&data, acquired, committed)
@@ -1150,6 +1159,7 @@ impl CoordinatorFinancialEndpointV1 {
                     deadline,
                     acquired.clone(),
                     writer_deadline,
+                    writer_wall_deadline,
                     service.retained_restriction(),
                 )?;
                 slot.activate.read = Some(Arc::clone(&b));
@@ -1480,6 +1490,7 @@ impl HostFinancialWorkflowRelayV1 {
                 data.validate()?;
                 let (acquired, committed, service, writer_deadline) =
                     slot.writer_acquire.retained_result()?;
+                let writer_wall_deadline = slot.writer_acquire.retained_wall_deadline()?;
                 if slot.phase != AWAITING_ACTIVATE_READ
                     || slot.activate.read.is_some()
                     || !read_links_acquired(data, acquired, committed)
@@ -1488,6 +1499,7 @@ impl HostFinancialWorkflowRelayV1 {
                 }
                 slot.activate.service = Some(service.retained_restriction());
                 slot.activate.writer_deadline = Some(writer_deadline);
+                slot.activate.writer_wall_deadline = Some(writer_wall_deadline);
                 slot.activate.read = Some(data.clone());
                 slot.activate.read_forwarded = !self.restricted;
                 slot.phase = ACTIVATE_READ_REVIEW;
@@ -1625,7 +1637,9 @@ fn activate_current(slot: &mut HSlot, clocks: FullWorkflowClocksV1) -> Result<()
     crate::channel::require_time(
         slot.activate
             .writer_deadline
-            .ok_or_else(|| rejected("Activate retained writer clock missing"))?,
+            .ok_or_else(|| rejected("Activate retained writer clock missing"))?
+            .min(slot.activate.writer_wall_deadline
+                .ok_or_else(|| rejected("Activate retained writer wall cap missing"))?),
     )?;
     let (source, action, start, end, source_wall) = if let Some(p) = &slot.activate.wire {
         (
@@ -1842,7 +1856,7 @@ impl ActivateReview {
     pub(super) fn wallet_bounds(&self) -> Result<()> {
         self.read.entry.check_custody()?;
         self.read.service.check()?;
-        crate::channel::require_time(self.read.writer_deadline)
+        crate::channel::require_time(self.read.writer_deadline.min(self.read.writer_wall_deadline))
     }
     pub(super) fn wallet_core(&self) -> &Arc<Core> {
         self.core()
@@ -1886,6 +1900,9 @@ impl CActivate {
     }
 }
 impl HActivate {
+    pub(super) fn retained_wall_deadline(&self) -> Result<Instant> {
+        self.writer_wall_deadline.ok_or_else(|| rejected("wallet relay missing original writer wall cap"))
+    }
     pub(super) fn wallet_predecessor(
         &self,
     ) -> Result<(

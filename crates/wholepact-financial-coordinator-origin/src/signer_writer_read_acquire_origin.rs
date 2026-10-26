@@ -540,27 +540,55 @@ fn require_phase(core: &Core, slot: usize, phase: u8) -> Result<()> {
 struct AcquiredRetention {
     data: SignerAcquireCommittedV1,
     original_writer_session_deadline: Instant,
+    // Independent conservative restriction; never encoded as writer identity.
+    original_writer_wall_deadline: Instant,
 }
 // One conservative restoration at authenticated receipt observation. This
 // never refreshes an action and is never recomputed by a later purpose.
-fn received_writer_session_deadline(
+fn received_writer_session_deadlines(
     clocks: FullWorkflowClocksV1,
     offset: u64,
     data: &SignerAcquireCommittedV1,
     source: Instant,
     service: Instant,
-) -> Result<Instant> {
-    let now = Instant::now();
-    let wall = state::wall_ms()?
+) -> Result<(Instant, Instant)> {
+    let before = Instant::now();
+    let wall = state::wall_ms()?;
+    let after = Instant::now();
+    received_writer_session_deadlines_at(clocks, offset, data.expires_at_ms, source, service, before, wall, after)
+        .inspect_err(|_error| {
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::work_fallback(
+                crate::financial_ci_actor_diagnostics::DriverStage::WriterReceiptClockRestoreError, _error);
+        })
+}
+// The inherited epoch offset is immutable correlation, not a fresh wall-clock
+// projection. Keep its identity while independently narrowing permission.
+fn received_writer_session_deadlines_at(
+    clocks: FullWorkflowClocksV1,
+    offset: u64,
+    expires_at_ms: u64,
+    source: Instant,
+    service: Instant,
+    before: Instant,
+    wall_floor: u64,
+    after: Instant,
+) -> Result<(Instant, Instant)> {
+    if after < before { return Err(rejected("writer receipt clock sample order")); }
+    let wall = wall_floor
         .checked_add(1)
         .ok_or_else(|| rejected("writer receipt wall ceiling overflow"))?;
-    let remaining = data
-        .expires_at_ms
+    let remaining = expires_at_ms
         .checked_sub(wall)
         .filter(|n| *n > 0)
         .ok_or_else(|| rejected("authenticated writer receipt already expired"))?;
-    let wall_cap = now
+    let wall_cap = before
         .checked_add(std::time::Duration::from_millis(remaining))
+        .ok_or_else(|| rejected("writer receipt ceiling overflow"))?;
+    // This upper envelope validates consistency only. No permission uses it:
+    // the lower cap above and the original offset both remain restrictions.
+    let upper = after
+        .checked_add(std::time::Duration::from_millis(expires_at_ms - wall_floor))
         .ok_or_else(|| rejected("writer receipt ceiling overflow"))?;
     let maximum = clocks.restrictive_offset(source.min(service), source)?;
     if offset > maximum {
@@ -568,11 +596,12 @@ fn received_writer_session_deadline(
             "writer receipt offset exceeds retained source/service",
         ));
     }
-    let restored = clocks.restrict_received(PROFILE, offset, source.min(service), now)?;
-    if restored > wall_cap {
+    let restored = clocks.restrict_received(PROFILE, offset, source.min(service), after)?;
+    if restored > upper {
         return Err(rejected("writer receipt original ceiling exceeds expiry"));
     }
-    Ok(restored)
+    if wall_cap <= after { return Err(rejected("authenticated writer receipt already expired")); }
+    Ok((restored, wall_cap))
 }
 #[derive(Default)]
 pub(super) struct SWritAcquire {
@@ -911,7 +940,7 @@ impl SignerFinancialWorkflowOriginV1 {
             original_writer_session_deadline,
             b.read.entry.original_source.min(service.deadline),
         )?;
-        let restored = received_writer_session_deadline(
+        let (restored, original_writer_wall_deadline) = received_writer_session_deadlines(
             self.clocks,
             offset,
             &data,
@@ -929,6 +958,7 @@ impl SignerFinancialWorkflowOriginV1 {
         self.writer_acquire.committed = Some(AcquiredRetention {
             data: data.clone(),
             original_writer_session_deadline,
+            original_writer_wall_deadline,
         });
         self.send(&Packet::Acquired {
             actor,
@@ -1482,7 +1512,7 @@ impl CoordinatorFinancialEndpointV1 {
                 }
                 b.read.entry.check_custody()?;
                 service.check()?;
-                let original_writer_session_deadline = received_writer_session_deadline(
+                let (original_writer_session_deadline, original_writer_wall_deadline) = received_writer_session_deadlines(
                     self.clocks,
                     writer_session_ceiling_ms,
                     &data,
@@ -1494,6 +1524,7 @@ impl CoordinatorFinancialEndpointV1 {
                 slot.writer_acquire.committed = Some(AcquiredRetention {
                     data: data.clone(),
                     original_writer_session_deadline,
+                    original_writer_wall_deadline,
                 });
                 Ok(CoordinatorFinancialEventV1::AwaitingActivateRead { role, data })
             }
@@ -1819,7 +1850,7 @@ impl HostFinancialWorkflowRelayV1 {
                     self.clocks.supervision(),
                     Instant::now(),
                 )?;
-                let original_writer_session_deadline = received_writer_session_deadline(
+                let (original_writer_session_deadline, original_writer_wall_deadline) = received_writer_session_deadlines(
                     self.clocks,
                     *writer_session_ceiling_ms,
                     data,
@@ -1830,6 +1861,7 @@ impl HostFinancialWorkflowRelayV1 {
                 slot.writer_acquire.committed = Some(AcquiredRetention {
                     data: data.clone(),
                     original_writer_session_deadline,
+                    original_writer_wall_deadline,
                 });
                 Ok(true)
             }
@@ -1926,6 +1958,115 @@ impl HWritAcquire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Real inherited clocks and the actual restoration kernel; no Source,
+    // receipt authority, Final or native actor is constructed by these tests.
+    #[test]
+    fn writer_receipt_rounding_preserves_identity_and_restricts_permission() {
+        use std::time::Duration;
+        let epoch = Instant::now();
+        let clocks = FullWorkflowClocksV1::from_initial_epoch(epoch).unwrap();
+        let cap = epoch + Duration::from_secs(20);
+        let at = |us| epoch + Duration::from_micros(us);
+        let expiry = 1_010_000;
+        // wall = mono + 1_000_000ms + 0.2ms. Sender rounds wall up and
+        // the inherited offset down: exact 9999.3ms becomes wire 9999ms.
+        let sender = at(100_300) + Duration::from_millis(expiry - 1_000_101);
+        let offset = clocks.restrictive_offset(sender, cap).unwrap();
+        assert_eq!(sender, at(9_999_300));
+        assert_eq!(offset, 9_999);
+        for (sample_us, wall_floor, lower_us, legacy_accepts) in [
+            (100_400, 1_000_100, 9_999_400, true),
+            (101_400, 1_000_101, 9_999_400, true),
+            (102_900, 1_000_103, 9_998_900, false),
+        ] {
+            let (identity, permission) = received_writer_session_deadlines_at(
+                clocks, offset, expiry, cap, cap, at(sample_us), wall_floor, at(sample_us),
+            ).unwrap();
+            assert_eq!(identity, at(9_999_000));
+            assert_eq!(permission, at(lower_us));
+            assert_eq!(identity <= permission, legacy_accepts);
+            assert!(identity <= sender && permission < at(9_999_800));
+            let effective = identity.min(permission);
+            assert_eq!(clocks.restrict_received(PROFILE, offset, effective,
+                effective - Duration::from_nanos(1)).unwrap(), effective);
+            assert!(clocks.restrict_received(PROFILE, offset, effective, effective).is_err());
+            assert_eq!(clocks.restrictive_offset(identity, cap).unwrap(), offset);
+        }
+    }
+    #[test]
+    fn writer_receipt_bracket_keeps_original_caps_and_rejects_invalid_inputs() {
+        use std::time::Duration;
+        let epoch = Instant::now();
+        let clocks = FullWorkflowClocksV1::from_initial_epoch(epoch).unwrap();
+        let at = |ms| epoch + Duration::from_millis(ms);
+        let restore = |offset, expiry, source, service, before, wall, after| {
+            received_writer_session_deadlines_at(clocks, offset, expiry, at(source),
+                at(service), at(before), wall, at(after))
+        };
+        // A nonzero sampling interval may enlarge only the consistency
+        // envelope. The permission cap is fixed from the earlier sample.
+        assert_eq!(restore(10_002, 10_000, 20_000, 20_000, 100, 100, 102).unwrap(),
+            (at(10_002), at(9_999)));
+        assert!(restore(10_003, 10_000, 20_000, 20_000, 100, 100, 102).is_err());
+        assert!(restore(10_001, 10_000, 20_000, 20_000, 100, 100, 100).is_err());
+        for (offset, expiry, source, service, before, wall, after) in [
+            (0, 10_000, 20_000, 20_000, 100, 100, 100),
+            (1_800_001, 10_000, 20_000, 20_000, 100, 100, 100),
+            (10_001, 20_000, 10_000, 20_000, 100, 100, 100),
+            (10_001, 20_000, 20_000, 10_000, 100, 100, 100),
+            (100, 10_000, 20_000, 20_000, 100, 100, 100),
+            (101, 10_000, 20_000, 20_000, 100, 100, 102),
+            (9_999, 10_000, 20_000, 20_000, 102, 100, 100),
+            (9_999, 10_000, 20_000, 20_000, 100, 9_999, 100),
+            (9_999, 10_000, 20_000, 20_000, 100, 10_000, 100),
+            (9_999, u64::MAX, 20_000, 20_000, 100, u64::MAX, 100),
+            (15_000, 10_000, 20_000, 20_000, 100, 100, 10_000),
+        ] { assert!(restore(offset, expiry, source, service, before, wall, after).is_err()); }
+        // Forward wall movement narrows permission; backward wall movement
+        // cannot extend the immutable original identity into permission.
+        let (identity, lower) = restore(9_999, 10_000, 20_000, 20_000, 100, 101, 100).unwrap();
+        assert_eq!(identity.min(lower), at(9_998));
+        let (identity, lower) = restore(9_999, 10_000, 20_000, 20_000, 100, 50, 100).unwrap();
+        assert_eq!(identity.min(lower), at(9_999));
+    }
+    #[test]
+    fn writer_receipt_cap_is_bound_to_action_checks_not_terminal_forwarding() {
+        let acquire = include_str!("signer_writer_read_acquire_origin.rs").split("#[cfg(test)]").next().unwrap();
+        assert_eq!(acquire.matches("= received_writer_session_deadlines(").count(), 3);
+        assert_eq!(acquire.matches("original_writer_wall_deadline,").count(), 3);
+        assert!(acquire.contains("if restored > original_writer_session_deadline"));
+        let activate = include_str!("signer_activate_wallet_origin.rs");
+        assert_eq!(activate.matches("self.read.writer_deadline.min(self.read.writer_wall_deadline)").count(), 2);
+        assert!(activate.contains("self.writer_deadline.min(self.writer_wall_deadline)"));
+        assert_eq!(activate.matches("writer_acquire.retained_wall_deadline()?").count(), 3);
+        let retained = activate.split("pub(super) fn retained_wall_deadline(&self)").nth(1).unwrap()
+            .split("pub(super) fn wallet_predecessor").next().unwrap();
+        assert!(!retained.contains("require_time") && !retained.contains("Instant::now"));
+        for source in [include_str!("signer_sign_origin.rs"), include_str!("signer_return_origin.rs")] {
+            let source = source.split("#[cfg(test)]").next().unwrap();
+            assert!(source.contains("a.read.service.deadline.min(a.read.writer_deadline).min(a.read.writer_wall_deadline)"));
+            assert!(source.contains("service.min(writer).min(writer_wall)"));
+            assert_eq!(source.matches("slot.activate.retained_wall_deadline()?").count(), 2);
+            // All four existing Host action clock calls carry the separate cap.
+            assert_eq!(source.matches("writer_wall,\n").count(), 2);
+            assert_eq!(source.matches("writer, writer_wall, self.clocks").count(), 2);
+            let terminal = source.rsplit("Packet::").take(2).collect::<Vec<_>>();
+            assert!(terminal.iter().all(|s| !s.contains("relay_clock(")));
+        }
+        let wallet = include_str!("signer_wallet_origin.rs");
+        assert!(wallet.contains("require_time(writer.min(writer_wall))"));
+        assert_eq!(wallet.matches("slot.activate.retained_wall_deadline()?").count(), 2);
+        let selector = include_str!("financial_selector_origin.rs");
+        assert!(selector.contains("require_time(writer.min(slot.activate.retained_wall_deadline()?))"));
+        let retirement = include_str!("witness_retirement.rs");
+        assert!(retirement.contains("deadline.min(activation.read.writer_deadline).min(activation.read.writer_wall_deadline)"));
+        assert!(retirement.contains("service,a.read.writer_deadline,a.read.writer_wall_deadline,"));
+        assert!(retirement.contains("signed,service,writer,writer_wall,retired_index:index"));
+        let custody = include_str!("signed_result_custody.rs");
+        assert!(custody.contains("self.service.min(self.writer).min(self.writer_wall).min(self.entry.original_source)"));
+        assert_eq!(custody.matches("original_writer_deadline(&self)->Instant{self.record.writer}").count(), 2);
+    }
+
     #[test]
     fn writer_receive_race_preserves_r_and_rejects_wrong_phase() {
         for (from, to) in [
@@ -2147,6 +2288,10 @@ mod tests {
 }
 
 impl SWritAcquire {
+    pub(super) fn retained_wall_deadline(&self) -> Result<Instant> {
+        Ok(self.committed.as_ref().ok_or_else(|| rejected("retained writer wall cap missing"))?
+            .original_writer_wall_deadline)
+    }
     pub(super) fn retained_result(
         &self,
     ) -> Result<(
@@ -2172,6 +2317,10 @@ impl SWritAcquire {
     }
 }
 impl CWritAcquire {
+    pub(super) fn retained_wall_deadline(&self) -> Result<Instant> {
+        Ok(self.committed.as_ref().ok_or_else(|| rejected("retained writer wall cap missing"))?
+            .original_writer_wall_deadline)
+    }
     pub(super) fn retained_result(
         &self,
     ) -> Result<(
@@ -2197,6 +2346,10 @@ impl CWritAcquire {
     }
 }
 impl HWritAcquire {
+    pub(super) fn retained_wall_deadline(&self) -> Result<Instant> {
+        Ok(self.committed.as_ref().ok_or_else(|| rejected("retained writer wall cap missing"))?
+            .original_writer_wall_deadline)
+    }
     pub(super) fn retained_result(
         &self,
     ) -> Result<(

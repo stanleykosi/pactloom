@@ -752,8 +752,14 @@ impl CoordinatorFinancialEndpointV1 {
         if matches!(packet,Packet::ReturnReadDisplay{..}|Packet::ReturnExactDisplay{..}|Packet::ReturnPrepared{..}|Packet::ReturnCompleted{..}|Packet::ReturnFailed{..}){return self.receive_return_event(packet).map(Some);}
         if matches!(packet,Packet::SignReadDisplay{..}|Packet::SignExactDisplay{..}|Packet::SignPrepared{..}|Packet::SignCommitted{..}|Packet::SignFailed{..}){return self.receive_sign_event(packet).map(Some);}
         if matches!(packet,Packet::WalletPrepareDisplay{..}|Packet::WalletObserveDisplay{..}|Packet::WalletPrepared{..}|Packet::WalletObserved{..}|Packet::WalletFailed{..}){return self.receive_wallet_event(packet).map(Some);}
-        if matches!(packet,Packet::ActivateReadDisplay{..}|Packet::ActivateReadFailed{..}|Packet::ActivateDisplay{..}|Packet::ActivateReady{..}|Packet::ActivateOutcome{..}|Packet::Activated{..}){return self.receive_activate_event(packet).map(Some);}
-        if matches!(packet,Packet::WriterReadDisplay{..}|Packet::WriterReadFailed{..}|Packet::AcquireDisplay{..}|Packet::AcquireReady{..}|Packet::AcquireOutcome{..}|Packet::Acquired{..}){return self.receive_writer_acquire_event(packet).map(Some);}
+        if matches!(packet,Packet::ActivateReadDisplay{..}|Packet::ActivateReadFailed{..}|Packet::ActivateDisplay{..}|Packet::ActivateReady{..}|Packet::ActivateOutcome{..}|Packet::Activated{..}){return self.receive_activate_event(packet).inspect_err(|_error|{
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::work_fallback(crate::financial_ci_actor_diagnostics::DriverStage::WriterActivateReceiveError,_error);
+        }).map(Some);}
+        if matches!(packet,Packet::WriterReadDisplay{..}|Packet::WriterReadFailed{..}|Packet::AcquireDisplay{..}|Packet::AcquireReady{..}|Packet::AcquireOutcome{..}|Packet::Acquired{..}){return self.receive_writer_acquire_event(packet).inspect_err(|_error|{
+            #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+            crate::financial_ci_actor_diagnostics::work_fallback(crate::financial_ci_actor_diagnostics::DriverStage::WriterAcquireReceiveError,_error);
+        }).map(Some);}
         if matches!(packet,Packet::AdmitDisplay{..}|Packet::AdmitReady{..}|Packet::Admitted{..}|Packet::AdmitOutcome{..}) { return self.receive_admit_event(packet).map(Some); }
         let mut retained_history=None;
         let slot=self.slots[i].as_mut().ok_or_else(||rejected("workflow unsolicited response"))?;
