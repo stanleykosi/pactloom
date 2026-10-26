@@ -158,8 +158,12 @@ class PumpTests(unittest.TestCase):
         return f
     def submit(self,f):
         h=f.current['host_observation'];h.update(entry='Editing',view=None,editor=dict(ordinal=f.host_lines,revision=h['revision']));f.current['host_input']=True
+        original_widgets=f.current['widgets']
+        f.current['widgets']=[dict(tag='ScrollRegion',owner=None,enabled=True,rect=[0,0,1280,800])]+[
+            dict(tag=tag,owner=None,enabled=True,rect=[10,y,110,y+20])
+            for tag,y in (('HostEditor',100),('HostSubmit',150))]
         f.pump_host(f.current)
-        h.update(entry='Idle',editor=None);f.current['host_input']=False
+        h.update(entry='Idle',editor=None);f.current['host_input']=False;f.current['widgets']=original_widgets
     def test_old_tail_wait_then_same_literal_new_occurrence(self):
         f=self.make();self.assertTrue(f.pump_host(f.current));self.submit(f)
         self.assertFalse(f.pump_host(f.current));self.assertEqual(f.captures,1)

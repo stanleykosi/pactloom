@@ -272,6 +272,9 @@ class HostBoundaryDiagnosticV2Tests(unittest.TestCase):
             focused=True,host_input=entry in ('Editing','Writing'),secret_input=False,
             pixels_per_point=1,viewport=[1280,800],host_observation=h,widgets=[
                 dict(tag='HostOutput',owner=None,rect=[0,0,120,40],enabled=True)])
+        if entry=='Editing':s['widgets']=[dict(tag='ScrollRegion',owner=None,enabled=True,rect=[0,0,1280,800])]+[
+            dict(tag=tag,owner=None,enabled=True,rect=[10,y,110,y+20])
+            for tag,y in (('HostEditor',100),('HostSubmit',150))]
         F.C.validate_snapshot(s);return s
     def test_v1_unchanged_and_v2_unobserved_has_only_closed_fields(self):
         old=dict(version=1,category='none',startup_stage='Financial',attempted_lines=4)
@@ -819,7 +822,10 @@ class HostStartupContractTests(unittest.TestCase):
         flow=self.flow();flow.pending_host=flow.expected_host_line(self.PROMPTS[0]);flow.pending_startup=0
         flow.native.public_host_line=mock.Mock()
         flow.host_lines=1;flow.pending_occurrence=(0,F.H.count(self.PROMPTS[0]),1)
-        snapshot=observed_snapshot(phase='Selecting',owner=None,host_input=True,secret_input=False,
+        snapshot=observed_snapshot(phase='Selecting',subphase='None',owner=None,focused=True,host_input=True,secret_input=False,
+            pixels_per_point=1,viewport=[1280,800],widgets=[dict(tag='ScrollRegion',owner=None,enabled=True,rect=[0,0,1280,800])]+[
+                dict(tag=tag,owner=None,enabled=True,rect=[10,y,110,y+20])
+                for tag,y in (('HostEditor',100),('HostSubmit',150))],
             host_observation=dict(revision=1,nonws_end=flow.pending_occurrence[1],context_valid=True,
                                   entry='Editing',editor=dict(ordinal=1,revision=1),view=None))
         flow.snapshot=mock.Mock(return_value=snapshot)
@@ -945,6 +951,7 @@ class HostStartupContractTests(unittest.TestCase):
                 secret_input=False,host_input=editing,host_observation=h,
                 pixels_per_point=1,viewport=[1280,800],widgets=[
                     dict(tag=t,owner=None,rect=[10,y,110,y+20],enabled=True) for t,y in widgets])
+            if editing:result['widgets'].append(dict(tag='ScrollRegion',owner=None,enabled=True,rect=[0,0,1280,800]))
             F.C.validate_snapshot(result);return result
         def effect(name):
             self.assertFalse(state['seen_revoked'],'effect after observed terminal state')
@@ -1060,6 +1067,7 @@ class HostStartupContractTests(unittest.TestCase):
                 result=observed_snapshot(phase='Selecting',owner=None,subphase='None',focused=True,
                     view_generation=state['generation'],secret_input=False,host_input=protected,host_observation=h,
                     pixels_per_point=1,viewport=[1280,800],widgets=[dict(tag=t,owner=None,rect=[10,y,110,y+20],enabled=True) for t,y in widgets])
+                if editing:result['widgets'].append(dict(tag='ScrollRegion',owner=None,enabled=True,rect=[0,0,1280,800]))
                 if semantic:result['host_view_id']=None if protected else 1+state['step']*3+state['coverage']
                 return result
         def click(x,y):
@@ -2918,7 +2926,7 @@ class FinancialHostReadinessTests(unittest.TestCase):
             verified_owner=('Signer2' if owner=='Signer1' else 'Signer1') if proof=='other' else owner
             record('Host','HostMilestone',dict(step='Owner'+verified_owner[-1]+'AdmissionVerified'))
         def widget(tag,x,role=None,enabled=True):
-            return dict(tag=tag,owner=role,enabled=enabled,rect=[x,300,x+40,340])
+            return dict(tag=tag,owner=role,enabled=enabled,rect=[0,0,1280,800] if tag=='ScrollRegion' else [x,300,x+40,340])
         prompt=self.PROMPT;test=self
         class Observer:
             expected_profile=profile
