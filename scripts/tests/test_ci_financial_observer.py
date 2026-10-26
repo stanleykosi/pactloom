@@ -2511,6 +2511,10 @@ class InitialPairObservationWaitTests(unittest.TestCase):
         flow=F.FullFlow(controller,fixture,Observer(),None,operator)
         flow.startup_index=13;flow.host_lines=16;flow.startup_focus_seen=True
         flow.host_occurrences.frontier=100;flow.host_occurrences.last_end=100;flow.host_occurrences.last_revision=16
+        # Inert scheduling sentinel after Host Pair submission, not native Pair
+        # authority or a capture fixture. Full-pump tests establish provenance.
+        flow.reviewer_index=int(target[-1]);flow.pair_navigation_submitted[target]=((99,100,16),16)
+        flow.done.add(('Selecting','None','HostSubmit',None,16))
         flow.done.add(('Selecting','None','ConfigureV3','Signer1',None))
         if target=='Signer2':flow.done.add(('Selecting','None','ConfigureV3','Signer2',None))
         # Selector files are independent of this initial Pair stage.

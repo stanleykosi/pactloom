@@ -1,14 +1,14 @@
-name: Retained V3 selection navigation preflight only
+name: Exact Host Pair purpose preflight only
 on:
   push:
-    branches: [checkpoint/held-selection-preflight-p81]
+    branches: [checkpoint/pair-purpose-preflight-p82]
 permissions: {}
 concurrency:
-  group: held-selection-preflight-p81
+  group: pair-purpose-preflight-p82
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/held-selection-preflight-p81' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/pair-purpose-preflight-p82' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -208,7 +208,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/held-selection-preflight-p81' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/pair-purpose-preflight-p82' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

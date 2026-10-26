@@ -53,6 +53,10 @@ RESULT_PHASES=frozenset(('V3Held','V3Paired','V3Enrolled','V3ManifestAccepted','
 
 HOST_COMMANDS_INSTRUCTION='Select original reviewer 1 of 2 for its separate closed V3 admission.\n'
 
+# Exact native public purpose text; this classifies navigation, never permission.
+PAIR_PREPARATION_PURPOSE='Approve LOCAL exact-byte preparation for closed original delivery. Read and fully verify the selected retained proof and BOTH original materials, and retain one exact encoded private payload in local memory under the ORIGINAL absolute ceilings. No recipient disclosure, transport, signing, submission or admission is authorized.'
+PAIR_CONFIRMATION_PURPOSE='Pair this exact original coordinated reviewer for independently approved receive/view. No native provider fallback or financial execution is authorized.'
+
 HOST_STARTUP=('profile','workspace','password','financial_password','historical_approval',
               'principal','scope','shared','mode','origin','credential','session_approval',
               'session_commands_file')
@@ -90,6 +94,7 @@ class FullFlow:
         self.password_attempted=set();self.password_typed=set();self.password_pending=None
         self.last_ocr=0;self.ocr_delay=1_000_000_000;self.last_capture=None;self.challenges=set();self.host_paths=set()
         self.reviewer_index=0;self.continue_index=0;self.result_index=0
+        self.pair_prompt=None;self.pair_navigation_submitted={}
         self.records=[];self.pending_host=None;self.location=None;self.pending_selection=None
         self.startup_index=0;self.startup_issued=None;self.pending_startup=None
         self.startup_waiting=False;self.startup_input_attempted=False
@@ -505,6 +510,37 @@ class FullFlow:
         count=self.scrolls.get(key,0);C.input_budget(count<64,'idle_sweep',count)
         self.scrolls[key]=count+1
         return self.scroll(s,'ScrollRegion',None,'up' if count<8 else 'down')
+    def initial_pair_navigation_target(self,s):
+        target=self.current_owner();h=s['host_observation']
+        if (s['phase']=='Selecting' and s['subphase']=='None' and s['owner'] is None
+                and target in ('Signer1','Signer2') and self.host_startup_complete
+                and self.pending_host is None and self.host_prepared is None
+                and s['focused'] and not(s['secret_input'] or s['host_input'])
+                and h['context_valid'] and h['entry']=='Idle'
+                and self.milestone(target,'EntryOpened') and not self.milestone(target,'Paired')):
+            return target
+        return None
+    def initial_pair_purpose(self,text,observed,occurrence,suffix):
+        # A generic APPROVE tail is insufficient: the immediately preceding
+        # complete purpose must belong to this fresh captured occurrence too.
+        if not H.APPROVAL.fullmatch(suffix):return None
+        for kind,detail in (('Preparation',PAIR_PREPARATION_PURPOSE),('Pair',PAIR_CONFIRMATION_PURPOSE)):
+            match=re.search(H._literal_pattern(detail)+r'[ \t\r\n\f\v]*'+re.escape(suffix)+r'\Z',text)
+            if match is not None:
+                size=H.count(match.group(0));start=observed['nonws_end']-size
+                if (0<size<=observed['view']['nonws'] and start>=self.host_occurrences.frontier
+                        and occurrence[1:]==(observed['nonws_end'],observed['revision'])):
+                    return kind
+        return None
+    def reserve_initial_pair_navigation(self,s,target):
+        if target!=self.initial_pair_navigation_target(s) or target is None or target in self.pair_navigation_submitted:return False
+        # Keep the real Host pane reachable without spending/resetting idle64.
+        # After exact Pair submission H blocks on its original response bound;
+        # the existing sweep can then find a later/clipped native Pair control.
+        for tag in ('HostOutput','BeginHostLine'):
+            if self.find(s,tag,None) is None:
+                self.seek(s,tag,None);return True
+        return True
     def wait_initial_pair_after_sweep(self,s,target):
         # Initial Pair is issued asynchronously by the original Host/Signer
         # after EntryOpened. A finite navigation budget is not its native clock.
@@ -814,6 +850,13 @@ class FullFlow:
             self.host_action='SubmitRequested'
             self.press(fresh,'HostSubmit',None,ordinal=self.host_lines)
             self.host_action='SubmitReturned'
+            if self.pair_prompt is not None and self.pair_prompt[1]==occurrence:
+                target,_,purpose=self.pair_prompt
+                if purpose=='Pair':
+                    C.require(target==self.current_owner() and self.reviewer_index==int(target[-1])
+                              and s['phase']=='Selecting' and s['owner'] is None,'input_phase')
+                    self.pair_navigation_submitted[target]=(occurrence,self.host_lines)
+                self.pair_prompt=None
             if self.pending_startup is not None:self.startup_submitted()
             self.pending_host=None;self.pending_occurrence=None;return True
         if self.startup_waiting:
@@ -918,12 +961,29 @@ class FullFlow:
                     return False
                 error=C.Rejected('snapshot');error.snapshot_reason='HostContext'
                 raise error from None
+            target=self.initial_pair_navigation_target(s)
+            self.pair_prompt=None
+            if target is not None and H.APPROVAL.fullmatch(suffix):
+                C.require(self.reviewer_index==int(target[-1]),'input_phase')
+                purpose=self.initial_pair_purpose(text,observed,occurrence,suffix)
+                if purpose is None:
+                    # Do not consume the challenge or approve a clipped/unknown
+                    # purpose. Existing finite coverage search remains the bound.
+                    self.host_capture_outcome='host_capture_grammar';self.host_rejection='host_capture_grammar'
+                    self.host_ignored=(observed['revision'],observed['nonws_end'],observed['view']['nonws'])
+                    captured_context=(observed['revision'],observed['nonws_end'])
+                    if self.host_coverage_context!=captured_context:self.host_coverage_steps=0
+                    self.host_coverage_context=captured_context
+                    return self.seek_host_coverage(s)
+                self.pair_prompt=(target,occurrence,purpose)
             self.host_capture_outcome='Accepted';self.host_rejection=None
             self.host_coverage_context=None
             self.host_deferred=(occurrence,suffix)
         self.host_stage=H.stage(suffix)
         line=self.expected_host_line(suffix)
         if line is None:return False
+        if self.pair_prompt is not None and self.pair_prompt[1]==occurrence:
+            C.require(line==('public',H.APPROVAL.fullmatch(suffix).group(1)),'input_phase')
         self.host_prepared=(occurrence,line);self.host_deferred=None
         # Capture may admit a newer context than s. Never dispatch prepared
         # input against that stale pre-capture snapshot; re-observe normally.
@@ -1059,6 +1119,7 @@ class FullFlow:
                     if selected:continue
                 if phase in RESULT_PHASES and self.find(s,'SelectNextV3',owner) and not self.used(s,'SelectNextV3',owner):
                     self.press(s,'SelectNextV3',owner);self.pending_selection=phase_key;continue
+                if self.reserve_initial_pair_navigation(s,target):continue
                 if self.waiting_for_host_admission(s,target):continue
                 if not self.wait_initial_pair_after_sweep(s,target):self.idle_scan(s)
             elif phase=='Waiting':self.idle_scan(s)
