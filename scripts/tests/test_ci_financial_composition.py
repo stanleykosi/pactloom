@@ -163,6 +163,7 @@ class ComposedStartupTests(unittest.TestCase):
                     pixels_per_point=1,viewport=[1280,800],widgets=[
                         dict(tag=tag,owner=None,enabled=True,rect=[10,y,110,y+20])
                         for tag,y in (('HostEditor',100),('HostSubmit',150))])
+                editing['widgets'].append(dict(tag='ScrollRegion',owner=None,enabled=True,rect=[0,0,1280,800]))
                 F.C.validate_snapshot(editing)
                 writing=editing|{'host_observation':h|{'entry':'Writing','editor':None},'widgets':[]}
                 idle=writing|{'host_input':False,'host_observation':h|{'entry':'Idle','editor':None}}

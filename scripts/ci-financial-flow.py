@@ -318,10 +318,13 @@ class FullFlow:
         point=self.native.point(s,body,owner)
         if body=='ScrollRegion':
             x0,y0,x1,y1=w['rect'];scale=s['pixels_per_point']
-            inners=[a['rect'] for a in s['widgets'] if a['tag'] in ('ReviewBody','SignerReviewBody','WitnessReviewBody','HostOutput')]
+            inners=[a['rect'] for a in s['widgets'] if a['tag'] in ('ReviewBody','SignerReviewBody','WitnessReviewBody','HostOutput','HostEditor','HostSubmit')]
             points=[(x1-3,y0+5+(y1-y0-10)*i/8) for i in range(9)]
             clear=next(((x,y) for x,y in points if not any(a<=x<=c and b<=y<=d for a,b,c,d in inners)),None)
             C.require(clear is not None,'input_widget');point=tuple(int(v*scale) for v in clear)
+            if s['host_input']:
+                x,y=(v/scale for v in point)
+                C.require(x0<x<x1 and y0<y<y1 and not any(a<=x<=c and b<=y<=d for a,b,c,d in inners),'input_widget')
         operation='BodyDown' if body=='ReviewBody' and direction=='down' else 'OuterUp' if body=='ScrollRegion' and direction=='up' else 'OuterDown' if body=='ScrollRegion' else 'OtherScroll'
         anchor='Body' if operation=='BodyDown' else 'Outer' if operation in ('OuterUp','OuterDown') else 'None'
         self.note_review_observation(s,operation=operation,boundary='Requested',anchor=anchor,point=point)
@@ -827,6 +830,48 @@ class FullFlow:
         # Even if the target appeared, re-enter the pump on a new outer frame.
         return True
 
+    def host_entry_controls_visible(self,s,occurrence):
+        # Position both controls BEFORE one-shot typing. No capture, retyping,
+        # post-input retry or inference that an absent/disabled Submit is ready.
+        def checked(frame):
+            C.require(frame['phase']==s['phase'] and frame['owner']==s['owner']
+                      and frame['subphase']==s['subphase'] and frame['focused']
+                      and frame['host_input'] and not frame['secret_input'],'input_phase')
+            self.native.check_host_editor(frame,occurrence)
+            C.require(frame['host_observation']['editor']['ordinal']==self.host_lines,'input_phase')
+            controls=[self.find(frame,tag,None) for tag in ('HostEditor','HostSubmit')]
+            C.require(all(w is None or w['enabled'] for w in controls),'input_disabled')
+            outer=self.find(frame,'ScrollRegion',None)
+            C.require(outer is not None and outer['enabled'],'input_widget')
+            top,bottom=outer['rect'][1],outer['rect'][3]
+            # The editor/caret needs interior space; the final Submit can meet
+            # the lower edge exactly at egui's content-size scroll clamp.
+            for i,w in enumerate(controls):
+                if w is None:continue
+                a,b,c,d=w['rect'];scale=frame['pixels_per_point']
+                x,y=int((a+c)*scale/2)/scale,int((b+d)*scale/2)/scale
+                if not (a<x<c and b<y<d and (top<b<d<bottom if i==0 else top<=b<d<=bottom)):
+                    controls[i]=None
+            return controls
+        controls=checked(s)
+        if all(w is not None for w in controls):return True
+        latest=self.native.stable(s['phase'],s['owner'],protected=True)
+        controls=checked(latest)
+        if all(w is not None for w in controls):return False # Fresh outer pass before typing.
+        tag='HostEditor' if controls[0] is None else 'HostSubmit'
+        key=(s['phase'],s['subphase'],'seek',tag,None)
+        count=self.scrolls.get(key,0);self.scrolls[key]=count+1
+        C.require(count<64,'input_widget')
+        editor=self.find(latest,'HostEditor',None)
+        if controls[0] is None and self.find(latest,'HostSubmit',None) is not None:direction='up'
+        elif editor is not None:
+            outer=self.find(latest,'ScrollRegion',None)['rect']
+            direction=('down' if editor['rect'][1]>outer[1] else 'up' if editor['rect'][3]<outer[3]
+                       else 'up' if count<24 else 'down')
+        else:direction='up' if count<24 else 'down'
+        self.scroll(latest,'ScrollRegion',None,direction)
+        return False
+
     def pump_host(self,s):
         h=s['host_observation'];context=(h['revision'],h['nonws_end'])
         if self.pending_host is not None:
@@ -838,6 +883,7 @@ class FullFlow:
             if h['entry']=='Idle':return True
             self.native.check_host_editor(s,occurrence)
             C.require(h['editor']['ordinal']==self.host_lines,'input_phase')
+            if not self.host_entry_controls_visible(s,occurrence):return True
             if self.pending_startup is not None:
                 C.require(not self.startup_input_attempted,'replay')
                 self.startup_input_attempted=True
