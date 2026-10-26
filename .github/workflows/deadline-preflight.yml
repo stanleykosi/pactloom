@@ -1,14 +1,14 @@
-name: Writer correlation and conservative wall cap preflight only
+name: Observer prefix decoding and Host navigation preflight only
 on:
   push:
-    branches: [checkpoint/writer-wall-cap-preflight-p85]
+    branches: [checkpoint/observer-navigation-preflight-h86]
 permissions: {}
 concurrency:
-  group: writer-wall-cap-preflight-p85
+  group: observer-navigation-preflight-h86
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/writer-wall-cap-preflight-p85' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/observer-navigation-preflight-h86' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -211,7 +211,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/writer-wall-cap-preflight-p85' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/observer-navigation-preflight-h86' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

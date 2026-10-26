@@ -4103,14 +4103,15 @@ class ExactPrefixValidationTests(unittest.TestCase):
   import copy
   p,r,o=self.fixture()
   with mock.patch.object(O.json,'loads',wraps=O.json.loads) as loads,mock.patch.object(O.C,'validate_record',wraps=O.C.validate_record) as validate:
+   # Each known UTF-8 prefix now decodes once; new records remain strict.
    first=o.read();self.assertEqual((loads.call_count,validate.call_count),(4,4))
    first[-1]['facts']['widgets'].append({'caller':'mutation'})
-   self.assertEqual(o.read(),r);self.assertEqual((loads.call_count,validate.call_count),(8,4))
+   self.assertEqual(o.read(),r);self.assertEqual((loads.call_count,validate.call_count),(5,4))
    extra=copy.deepcopy(r[-1]);extra['sequence']+=1;extra['elapsed_ns']+=1;extra['facts']['view_generation']+=1
    with p.open('ab') as f:f.write(json.dumps(extra).encode()+b'\n')
-   self.assertEqual(o.read(),r+[extra]);self.assertEqual((loads.call_count,validate.call_count),(13,5))
+   self.assertEqual(o.read(),r+[extra]);self.assertEqual((loads.call_count,validate.call_count),(7,5))
    snapshot=o.next_snapshot(o.deadline_ns);snapshot['widgets'].append({'another':'mutation'})
-   self.assertEqual(o.read(),r+[extra]);self.assertEqual((loads.call_count,validate.call_count),(23,5))
+   self.assertEqual(o.read(),r+[extra]);self.assertEqual((loads.call_count,validate.call_count),(9,5))
  def test_partial_line_is_uncached_until_complete_and_malformed_suffix_never_becomes_valid(self):
   import copy
   p,r,o=self.fixture();o.read();extra=copy.deepcopy(r[-1]);extra['sequence']+=1;extra['elapsed_ns']+=1;extra['facts']['view_generation']+=1;raw=json.dumps(extra).encode()
@@ -4222,15 +4223,15 @@ class StrictPrefixParseReceiptTests(unittest.TestCase):
   p,r,o=self.fixture()
   with mock.patch.object(O.C,'loads',wraps=O.C.loads) as strict,mock.patch.object(O.json,'loads',wraps=O.json.loads) as parses:
    o.read();self.assertEqual((strict.call_count,parses.call_count),(4,4))
-   o.read();self.assertEqual((strict.call_count,parses.call_count),(4,8))
+   o.read();self.assertEqual((strict.call_count,parses.call_count),(4,5))
    o.expected_profile=O.C.PROFILE
    with self.assertRaises(O.C.Rejected):o.read()
-   self.assertEqual((strict.call_count,parses.call_count),(5,9))
+   self.assertEqual((strict.call_count,parses.call_count),(5,6))
    o.expected_profile=O.C.SEMANTIC_PROFILE;self.assertEqual(o.read(),r)
-   self.assertEqual((strict.call_count,parses.call_count),(5,13))
+   self.assertEqual((strict.call_count,parses.call_count),(5,7))
    extra=dict(r[-1],sequence=5,elapsed_ns=5,facts=dict(r[-1]['facts'],view_generation=4))
    with p.open('ab') as f:f.write(json.dumps(extra).encode()+b'\n')
-   self.assertEqual(o.read(),r+[extra]);self.assertEqual((strict.call_count,parses.call_count),(6,18))
+   self.assertEqual(o.read(),r+[extra]);self.assertEqual((strict.call_count,parses.call_count),(6,9))
  def test_unvalidated_suffix_duplicate_constant_unicode_and_limits_reject_repeatedly(self):
   for suffix,code in ((b'{"schema":1,"schema":1}\n','record_shape'),(b'{"schema":NaN}\n','record_shape'),(b'{"schema":Infinity}\n','record_shape'),(b'{"schema":-Infinity}\n','record_shape'),(b'\xff\n','record_shape'),(b'{}\n','record_shape'),(b' '*32769+b'\n','record_limit')):
    with self.subTest(suffix=suffix[:32]):

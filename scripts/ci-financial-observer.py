@@ -84,16 +84,22 @@ class ObserverFiles:
             if final:C.require(raw==complete and len(raw)==before.st_size==after.st_size,'observer_failure')
             C.require(len(raw)-len(complete)<=C.MAX_RECORD_BYTES,'record_limit')
             # The exact complete byte prefix already passed strict JSON and
-            # shape validation under this profile/file identity. Parse EVERY
-            # line into fresh objects, but only new bytes need duplicate-key
-            # and constant rejection again. No parsed/aggregate cache is kept.
+            # shape validation under this profile/file identity. Batch-decode
+            # ordinary UTF-8 into fresh objects; keep per-line decoding for
+            # previously accepted BOM/UTF-16/32 input. No parsed cache is kept.
             prior_count=len(prior[1].splitlines()) if self._validation_profiles.get(name)==self.expected_profile else 0
-            entries=[]
-            for index,line in enumerate(complete.splitlines()):
+            lines=complete.splitlines();cached=lines[:prior_count]
+            for index,line in enumerate(cached):
+                C.require(len(records)+index<C.MAX_RECORDS,'record_limit')
+                C.require(len(line)<=C.MAX_RECORD_BYTES,'record_limit')
+            if cached and b'\x00' not in prior[1] and b'\xef\xbb\xbf' not in prior[1]:
+                entries=json.loads(b'['+b','.join(cached)+b']')
+            else:entries=[json.loads(line) for line in cached]
+            for line in lines[prior_count:]:
                 C.require(len(records)+len(entries)<C.MAX_RECORDS,'record_limit')
                 C.require(len(line)<=C.MAX_RECORD_BYTES,'record_limit')
-                entry=json.loads(line) if index<prior_count else C.loads(line)
-                if index>=prior_count:C.snapshot_checked('RecordValidation',C.validate_record,entry,self.expected_profile)
+                entry=C.loads(line)
+                C.snapshot_checked('RecordValidation',C.validate_record,entry,self.expected_profile)
                 entries.append(entry)
             if entries:
                 role=entries[0]['role'];birth=entries[0]

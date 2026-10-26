@@ -503,6 +503,22 @@ class FullFlow:
                 self.scroll(latest,'ScrollRegion',None,direction)
             # Visible but disabled/subpixel-only selectors do not authorize a wheel.
             return False
+        if (s['phase']=='Configuring' and s['subphase']=='None' and tag=='Begin'
+                and owner==s['owner'] and owner in ('Signer1','Signer2')
+                and all((s['phase'],field,owner) in self.filled for field in WITNESS_FIELDS)
+                and (anchor:=self.find(s,WITNESS_FIELDS[-1],owner)) is not None and anchor['enabled']):
+            latest=self.native.stable(s['phase'],s['owner'])
+            h=latest['host_observation'];old=s['host_observation']
+            C.require(latest['subphase']=='None' and latest['owner']==owner,'input_phase')
+            if (not h['context_valid'] or h['entry']!='Idle'
+                    or self.pending_host is not None or self.host_prepared is not None
+                    or (h['revision'],h['nonws_end'])!=(old['revision'],old['nonws_end'])):return False
+            if self.find(latest,tag,owner) is not None:return False
+            # Begin follows the completed selector area; the final field is
+            # only a direction anchor, never evidence that Begin is enabled.
+            anchor=self.find(latest,WITNESS_FIELDS[-1],owner)
+            if anchor is not None and anchor['enabled']:direction='down'
+            self.scroll(latest,'ScrollRegion',None,direction);return False
         self.scroll(s,'ScrollRegion',None,direction);return False
     def idle_scan(self,s):
         # Clipped/tagged geometry can stay identical while untagged content
@@ -512,7 +528,25 @@ class FullFlow:
         key=(s['phase'],s['subphase'],'idle_sweep',s['owner'])
         count=self.scrolls.get(key,0);C.input_budget(count<64,'idle_sweep',count)
         self.scrolls[key]=count+1
-        return self.scroll(s,'ScrollRegion',None,'up' if count<8 else 'down')
+        direction='up' if count<8 else 'down'
+        if (s['phase']=='Selecting' and s['subphase']=='None' and s['owner'] is None
+                and self.current_owner() in ('Signer1','Signer2')
+                and self.milestone(self.current_owner(),'Paired')
+                and s['focused'] and not(s['secret_input'] or s['host_input'])
+                and all((w:=self.find(s,tag,None)) is not None and w['enabled']
+                        for tag in ('HostOutput','BeginHostLine'))):
+            latest=self.native.stable(s['phase'],s['owner'])
+            h=latest['host_observation'];old=s['host_observation']
+            C.require(latest['subphase']=='None' and latest['owner'] is None,'input_phase')
+            if (not h['context_valid'] or h['entry']!='Idle'
+                    or self.pending_host is not None or self.host_prepared is not None
+                    or (h['revision'],h['nonws_end'])!=(old['revision'],old['nonws_end'])):return False
+            # Selecting controls follow draw_host. No action is inferred or
+            # pressed here; the next ordinary loop still requires its widget.
+            if all((w:=self.find(latest,tag,None)) is not None and w['enabled']
+                   for tag in ('HostOutput','BeginHostLine')):direction='down'
+            s=latest
+        return self.scroll(s,'ScrollRegion',None,direction)
     def initial_pair_navigation_target(self,s):
         target=self.current_owner();h=s['host_observation']
         if (s['phase']=='Selecting' and s['subphase']=='None' and s['owner'] is None
@@ -816,6 +850,8 @@ class FullFlow:
         # Navigation only in the two native Host-approval waiting phases. Never
         # turn new geometry or a changed prompt into approval/capture authority.
         if s['phase'] not in ('V3Receiving','ReturnReading'):return False
+        C.require(tag in ('HostOutput','BeginHostLine') and s['subphase']=='None'
+                  and s['owner'] in ('Signer1','Signer2'),'input_phase')
         latest=self.native.stable(s['phase'],s['owner'])
         h=latest['host_observation'];old=s['host_observation']
         if (latest['subphase']!=s['subphase'] or not latest['focused']
@@ -826,7 +862,17 @@ class FullFlow:
                 or h['nonws_end']<=self.host_occurrences.frontier):return True
         button=self.find(latest,'BeginHostLine',None)
         if button is not None and not button['enabled']:return True
-        if self.find(latest,tag,None) is None:self.seek(latest,tag,None)
+        if self.find(latest,tag,None) is None:
+            # Native HostOutput precedes BeginHostLine. Use only its actual
+            # enabled sibling in this fresh frame; this is navigation, not
+            # evidence of a prompt, input readiness, or native completion.
+            sibling=self.find(latest,'HostOutput' if tag=='BeginHostLine' else 'BeginHostLine',None)
+            if sibling is not None and sibling['enabled']:
+                key=(latest['phase'],latest['subphase'],'seek',tag,None)
+                count=self.scrolls.get(key,0);self.scrolls[key]=count+1
+                C.require(count<64,'input_widget')
+                self.scroll(latest,'ScrollRegion',None,'down' if tag=='BeginHostLine' else 'up')
+            else:self.seek(latest,tag,None) # Retain the original finite fallback.
         # Even if the target appeared, re-enter the pump on a new outer frame.
         return True
 
