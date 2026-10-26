@@ -122,12 +122,22 @@ with tempfile.TemporaryDirectory() as directory:
  deadline=time.monotonic()+2
  expected_exit='Z' if sys.argv[3]=='direct' else 'absent'
  while ((not ready.exists()) if sys.argv[1]=='live' else state()!=expected_exit):
-  if time.monotonic()>=deadline:raise RuntimeError('test observation deadline')
+  if time.monotonic()>=deadline:
+   try:
+    print(json.dumps({'probe_failure':'observation','mode':sys.argv[3],'requested':sys.argv[1],
+      'expected':expected_exit,'observed':state(),'pid':os.getpid(),'ppid':os.getppid(),'child_pid':pid}),file=sys.stderr,flush=True)
+   except Exception:pass
+   raise RuntimeError('test observation deadline')
   time.sleep(.005)
  observed=state();after=processes();added=any(p==str(pid) for p,start in after-before)
  release.touch()
  while state()!=expected_exit:
-  if time.monotonic()>=deadline:raise RuntimeError('test child exit deadline')
+  if time.monotonic()>=deadline:
+   try:
+    print(json.dumps({'probe_failure':'exit','mode':sys.argv[3],'requested':sys.argv[1],
+      'expected':expected_exit,'observed':state(),'pid':os.getpid(),'ppid':os.getppid(),'child_pid':pid}),file=sys.stderr,flush=True)
+   except Exception:pass
+   raise RuntimeError('test child exit deadline')
   time.sleep(.005)
  try:os.waitpid(pid,0)
  except ChildProcessError:pass
@@ -144,7 +154,14 @@ for mode in ('direct','shell'):
  for state in ('exited','live'):
   args=[sys.executable,'-I','-B','-c',sys.argv[1],state,sys.argv[2],mode]
   if mode=='shell':args=['/bin/sh','-c',shlex.join(args)]
-  result=subprocess.run(args,preexec_fn=adopt,capture_output=True,timeout=5,check=True)
+  try:
+   result=subprocess.run(args,preexec_fn=adopt,capture_output=True,timeout=5,check=True)
+  except subprocess.CalledProcessError as error:
+   try:
+    print(json.dumps({'probe_failure':'child','mode':mode,'requested':state,
+      'stderr':(error.stderr or b'')[-4096:].decode(errors='replace')}),file=sys.stderr,flush=True)
+   except Exception:pass
+   raise
   results[mode+'_'+state]=json.loads(result.stdout)
   while True:
    try:
@@ -153,7 +170,12 @@ for mode in ('direct','shell'):
    except ChildProcessError:break
 print(json.dumps(results))
 '''
-  result=subprocess.run([sys.executable,'-I','-B','-c',driver,body,process_source],capture_output=True,timeout=20,check=True)
+  try:
+   result=subprocess.run([sys.executable,'-I','-B','-c',driver,body,process_source],capture_output=True,timeout=20,check=True)
+  except subprocess.CalledProcessError as error:
+   try:print('SUBREAPER_TEST_FAILURE '+(error.stderr or b'')[-8192:].decode(errors='replace'),file=sys.stderr,flush=True)
+   except Exception:pass
+   raise
   rows=json.loads(result.stdout)
   self.assertEqual(rows['direct_exited'],{'added':True,'state':'Z'})
   self.assertEqual(rows['shell_exited'],{'added':False,'state':'absent'})
