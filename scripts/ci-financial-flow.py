@@ -263,9 +263,16 @@ class FullFlow:
         for owner in ('Signer1','Signer2'):
             if not self.milestone(owner,'ReturnFinished'):return owner
         return None
-    def press(self,s,tag,owner,*,ordinal=None,paired_layout=False):
+    def press(self,s,tag,owner,*,ordinal=None,paired_layout=False,park_reseek=False):
         key=self.key(s,tag,owner)+(ordinal,)
         C.require(key not in self.done,'replay')
+        if park_reseek:
+            incoming=self.find(s,tag,owner)
+            C.require(tag=='ParkFinancial' and s['phase'] in ('SignedRetired','ReturnCompleted')
+                      and s['subphase']=='None' and owner==s['owner'] and owner in ('Signer1','Signer2')
+                      and ordinal is None and not paired_layout and s['focused']
+                      and not(s['secret_input'] or s['host_input'])
+                      and incoming is not None and incoming['enabled'],'input_phase')
         if paired_layout:
             C.require(s['phase']=='AdmissionReview' and s['subphase']=='None' and owner==s['owner']
                       and owner in ('Signer1','Signer2') and not(s['secret_input'] or s['host_input']),'input_phase')
@@ -283,7 +290,29 @@ class FullFlow:
             self.password_guard(latest,s)
             C.require((s['phase'],owner) in self.password_typed,'replay')
         C.require(latest['subphase']==s['subphase'],'input_phase')
-        w=self.find(latest,tag,owner);C.require(w is not None and w['enabled'],'input_disabled')
+        w=self.find(latest,tag,owner)
+        if park_reseek and w is None:
+            # A later, stable viewport may clip the previously visible Park.
+            # Re-enter only the original bounded seek, before any effect latch.
+            h=s['host_observation'];fresh=latest['host_observation']
+            C.require(not any(widget['tag']==tag for widget in latest['widgets'])
+                      and all(latest[k]==s[k] for k in ('phase','subphase','owner','pixels_per_point','viewport'))
+                      and latest['focused'] and not(latest['secret_input'] or latest['host_input'])
+                      and h['context_valid'] and fresh['context_valid']
+                      and h['entry']==fresh['entry']=='Idle'
+                      and (h['revision'],h['nonws_end'])==(fresh['revision'],fresh['nonws_end'])
+                      and self.pending_host is None and self.host_prepared is None,'input_phase')
+            self.seek(latest,tag,owner)
+            return
+        try:C.require(w is not None and w['enabled'],'input_disabled')
+        except C.Rejected as error:
+            # Failure-local metadata from these actual stable frames only.
+            try:
+                error.input_guard=dict(phase=latest['phase'],subphase=latest['subphase'],owner=latest['owner'],
+                    target_owner=owner,tag=tag,view_generation=latest['view_generation'],
+                    status='Missing' if w is None else 'Disabled')
+            except Exception:pass
+            raise
         if tag=='PasswordSubmit' and s['phase'] in ('V3Password','Password'):
             x,y=self.native.point(latest,tag,owner);a,b,c,d=w['rect'];scale=latest['pixels_per_point']
             C.require(a<x/scale<c and b<y/scale<d,'input_widget')
@@ -1188,7 +1217,8 @@ class FullFlow:
                     self.idle_scan(s);continue
                 action=DIRECT[phase]
                 if not self.used(s,action,owner) and self.seek(s,action,owner):
-                    if self.find(s,action,owner)['enabled']:self.press(s,action,owner)
+                    if self.find(s,action,owner)['enabled']:
+                        self.press(s,action,owner,**({'park_reseek':True} if action=='ParkFinancial' and phase in ('SignedRetired','ReturnCompleted') else {}))
                 continue
             if phase=='FinancialSetupSelected':
                 if (not self.used(s,'Configure',owner) and self.financial_selection_ready(owner)

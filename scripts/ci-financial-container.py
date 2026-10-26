@@ -399,8 +399,11 @@ def emit_cached_input_failure(flow,error):
     # Original exception and cached checkpoint only; no fresh read/input/clock.
     try:
         budget=getattr(error,'input_budget',None)
-        if budget is None:return
-        value=dict(version=1,budget=budget,last_main_loop=getattr(flow,'input_checkpoint',None))
+        if budget is not None:
+            value=dict(version=1,budget=budget,last_main_loop=getattr(flow,'input_checkpoint',None))
+        elif getattr(error,'code',None)=='input_disabled' and getattr(error,'input_guard',None) is not None:
+            value=dict(version=2,guard=error.input_guard)
+        else:return
         encoded=json.dumps(C.validate_input_diagnostic(value),separators=(',',':'))
         print('CI_FINANCIAL_INPUT_DIAGNOSTIC '+encoded,flush=True)
     except Exception:return

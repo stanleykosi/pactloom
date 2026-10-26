@@ -859,7 +859,7 @@ class RuntimeRecords:
                     'projection','result_schema')
             self.fixture_diagnostic=value;emit('FIXTURE_DIAGNOSTIC',value)
         elif line.startswith(b'CI_FINANCIAL_INPUT_DIAGNOSTIC '):
-            require(self.input_diagnostic is None,'projection','result_schema')
+            require(self.input_diagnostic is None and self.result is None,'projection','result_schema')
             value=loads(line[len(b'CI_FINANCIAL_INPUT_DIAGNOSTIC '):])
             try:P.C.validate_input_diagnostic(value)
             except Exception:raise Failure('projection','result_schema') from None
@@ -924,7 +924,8 @@ class RuntimeRecords:
         elif line.startswith(b'CI_FINANCIAL_RESULT '):
             value=loads(line[len(b'CI_FINANCIAL_RESULT '):])
             require(type(value) is dict and value==P.failure(value.get('code'),self.expected_profile),'projection','result_schema')
-            require(self.input_diagnostic is None or value.get('code')=='input_budget','projection','result_schema')
+            require(self.input_diagnostic is None or value.get('code')==
+                    ('input_budget' if self.input_diagnostic['version']==1 else 'input_disabled'),'projection','result_schema')
             require(self.snapshot_diagnostic is None or value.get('code')=='snapshot','projection','result_schema')
             self.first_failure=value;self.result=value
             if self.input_diagnostic is not None:

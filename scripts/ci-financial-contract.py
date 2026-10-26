@@ -605,6 +605,16 @@ def input_budget(ok,site,count):
         raise error
 
 def validate_input_diagnostic(value):
+    if type(value) is dict and type(value.get('version')) is int and value['version']==2:
+        exact(value,('version','guard'))
+        g=value['guard'];exact(g,('phase','subphase','owner','target_owner','tag','view_generation','status'))
+        require(type(g['phase']) is str and g['phase'] in PHASES
+                and type(g['subphase']) is str and g['subphase'] in SUBPHASES)
+        require(g['owner'] in (None,'Signer1','Signer2') and g['target_owner'] in (None,'Signer1','Signer2'))
+        require(type(g['tag']) is str and g['tag'] in INPUT_WIDGET_TAGS
+                and integer(g['view_generation'],1)
+                and type(g['status']) is str and g['status'] in ('Missing','Disabled'))
+        return value
     exact(value,('version','budget','last_main_loop'))
     require(type(value['version']) is int and value['version']==1)
     b=value['budget'];exact(b,('site','count','limit'))
