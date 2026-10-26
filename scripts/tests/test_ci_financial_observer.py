@@ -3898,7 +3898,7 @@ class SingleReviewOrderTests(unittest.TestCase):
    try:f.review_seek(s,'ReviewBody','Signer1','EntryConfirm',None,'ReviewBody')
    except F.C.Rejected:pass
    c.scroll_up.assert_not_called();c.scroll_down.assert_not_called();c.click.assert_not_called()
-  f,c,state=AdmitReviewNavigationTests().guarded_model();s=f.native.snapshot();s['phase']='WriterFlow';s['subphase']='ReadReview'
+  f,c,state=AdmitReviewNavigationTests().guarded_model();s=f.native.snapshot();s['phase']='WriterFlow';s['subphase']='SetupPreparing'
   with mock.patch.object(f,'seek',return_value=False) as generic:self.assertFalse(f.review_seek(s,'ReviewBody','Signer1','WriterAction','ReviewAcknowledgement','ReviewBody'));generic.assert_called_once()
  def test_diagnostic_phase_identity_optional_ack_unknown_and_size(self):
   f,c,state,s=ReviewFailureObservationTests().flow();f.note_review_observation(s,operation='AckPress',boundary='Returned',anchor='Ack',point=(1,1))

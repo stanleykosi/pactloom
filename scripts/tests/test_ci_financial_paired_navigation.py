@@ -202,4 +202,133 @@ class PairedNavigationTests(unittest.TestCase):
   self.assertIn('let both = paired_approved(self.paired)',draw)
   self.assertIn('both && !self.signer_arm_sent',draw);self.assertIn('both && !self.witness_arm_sent',draw)
 
+
+class WriterNavigationTests(unittest.TestCase):
+ # Reuse only inert I/O edges; FullFlow and NativeScenario remain actual code.
+ model=PairedNavigationTests.model
+ pair=PairedNavigationTests.pair
+ no_effect=PairedNavigationTests.no_effect
+ stages=('SetupNeeded','SetupReview','ServiceReview','ReadReview','AcquireReview')
+ def frame(self,generation,tags=(),owner='Signer1',profile=None,subphase='ReadReview'):
+  s=PairedNavigationTests.frame(self,generation,(),owner,profile)
+  s.update(phase='WriterFlow',subphase=subphase)
+  rects={'ReviewBody':[20,80,1200,380],'ReviewAcknowledgement':[20,420,1200,440],
+         'WriterAction':[20,500,350,525]}
+  s['widgets']=[dict(tag=t,owner=owner,enabled=True,rect=rects[t]) for t in tags]+s['widgets']
+  return s
+ def seek(self,f,s,tag,*,ack='default',action='WriterAction',body='ReviewBody'):
+  if ack=='default':ack=None if s['subphase']=='SetupNeeded' else 'ReviewAcknowledgement'
+  return f.review_seek(s,tag,s['owner'],action,ack,body)
+ def key(self,s,tag):return (s['phase'],s['subphase'],'seek',tag,s['owner'])
+
+ def test_actual_writer_routes_avoid_legacy_wrong_way_sweep_for_both_owners_profiles(self):
+  for profile in (F.C.EXTERNAL_PROFILE,F.C.SEMANTIC_PROFILE):
+   for owner in ('Signer1','Signer2'):
+    for stage in self.stages:
+     for tag,anchor,count,direction in (('WriterAction','ReviewBody',0,'down'),('ReviewBody','WriterAction',24,'up')):
+      with self.subTest(profile=profile,owner=owner,stage=stage,tag=tag):
+       s=self.frame(1,(anchor,),owner,profile,stage);f,c,bounds,_=self.model(self.pair(s),profile)
+       f.scrolls[self.key(s,tag)]=count;f.scrolls['retained']=17;deadline=f.fixture.deadline_ns
+       self.assertFalse(self.seek(f,s,tag));getattr(c,'scroll_'+direction).assert_called_once()
+       getattr(c,'scroll_'+('up' if direction=='down' else 'down')).assert_not_called()
+       self.assertEqual(f.scrolls[self.key(s,tag)],count+1);self.assertEqual(f.scrolls['retained'],17)
+       self.assertEqual(bounds,[deadline,deadline]);self.assertEqual(f.fixture.deadline_ns,deadline)
+       self.assertFalse(f.done);self.assertEqual(f.actions,0);c.click.assert_not_called();c.type_ascii.assert_not_called()
+  # Before the opt-in, review_seek used this unchanged actual generic seek path
+  # for every Writer subphase. A lower clipped action receives 24 wrong-way ups.
+  s=self.frame(1,('ReviewBody',));f,c,bounds,_=self.model([])
+  for _ in range(25):self.assertFalse(f.seek(s,'WriterAction',s['owner']))
+  self.assertEqual(c.scroll_up.call_count,24);self.assertEqual(c.scroll_down.call_count,1)
+  self.assertEqual(bounds,[])
+
+ def test_writer_opt_in_is_closed_and_all_fresh_snapshot_host_guards_remain(self):
+  for phase,subphase,ack,action,body in (
+    ('CompletedPairFlow','ReadReview','ReviewAcknowledgement','WriterAction','ReviewBody'),
+    ('WriterFlow','SetupPreparing','ReviewAcknowledgement','WriterAction','ReviewBody'),
+    ('WriterFlow','ReadReview',None,'WriterAction','ReviewBody'),
+    ('WriterFlow','SetupNeeded','ReviewAcknowledgement','WriterAction','ReviewBody'),
+    ('WriterFlow','ReadReview','ReviewAcknowledgement','CompletedPairAction','ReviewBody'),
+    ('WriterFlow','ReadReview','ReviewAcknowledgement','WriterAction','SignerReviewBody')):
+   s=self.frame(1,('ReviewBody',));s.update(phase=phase,subphase=subphase);f,c,bounds,_=self.model([])
+   self.seek(f,s,'WriterAction',ack=ack,action=action,body=body)
+   c.scroll_up.assert_called_once();self.assertEqual(bounds,[])
+  s=self.frame(1,('ReviewBody',));fresh=self.frame(2,('WriterAction',))
+  f,c,_,_=self.model(self.pair(fresh));self.seek(f,s,'ReviewAcknowledgement')
+  c.scroll_up.assert_called_once();c.scroll_down.assert_not_called()
+  f,c,_,_=self.model(self.pair(fresh));self.assertFalse(self.seek(f,s,'WriterAction'));self.no_effect(c)
+  for kind in ('focus','phase','owner','secret','host','subphase','replay','duplicate','scale'):
+   with self.subTest(guard=kind):
+    a,b=self.pair(s)
+    if kind=='focus':b['focused']=False
+    elif kind=='phase':b['phase']='Reading'
+    elif kind=='owner':b['owner']='Signer2'
+    elif kind=='secret':b['secret_input']=True
+    elif kind=='host':b['host_input']=True;b['host_observation']['entry']='Writing'
+    elif kind=='subphase':b['subphase']='AcquireReview'
+    elif kind=='replay':b['view_generation']=a['view_generation']
+    elif kind=='duplicate':b['widgets'].append(copy.deepcopy(b['widgets'][0]))
+    elif kind=='scale':b['pixels_per_point']=.75
+    f,c,_,_=self.model([a,b])
+    with self.assertRaises(F.C.Rejected):self.seek(f,s,'WriterAction')
+    self.no_effect(c);self.assertEqual(f.scrolls[self.key(s,'WriterAction')],1)
+  # Even two mutually stable fresh frames cannot silently change subflow.
+  fresh=self.frame(2,('ReviewBody',),subphase='AcquireReview');f,c,_,_=self.model(self.pair(fresh))
+  with self.assertRaises(F.C.Rejected):self.seek(f,s,'WriterAction')
+  self.no_effect(c)
+  for kind in ('revision','nonws_end','invalid','closed','pending','prepared'):
+   fresh=copy.deepcopy(s)
+   if kind in ('revision','nonws_end'):fresh['host_observation'][kind]+=1
+   elif kind=='invalid':fresh['host_observation']['context_valid']=False
+   elif kind=='closed':fresh['host_observation']['entry']='Closed'
+   f,c,_,_=self.model(self.pair(fresh))
+   if kind=='pending':f.pending_host=object()
+   if kind=='prepared':f.host_prepared=object()
+   self.assertFalse(self.seek(f,s,'WriterAction'));self.no_effect(c)
+
+ def test_writer_owed_body_work_and_original_caps_deadline_effect_latches_are_preserved(self):
+  s=self.frame(1,('WriterAction',));s['widgets'][0]['enabled']=False
+  f,c,_,queue=self.model(self.pair(s));owner=s['owner']
+  f.done.add(f.key(s,'ReviewAcknowledgement',owner)+(None,))
+  pending=('WriterFlow','ReadReview','review-scroll-pending','WriterAction',owner,'ReviewBody')
+  f.review(s,'WriterAction',owner);self.assertEqual(f.scrolls[pending],1);c.scroll_up.assert_called_once()
+  body=self.frame(4,('ReviewBody',));f.review(body,'WriterAction',owner)
+  self.assertNotIn(pending,f.scrolls);c.scroll_down.assert_called_once();c.click.assert_not_called()
+  action=self.frame(5,('WriterAction',));queue.extend(self.pair(action,6))
+  f.review(action,'WriterAction',owner);f.review(action,'WriterAction',owner)
+  c.click.assert_called_once();self.assertTrue(f.used(action,'WriterAction',owner));self.assertEqual(f.actions,1)
+  s=self.frame(1,('ReviewBody',));f,c,bounds,_=self.model(self.pair(s));f.scrolls[self.key(s,'WriterAction')]=63
+  self.seek(f,s,'WriterAction')
+  with self.assertRaises(F.C.Rejected) as error:self.seek(f,s,'WriterAction')
+  self.assertEqual(error.exception.code,'input_widget');self.assertEqual(len(bounds),2);c.scroll_down.assert_called_once()
+  f,c,_,_=self.model(self.pair(s)+self.pair(s,4));key=('WriterFlow','ReadReview','ScrollRegion',None,'down');f.scrolls[key]=127
+  self.seek(f,s,'WriterAction')
+  with self.assertRaises(F.C.Rejected) as error:self.seek(f,s,'WriterAction')
+  self.assertEqual(error.exception.code,'input_budget');self.assertEqual(f.scrolls[key],128);c.scroll_down.assert_called_once()
+  f,c,bounds,_=self.model([]);deadline=f.fixture.deadline_ns;f.fixture.check.side_effect=F.C.Rejected('deadline')
+  with self.assertRaises(F.C.Rejected) as error:self.seek(f,s,'WriterAction')
+  self.assertEqual(error.exception.code,'deadline');self.assertEqual(f.fixture.deadline_ns,deadline);self.assertEqual(bounds,[]);self.no_effect(c)
+  f,c,_,_=self.model(self.pair(s));failure=OSError('inert controller failure');c.scroll_down.side_effect=failure
+  with self.assertRaises(OSError) as error:self.seek(f,s,'WriterAction')
+  self.assertIs(error.exception,failure);self.assertEqual(f.scrolls[key],1);c.scroll_down.assert_called_once();self.assertFalse(f.done)
+
+ def test_writer_closed_route_is_bound_to_native_display_consent_and_guards(self):
+  source=(ROOT.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
+  display=source.split('    fn writer_display(',1)[1].split('    fn writer_action(',1)[0]
+  for stage in self.stages:
+   arm=display.split('WriterStage::'+stage+' =>',1)[1].split('\n',1)[0]
+   self.assertTrue(arm.endswith('false),' if stage=='SetupNeeded' else 'true),'))
+   self.assertIn('WriterStage::'+stage+' => "'+stage+'"',source)
+  draw=source.split('    fn draw(&mut self, ui:',1)[1].split('    fn apply_intent(',1)[0]
+  writer=draw.split('                Phase::WriterFlow => {',1)[1].split('                Phase::Preparing =>',1)[0]
+  self.assertLess(writer.index('review_display(ui, &text, visible)'),writer.index('"ReviewAcknowledgement"'))
+  self.assertLess(writer.index('"ReviewAcknowledgement"'),writer.index('"WriterAction"'))
+  self.assertIn('if consent { ci_response!',writer)
+  self.assertIn('visible && later_frame && self.read_to_end && (!consent || self.acknowledged)',writer)
+  flow=(ROOT/'ci-financial-flow.py').read_text()
+  run=flow.split('    def run(self):',1)[1]
+  self.assertIn("if phase=='WriterFlow' and s['subphase'] in ('SetupNeeded','SetupReview','ServiceReview','ReadReview','AcquireReview'):\n                self.review(s,'WriterAction',owner,ack=None if s['subphase']=='SetupNeeded' else 'ReviewAcknowledgement');continue",run)
+  self.assertIn("s['subphase'] in ('SetupNeeded','SetupReview','ServiceReview','ReadReview','AcquireReview')",flow)
+  self.assertIn("order=('ReviewBody',None if s['subphase']=='SetupNeeded' else 'ReviewAcknowledgement','WriterAction')",flow)
+  self.assertIn("if (body,ack,action)==order:\n                return self._seek(s,tag,owner,tuple(t for t in order if t is not None))",flow)
+
 if __name__=='__main__':unittest.main()

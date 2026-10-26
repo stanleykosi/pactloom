@@ -394,6 +394,12 @@ class FullFlow:
             self.press(submit,'PasswordSubmit',submit['owner'])
             self.password_pending=None
     def review_seek(self,s,tag,owner,action,ack,body):
+        # These existing Writer subflows render the same body/consent/action
+        # order. Opt in only their exact native route; never infer completion.
+        if s['phase']=='WriterFlow' and s['subphase'] in ('SetupNeeded','SetupReview','ServiceReview','ReadReview','AcquireReview'):
+            order=('ReviewBody',None if s['subphase']=='SetupNeeded' else 'ReviewAcknowledgement','WriterAction')
+            if (body,ack,action)==order:
+                return self._seek(s,tag,owner,tuple(t for t in order if t is not None))
         order=C.REVIEW_ROUTES.get(s['phase'])
         if s['subphase']=='None' and order==(body,ack,action):
             return self._seek(s,tag,owner,tuple(t for t in order if t is not None))

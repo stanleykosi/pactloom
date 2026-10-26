@@ -5088,7 +5088,7 @@ impl Window {
                     }
 
                     ui.label("Original V3 account and journal custody retained. Prepare Read / receive / admission / audit need separate genuine issuers; the financial SourceEntry route remains unavailable.");
-                    if self.v3_selection.iter().any(Option::is_none) && ci_response!(ui, ui.add_enabled(later_frame, egui::Button::new("Select the other original V3 role")), "SelectNextV3", self.active)
+                    if v3_held_return_button(ui, later_frame, self.active)
                         .clicked_by(egui::PointerButton::Primary) { self.intent = Some(Intent::SelectNextV3); }
                 }
                 Phase::V3EnrollmentReview => {
@@ -7358,6 +7358,11 @@ fn host_phase_allows_input(phase: Phase) -> bool {
             | Phase::ReturnCompleted
     )
 }
+// Navigation only: the Host may still need its separate Pair inputs after both
+// sources opened. Retained selection count cannot remove the route to Selecting.
+fn v3_held_return_button(ui: &mut egui::Ui, later_frame: bool, active: Option<Role>) -> egui::Response {
+    ci_response!(ui, ui.add_enabled(later_frame, egui::Button::new("Return to original role selection")), "SelectNextV3", active)
+}
 fn host_entry_blocks_source(entry: HostEntry) -> bool {
     matches!(entry, HostEntry::Editing(_) | HostEntry::Writing(_))
 }
@@ -8265,6 +8270,107 @@ mod v3_pair_ui_tests {
         result.source_identity_digest = "04".repeat(32);
         assert!(!v3_pair_result_matches(&result, &p));
     }
+    // Actual pinned egui response and pointer routing, with ordinary slot-presence
+    // data only. No Window, native ticket, Host approval or Pair is constructed.
+    fn held_return_pass(
+        ctx: &egui::Context, role: Role, show: bool, later: bool, enabled: bool,
+        events: Vec<egui::Event>,
+    ) -> Option<egui::Response> {
+        let mut raw = egui::RawInput {
+            time: Some((ctx.cumulative_frame_nr() + 1) as f64 / 60.0),
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 240.0))),
+            events,
+            ..Default::default()
+        };
+        raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().focused = Some(true);
+        let mut response = None;
+        let mut output = ctx.run_ui(raw, |ui| {
+            if !enabled { ui.disable(); }
+            if show { response = Some(v3_held_return_button(ui, later, Some(role))); }
+        });
+        output.textures_delta.clear();
+        response
+    }
+    fn click_held_return(role: Role, later: bool, enabled: bool, button: egui::PointerButton) -> bool {
+        let ctx = egui::Context::default();
+        held_return_pass(&ctx, role, true, later, enabled, Vec::new());
+        let response = held_return_pass(&ctx, role, true, later, enabled, Vec::new()).unwrap();
+        assert_eq!(response.enabled(), later && enabled);
+        let point = response.rect.center();
+        assert!(response.rect.is_positive() && response.rect.contains(point));
+        let event = |pressed| egui::Event::PointerButton {
+            pos: point, button, pressed, modifiers: egui::Modifiers::default(),
+        };
+        held_return_pass(&ctx, role, true, later, enabled,
+            vec![egui::Event::PointerMoved(point), event(true)]);
+        held_return_pass(&ctx, role, true, later, enabled,
+            vec![egui::Event::PointerMoved(point), event(false)])
+            .unwrap().clicked_by(egui::PointerButton::Primary)
+    }
+    #[test]
+    fn held_return_navigation_remains_available_after_both_sources_opened() {
+        // First owner could escape the old gate; the second could not. These are
+        // only presence bits, not Source/Pair objects or completed observations.
+        let one_selected = [Some(()), None];
+        let both_selected = [Some(()), Some(())];
+        assert!(one_selected.iter().any(Option::is_none));
+        assert!(!both_selected.iter().any(Option::is_none));
+        for role in [Role::Signer1, Role::Signer2] {
+            let ctx = egui::Context::default();
+            assert!(held_return_pass(&ctx, role, one_selected.iter().any(Option::is_none), true, true, Vec::new()).is_some());
+            assert!(held_return_pass(&ctx, role, both_selected.iter().any(Option::is_none), true, true, Vec::new()).is_none());
+            assert!(click_held_return(role, true, true, egui::PointerButton::Primary));
+            assert!(!click_held_return(role, false, true, egui::PointerButton::Primary));
+            assert!(!click_held_return(role, true, false, egui::PointerButton::Primary));
+            assert!(!click_held_return(role, true, true, egui::PointerButton::Secondary));
+        }
+    }
+    #[test]
+    fn held_return_navigation_is_bound_to_original_pair_wait_and_guards() {
+        let source = include_str!("financial_source_ui.rs");
+        let draw = source.split("    fn draw(&mut self, ui: &mut egui::Ui)").nth(1).unwrap()
+            .split("    fn apply_intent(").next().unwrap();
+        let held = draw.split("                Phase::V3Held => {").nth(1).unwrap()
+            .split("                Phase::V3EnrollmentReview => {").next().unwrap();
+        assert!(held.contains("if self.v3_pair_ticket[index(role)].is_some() && ci_response!"));
+        assert!(held.contains("if v3_held_return_button(ui, later_frame, self.active)\n                        .clicked_by(egui::PointerButton::Primary) { self.intent = Some(Intent::SelectNextV3); }"));
+        assert!(!held.contains("v3_selection.iter().any"));
+        assert_eq!(draw.matches("v3_held_return_button(").count(), 1);
+        assert!(draw.find("self.check_current();").unwrap() < draw.find("v3_held_return_button(").unwrap());
+        assert!(draw.find("if !self.focused_last").unwrap() < draw.find("v3_held_return_button(").unwrap());
+        assert!(draw.find("if host_entry_blocks_source(self.host_entry) { return; }").unwrap() < draw.find("v3_held_return_button(").unwrap());
+        assert!(draw.find("if !eligible || self.terminal()").unwrap() < draw.find("self.apply_intent(intent, frame, &ctx)").unwrap());
+        let helper = source.split("fn v3_held_return_button(").nth(1).unwrap()
+            .split("fn host_entry_blocks_source(").next().unwrap();
+        assert!(helper.contains("ci_response!(ui, ui.add_enabled(later_frame, egui::Button::new(\"Return to original role selection\")), \"SelectNextV3\", active)"));
+        let tail = source.split("            Intent::SelectNextV3\n").nth(1).unwrap()
+            .split("            Intent::NormalFinish").next().unwrap();
+        assert!(tail.contains("Phase::V3Held"));
+        assert!(tail.contains("self.active = None;\n                self.transition(Phase::Selecting, frame);"));
+        assert!(!tail.contains("self.v3_selection") && !tail.contains("self.driver") && !tail.contains("self.native"));
+        assert!(source.contains("if host_entry_blocks_source(self.host_entry) {\n            return Err(rejected(\"protected Host input owns this phase\"));"));
+        assert!(!host_phase_allows_input(Phase::V3Held));
+        assert!(host_phase_allows_input(Phase::Selecting));
+        assert!(!v3_pair_final_eligible(Phase::V3Held, true, true, true, true, false, true));
+        // The Host cannot ask for reviewer selection/Pair approval before the
+        // actual opened source publishes its endpoint. No wait budget is authority.
+        let signer = include_str!("../../wholepact-signer/src/native_ui/runtime/coordinated_financial_driver_v1.rs");
+        assert!(signer.find(".v3_source_opened(source.opened_report().clone())?").unwrap() < signer.find("fn begin_pairing(").unwrap());
+        assert!(signer.contains(".publish_v3_pair_endpoint(owner.endpoint_path()?.to_owned())?"));
+        let origin = include_str!("../../wholepact-financial-coordinator-origin/src/signer_v3_pair_origin.rs");
+        let publish = origin.split("pub fn publish_v3_pair_endpoint(").nth(1).unwrap()
+            .split("pub fn ").next().unwrap();
+        assert!(publish.find("if !s.opened").unwrap() < publish.find("self.send(&Packet::V3PairEndpoint").unwrap());
+        assert!(publish.contains("self.core.phase.phase(self.target.index()) != V3_OPENED"));
+        let foreground = include_str!("../../wholepact-native-host/src/host/financial/retained_foreground_v1.rs");
+        let second = foreground.split("pub(super) fn begin_second(").nth(1).unwrap()
+            .split("impl<'host> SecondOriginalAdmissionAttemptV1").next().unwrap();
+        assert!(second.find("wait_original_coordinated_pair_endpoint_v1").unwrap() < second.find("begin_original_coordinated_admission_v1").unwrap());
+        let export = include_str!("../../wholepact-native-host/src/host/financial/durable_delivery_admission_v2/closed_review_v3/coordinated_export_v1.rs");
+        assert!(export.find("host.read_json(\"Exact coordinated reviewer selection JSON").unwrap() < export.find("CoordinatedOriginalClientV1::pair").unwrap());
+        assert!(export.find("host.terminal.confirm(\"Pair this exact original coordinated reviewer").unwrap() < export.find("CoordinatedOriginalClientV1::pair").unwrap());
+    }
+
 }
 
 fn v3_receipt_final_eligible(

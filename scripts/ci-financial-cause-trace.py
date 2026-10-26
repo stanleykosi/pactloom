@@ -14,6 +14,7 @@ Default requires exact pinned rustc; --source-only explicitly does NOT run Rust.
 The script writes only to a temporary directory, never to repository sources.
 """
 import argparse
+import importlib.util
 import hashlib
 import json
 from pathlib import Path
@@ -613,6 +614,10 @@ P80_LEGACY_GENERATED_SHA='2099a9d65c2706eefc68c4570ffd34522869aff851d456fd73f47a
 P80_UI='crates/wholepact-financial-coordinator/src/financial_source_ui.rs'
 P80_RESTORATION={'crates/wholepact-financial-coordinator-origin/src/signer_sign_origin.rs': {'baseline_sha256': 'a332e687211fab22484a169dd247814aace1e90da11e128588b3918893a68217', 'exact_inverse': [{'remove': '                slot.wire_phase = 67;\n', 'restore': ''}, {'remove': '                slot.phase = 67;\n', 'restore': ''}]}, 'crates/wholepact-financial-coordinator-origin/src/signer_return_origin.rs': {'baseline_sha256': '9f10b25fc99d47125d8557b6b245c81c5a06c85ef989b08497c14cd80353d5b6', 'exact_inverse': [{'remove': '                slot.wire_phase = 73;\n', 'restore': ''}, {'remove': '                slot.phase = 73;\n', 'restore': ''}]}, 'crates/wholepact-financial-coordinator/src/financial_source_ui.rs': {'baseline_sha256': '6ed6cea68e69fd6c2377ca8d86fa1182ca1f741835dc4c881be0fd0e92d1e82d', 'exact_inverse': [{'remove': '                        // Only this exact nominal custody permits parking. The\n                        // obsolete Serving observer was removed at typed resume.\n', 'restore': '                        // Only this exact nominal completion replaces the now-dead\n                        // Serving observer. Ordinary absence never permits parking.\n'}, {'remove': '                        self.transition(Phase::SignedRetired, ctx.cumulative_frame_nr());\n', 'restore': '                        self.writer_flow.serving.take();\n                        self.transition(Phase::SignedRetired, ctx.cumulative_frame_nr());\n'}, {'remove': '            // Actual Signing retirement ended this check-only Serving observer.\n            // Remove it before ordinary pre-poll currentness resumes; signed\n            // custody and parking still require the later SigningResumed event.\n            if self.phase == Phase::SigningRetiring {\n                self.writer_flow.serving.take();\n            }\n', 'restore': ''}]}}
 def p80_restore(path,source):
+    if path==P80_UI:
+        spec=importlib.util.spec_from_file_location('p81_held_selection_inverse',ROOT/'scripts/ci-financial-admit-read-source-audit.py')
+        audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
+        source=audit.restore_held_selection_ui(source)
     for change in P80_RESTORATION[path]['exact_inverse']:
         if source.count(change['remove'])!=1:raise AssertionError(('P80 exact inverse occurrence',path))
         source=source.replace(change['remove'],change['restore'],1)

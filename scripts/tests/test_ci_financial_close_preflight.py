@@ -141,11 +141,11 @@ class RepaintExecutionPreflightTests(unittest.TestCase):
  def test_no_run_then_exact_lists_and_runs_reject_missing_or_ignored_tests(self):
   from unittest import mock
   import contextlib,io
-  names=C.REPAINT_TESTS+C.COORDINATOR_DIAGNOSTIC_TESTS+C.SELECTOR_EXPORT_TESTS+C.ADMISSION_SCROLL_TESTS+C.WITNESS_FIRST_FAILURE_TESTS+C.SIGNING_RETIREMENT_UI_TESTS;good='test result: ok. 1 passed; 0 failed; 0 ignored;'
+  names=C.REPAINT_TESTS+C.COORDINATOR_DIAGNOSTIC_TESTS+C.SELECTOR_EXPORT_TESTS+C.ADMISSION_SCROLL_TESTS+C.WITNESS_FIRST_FAILURE_TESTS+C.SIGNING_RETIREMENT_UI_TESTS+C.HELD_SELECTION_TESTS;good='test result: ok. 1 passed; 0 failed; 0 ignored;'
   for listings,result,ok in [([n+': test\n' for n in names],good,True),(['']+[n+': test\n' for n in names[1:]],good,False),([n+': test\n' for n in names],'test result: ok. 0 passed; 0 failed; 1 ignored;',False)]:
    outputs=[b'compiler']+[x.encode() for x in listings]+[result.encode()]*len(names)
    with mock.patch.object(C.S,'select_build_environment',return_value={}),mock.patch.object(C,'coordinator_test_executable',return_value=self.executable),mock.patch.object(C,'run_provider_tls_probe',return_value=4) as probe,mock.patch.object(C.S,'checked',side_effect=outputs) as checked,contextlib.redirect_stdout(io.StringIO()):
-    if ok:self.assertEqual(C.run_coordinator_tests(self.target,{}),12)
+    if ok:self.assertEqual(C.run_coordinator_tests(self.target,{}),14)
     else:
      with self.assertRaises(AssertionError):C.run_coordinator_tests(self.target,{})
     probe.assert_called_once_with(self.target,{},b'compiler')
@@ -486,7 +486,7 @@ class OriginalFailureSelectionTests(unittest.TestCase):
   for names,name,path in checks:
    self.assertEqual(names.count(name),1)
    self.assertIn('fn '+name.rsplit('::',1)[-1]+'(', (P.parent.parent/'crates'/path).read_text())
-  self.assertEqual(len(C.REPAINT_TESTS+C.COORDINATOR_DIAGNOSTIC_TESTS+C.SELECTOR_EXPORT_TESTS+C.ADMISSION_SCROLL_TESTS+C.WITNESS_FIRST_FAILURE_TESTS+C.SIGNING_RETIREMENT_UI_TESTS),12)
+  self.assertEqual(len(C.REPAINT_TESTS+C.COORDINATOR_DIAGNOSTIC_TESTS+C.SELECTOR_EXPORT_TESTS+C.ADMISSION_SCROLL_TESTS+C.WITNESS_FIRST_FAILURE_TESTS+C.SIGNING_RETIREMENT_UI_TESTS+C.HELD_SELECTION_TESTS),14)
 
  def test_cause_trace_is_mandatory_and_all_semantic_reporters_are_executed(self):
   import ast,re
@@ -597,3 +597,24 @@ class TerminalPhaseAndResumePreflightTests(unittest.TestCase):
    self.assertIn(old,raw);mutations.append(raw.replace(old,new,1))
   for bad in mutations:
    with self.assertRaises(AssertionError):audit.restore_terminal_resume_ui(bad)
+
+class HeldSelectionNavigationPreflightTests(unittest.TestCase):
+ def test_actual_egui_pair_navigation_tests_and_exact_ui_inverse_are_mandatory(self):
+  import hashlib,inspect
+  expected=('financial_source_ui::v3_pair_ui_tests::held_return_navigation_remains_available_after_both_sources_opened','financial_source_ui::v3_pair_ui_tests::held_return_navigation_is_bound_to_original_pair_wait_and_guards')
+  self.assertEqual(C.HELD_SELECTION_TESTS,expected)
+  root=P.parent.parent;source=(root/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
+  self.assertIn('#[cfg(test)]\nmod v3_pair_ui_tests {',source)
+  for name in expected:self.assertEqual(source.count('fn '+name.rsplit('::',1)[-1]+'('),1)
+  runner=inspect.getsource(C.run_coordinator_tests)
+  for token in ('+HELD_SELECTION_TESTS','--no-run','--bin','--list','--exact','--test-threads=1','1 passed; 0 failed; 0 ignored;','deadline=time.monotonic()+60','run_provider_tls_probe(root,selected,raw)'):self.assertIn(token,runner)
+  self.assertLess(runner.index('coordinator_test_executable(raw,'),runner.index('for name in names:'))
+  workflow=(root/'.github/workflows/deadline-preflight.yml').read_text()
+  self.assertEqual(workflow.count('held-selection-preflight-p81'),4)
+  spec=importlib.util.spec_from_file_location('p81_ui_inverse',P.parent/'ci-financial-admit-read-source-audit.py');audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
+  self.assertEqual(hashlib.sha256(audit.restore_held_selection_ui(source).encode()).hexdigest(),'22659883eb0eaf88c75e453cbd1272bb6ce8493c75a8f5ddf562f5c78c835a6a')
+  mutations=[source+'// unrelated source change\n']
+  for old,new in [('if v3_held_return_button(ui, later_frame, self.active)','if true && v3_held_return_button(ui, later_frame, self.active)'),('egui::Button::new("Return to original role selection")','egui::Button::new("Approve original Pair")'),('self.active = None;\n                self.transition(Phase::Selecting, frame);','self.active = None;\n                self.transition(Phase::V3Held, frame);')]:
+   self.assertIn(old,source);mutations.append(source.replace(old,new,1))
+  for bad in mutations:
+   with self.assertRaises(AssertionError):audit.restore_held_selection_ui(bad)

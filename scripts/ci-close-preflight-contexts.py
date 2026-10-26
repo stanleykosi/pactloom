@@ -46,6 +46,7 @@ SELECTOR_EXPORT_TESTS=('financial_source_ui::selector_export_tests::export_paylo
 ADMISSION_SCROLL_TESTS=('financial_source_ui::admission_scroll_tests::paired_review_scroll_areas_keep_independent_native_state', 'financial_source_ui::admission_scroll_tests::review_completion_requires_eligible_visible_end', 'financial_source_ui::admission_scroll_tests::paired_review_ids_and_completion_are_bound_to_production')
 WITNESS_FIRST_FAILURE_TESTS=('financial_source_driver::reported_witness_failure_tests::authenticated_report_projection_retains_every_finite_stage_class_and_peer',)
 SIGNING_RETIREMENT_UI_TESTS=('financial_source_ui::signing_retirement_action_tests::signing_retirement_requires_actual_commit_and_fresh_explicit_action',)
+HELD_SELECTION_TESTS=('financial_source_ui::v3_pair_ui_tests::held_return_navigation_remains_available_after_both_sources_opened','financial_source_ui::v3_pair_ui_tests::held_return_navigation_is_bound_to_original_pair_wait_and_guards')
 def coordinator_test_executable(raw,target):
     rows=[json.loads(line) for line in raw.splitlines() if line.startswith(b'{')]
     packages={};executables=[]
@@ -90,8 +91,9 @@ def run_coordinator_tests(root,env):
     assert len(ADMISSION_SCROLL_TESTS)==3
     assert len(WITNESS_FIRST_FAILURE_TESTS)==1
     assert len(SIGNING_RETIREMENT_UI_TESTS)==1
-    names=REPAINT_TESTS+COORDINATOR_DIAGNOSTIC_TESTS+SELECTOR_EXPORT_TESTS+ADMISSION_SCROLL_TESTS+WITNESS_FIRST_FAILURE_TESTS+SIGNING_RETIREMENT_UI_TESTS
-    assert len(set(names))==12
+    assert len(HELD_SELECTION_TESTS)==2
+    names=REPAINT_TESTS+COORDINATOR_DIAGNOSTIC_TESTS+SELECTOR_EXPORT_TESTS+ADMISSION_SCROLL_TESTS+WITNESS_FIRST_FAILURE_TESTS+SIGNING_RETIREMENT_UI_TESTS+HELD_SELECTION_TESTS
+    assert len(set(names))==14
     selected=S.select_build_environment(env,'coordinator-observed',S.A.SEMANTIC_PROFILE)
     args=['rustup','run','1.99.0','cargo','test','--locked','--bin','wholepact-financial-coordinator','--no-run','--no-default-features','--message-format=json','-p','wholepact-financial-coordinator','--features',','.join(S.A.RECIPE['artifact_features']['coordinator-observed'])]
     raw=S.checked(args,'compile',env=selected,seconds=900,limit=32*1024*1024)
@@ -107,7 +109,7 @@ def run_coordinator_tests(root,env):
     for name in names:
         output=fixed([str(executable),'--exact',name,'--test-threads=1'])
         assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in output
-        marker='CI_REPAINT_TEST ' if name in REPAINT_TESTS else 'CI_RETIREMENT_HANDOFF_TEST ' if name in COORDINATOR_DIAGNOSTIC_TESTS else 'CI_SELECTOR_EXPORT_TEST ' if name in SELECTOR_EXPORT_TESTS else 'CI_ADMISSION_SCROLL_TEST ' if name in ADMISSION_SCROLL_TESTS else 'CI_WITNESS_FIRST_FAILURE_TEST ' if name in WITNESS_FIRST_FAILURE_TESTS else 'CI_SIGNING_RETIREMENT_UI_TEST '
+        marker='CI_REPAINT_TEST ' if name in REPAINT_TESTS else 'CI_RETIREMENT_HANDOFF_TEST ' if name in COORDINATOR_DIAGNOSTIC_TESTS else 'CI_SELECTOR_EXPORT_TEST ' if name in SELECTOR_EXPORT_TESTS else 'CI_ADMISSION_SCROLL_TEST ' if name in ADMISSION_SCROLL_TESTS else 'CI_WITNESS_FIRST_FAILURE_TEST ' if name in WITNESS_FIRST_FAILURE_TESTS else 'CI_SIGNING_RETIREMENT_UI_TEST ' if name in SIGNING_RETIREMENT_UI_TESTS else 'CI_HELD_SELECTION_TEST '
         print(marker+json.dumps(dict(name=name,passed=True,ignored=0),sort_keys=True))
     print('CI_REPAINT_TESTS '+json.dumps(dict(actual_maintained_tests=len(REPAINT_TESTS),passed=True,headless_egui=True,fullflow=False),sort_keys=True))
     print('CI_RETIREMENT_HANDOFF_TESTS '+json.dumps(dict(actual_maintained_tests=len(COORDINATOR_DIAGNOSTIC_TESTS),passed=True,fullflow=False),sort_keys=True))
@@ -115,6 +117,7 @@ def run_coordinator_tests(root,env):
     print('CI_ADMISSION_SCROLL_TESTS '+json.dumps(dict(actual_maintained_tests=len(ADMISSION_SCROLL_TESTS),passed=True,headless_egui=True,fullflow=False),sort_keys=True))
     print('CI_WITNESS_FIRST_FAILURE_TESTS '+json.dumps(dict(actual_maintained_tests=len(WITNESS_FIRST_FAILURE_TESTS),passed=True,fullflow=False),sort_keys=True))
     print('CI_SIGNING_RETIREMENT_UI_TESTS '+json.dumps(dict(actual_maintained_tests=len(SIGNING_RETIREMENT_UI_TESTS),passed=True,fullflow=False),sort_keys=True))
+    print('CI_HELD_SELECTION_TESTS '+json.dumps(dict(actual_maintained_tests=len(HELD_SELECTION_TESTS),passed=True,headless_egui=True,fullflow=False),sort_keys=True))
     return len(names)
 
 SIGNER_SCRIPTS=('wholepact-financial-coordinator-origin','wholepact-signer')
@@ -566,7 +569,7 @@ def main():
         args+=['--features',','.join(FEATURES)]
         raw=S.checked(args,'compile',env=selected,seconds=900,limit=32*1024*1024)
         validate(raw,root/'target-shared');executed=run_handoff_security_tests(root,env);intent_executed=run_intent_validation_tests(root,env);fixture_executed=run_fixture_lifetime_tests(root,env);absence=check_signer_absence(root,env);S.exact_source(sha)
-        print('CI_CLOSE_PREFLIGHT_CONTEXTS '+json.dumps(dict(schema_version=2,actual_test_contexts=list(PACKAGES),actual_semantic_script_crates=list(SCRIPTS),typecheck_passed=True,coordinator_selected_tests_executed=coordinator_executed,repaint_schedule_tests_executed=len(REPAINT_TESTS),retirement_handoff_tests_executed=len(COORDINATOR_DIAGNOSTIC_TESTS),selector_export_tests_executed=len(SELECTOR_EXPORT_TESTS),admission_scroll_tests_executed=len(ADMISSION_SCROLL_TESTS),witness_first_failure_tests_executed=len(WITNESS_FIRST_FAILURE_TESTS),signing_retirement_ui_tests_executed=len(SIGNING_RETIREMENT_UI_TESTS),signer_observed_api_absent_profiles=absence,selected_maintained_tests_executed=executed,intent_validation_tests_executed=intent_executed,fixture_lifetime_maintained_tests_executed=fixture_executed,full_native_execution=False,fullflow=False),sort_keys=True))
+        print('CI_CLOSE_PREFLIGHT_CONTEXTS '+json.dumps(dict(schema_version=2,actual_test_contexts=list(PACKAGES),actual_semantic_script_crates=list(SCRIPTS),typecheck_passed=True,coordinator_selected_tests_executed=coordinator_executed,repaint_schedule_tests_executed=len(REPAINT_TESTS),retirement_handoff_tests_executed=len(COORDINATOR_DIAGNOSTIC_TESTS),selector_export_tests_executed=len(SELECTOR_EXPORT_TESTS),admission_scroll_tests_executed=len(ADMISSION_SCROLL_TESTS),witness_first_failure_tests_executed=len(WITNESS_FIRST_FAILURE_TESTS),signing_retirement_ui_tests_executed=len(SIGNING_RETIREMENT_UI_TESTS),held_selection_tests_executed=len(HELD_SELECTION_TESTS),signer_observed_api_absent_profiles=absence,selected_maintained_tests_executed=executed,intent_validation_tests_executed=intent_executed,fixture_lifetime_maintained_tests_executed=fixture_executed,full_native_execution=False,fullflow=False),sort_keys=True))
     except S.Failure as error:
         # Pre-credential compiler text only; same bounded sanitizer as fresh build.
         try:
