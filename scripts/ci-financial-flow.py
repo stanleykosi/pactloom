@@ -966,16 +966,17 @@ class FullFlow:
             if target is not None and H.APPROVAL.fullmatch(suffix):
                 C.require(self.reviewer_index==int(target[-1]),'input_phase')
                 purpose=self.initial_pair_purpose(text,observed,occurrence,suffix)
-                if purpose is None:
-                    # Do not consume the challenge or approve a clipped/unknown
-                    # purpose. Existing finite coverage search remains the bound.
+                if purpose is None and observed['view']['nonws']<observed['nonws_end']-self.host_occurrences.frontier:
+                    # Unknown generic purposes retain the original approval path
+                    # only when this validated suffix covers ALL fresh non-whitespace bytes.
+                    # A clipped Pair cannot be submitted without classification.
                     self.host_capture_outcome='host_capture_grammar';self.host_rejection='host_capture_grammar'
                     self.host_ignored=(observed['revision'],observed['nonws_end'],observed['view']['nonws'])
                     captured_context=(observed['revision'],observed['nonws_end'])
                     if self.host_coverage_context!=captured_context:self.host_coverage_steps=0
                     self.host_coverage_context=captured_context
                     return self.seek_host_coverage(s)
-                self.pair_prompt=(target,occurrence,purpose)
+                if purpose is not None:self.pair_prompt=(target,occurrence,purpose)
             self.host_capture_outcome='Accepted';self.host_rejection=None
             self.host_coverage_context=None
             self.host_deferred=(occurrence,suffix)

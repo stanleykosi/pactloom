@@ -193,7 +193,7 @@ jobs:
         shell: bash
         run: |
           echo 'Fresh coordinated-financial-rendered-host-semantic-v1 synthetic two-signer qualification passed using read-only same-rendered-Host-text observation. All native authority, full proof, retirements, Returns, normal close and cleanup checks remain required. This is NOT pixel-only UI qualification; the original financial-ui gate remains separately callable and is not upgraded. No dispatch, public-chain settlement, deployment or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
-      - name: Fetch fixed P81 native producer and exact reviewed P82 harness without credentials
+      - name: Fetch fixed P81 native producer and exact reviewed H83 harness without credentials
         if: steps.mode.outputs.gate == 'financial-semantic-p81-reuse'
         shell: bash
         env:
@@ -213,7 +213,7 @@ jobs:
             test -z "$(git -C "$destination" status --porcelain --untracked-files=all)"
           }
           fetch_fixed P81 1fa2cec1dffd8672a107327de3046110d9fb4065
-          fetch_fixed P82 3229c582ffc360c27f2c72252f9c5fb64719a52a
+          fetch_fixed H83 8d9c7c9674f1d35d251f3c6f324917d40f176ce8
       - name: Fixed P81 reuse identity archive and cleanup boundary tests (no native execution)
         if: steps.mode.outputs.gate == 'financial-semantic-p81-reuse'
         timeout-minutes: 5
@@ -228,7 +228,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -I -B "$GITHUB_WORKSPACE/source/scripts/ci-financial-p81-reuse.py" acquire "$GITHUB_WORKSPACE/source"
-      - name: Verify fixed P81 archive P82 closure and independent cleanup (no native execution)
+      - name: Verify fixed P81 archive H83 closure and independent cleanup (no native execution)
         if: steps.mode.outputs.gate == 'financial-semantic-p81-reuse'
         timeout-minutes: 5
         shell: bash
@@ -240,8 +240,8 @@ jobs:
             GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_SHA="$GITHUB_SHA" \
             GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" GITHUB_JOB="$GITHUB_JOB" \
             python3 -I -B "$GITHUB_WORKSPACE/source/scripts/ci-financial-p81-reuse.py" verify \
-            "$GITHUB_WORKSPACE/source" "$GITHUB_WORKSPACE/P81" "$GITHUB_WORKSPACE/P82"
-      - name: Fresh P82 tests image and synthetic runtime using verified P81 native binaries
+            "$GITHUB_WORKSPACE/source" "$GITHUB_WORKSPACE/P81" "$GITHUB_WORKSPACE/H83"
+      - name: Fresh H83 tests image and synthetic runtime using verified P81 native binaries
         id: p81_reuse_runtime
         if: steps.mode.outputs.gate == 'financial-semantic-p81-reuse'
         timeout-minutes: 200
@@ -254,7 +254,7 @@ jobs:
             GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_SHA="$GITHUB_SHA" \
             GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" GITHUB_JOB="$GITHUB_JOB" \
             python3 -I -B "$GITHUB_WORKSPACE/source/scripts/ci-financial-p81-reuse.py" run \
-            "$GITHUB_WORKSPACE/source" "$GITHUB_WORKSPACE/P81" "$GITHUB_WORKSPACE/P82"
+            "$GITHUB_WORKSPACE/source" "$GITHUB_WORKSPACE/P81" "$GITHUB_WORKSPACE/H83"
       - name: Always reconcile fixed P81 reuse resources using independently pinned cleanup
         if: always() && steps.mode.outputs.gate == 'financial-semantic-p81-reuse'
         timeout-minutes: 5
@@ -280,7 +280,7 @@ jobs:
         if: success() && steps.mode.outputs.gate == 'financial-semantic-p81-reuse' && steps.p81_reuse_runtime.outcome == 'success'
         shell: bash
         run: |
-          echo 'Fresh exact P82 Python tests and semantic-assisted synthetic external-Witness runtime passed using verified P81 native binaries. Native producer is P81 1fa2cec1dffd8672a107327de3046110d9fb4065, runtime harness is P82 3229c582ffc360c27f2c72252f9c5fb64719a52a, and this event is the independent launcher. Exact P81 native ELF bytes were reused, not freshly compiled by this runtime step. Separate P82 preflight compiler/native gates and real TLS checks remain required. Both owned runtime cleanup and independent cleanup passed; the acquisition directory was removed. No pixel-only UI, full-product, public-chain, deployment or dispatch claim is made.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Fresh exact H83 Python tests and semantic-assisted synthetic external-Witness runtime passed using verified P81 native binaries. Native producer is P81 1fa2cec1dffd8672a107327de3046110d9fb4065, runtime harness is H83 8d9c7c9674f1d35d251f3c6f324917d40f176ce8, and this event is the independent launcher. Exact P81 native ELF bytes were reused, not freshly compiled by this runtime step. Separate H83 preflight compiler/native gates and real TLS checks remain required. Both owned runtime cleanup and independent cleanup passed; the acquisition directory was removed. No pixel-only UI, full-product, public-chain, deployment or dispatch claim is made.' >> "$GITHUB_STEP_SUMMARY"
       - name: Fetch exact independent producer P and reviewed harness H without credentials
         if: steps.mode.outputs.gate == 'financial-semantic-reuse' || steps.mode.outputs.gate == 'financial-preparation-diagnostic'
         shell: bash

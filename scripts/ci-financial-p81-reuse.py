@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed P81 binaries + exact P82 Python harness; never a general build cache.
+"""Fixed P81 binaries + exact H83 Python harness; never a general build cache.
 
 P is the native producer, H is the independently reviewed runtime harness, and
 L is this exact CI event checkout. Nothing rewrites or relaxes the same-job or
@@ -32,22 +32,22 @@ ROOT=HERE.parent
 MODE=b'financial-semantic-p81-reuse\n'
 PROFILE='coordinated-financial-rendered-host-semantic-v1'
 PRODUCER={'repository': 'stanleykosi/pactloom', 'source': '1fa2cec1dffd8672a107327de3046110d9fb4065', 'source_tree': 'ce229516a36935787d0e0342ea0a0ba789fe3416', 'run_id': 40279157236, 'attempt': 1}
-# Independently published Python-only P82 harness; native producer remains exact P81.
-HARNESS={'repository': 'stanleykosi/pactloom', 'source': '3229c582ffc360c27f2c72252f9c5fb64719a52a', 'source_tree': 'be9a04bc87f977ca58c2ae5581e16b9b3819f95f'}
+# Independently published Python-only H83 harness; native producer remains exact P81.
+HARNESS={'repository': 'stanleykosi/pactloom', 'source': '8d9c7c9674f1d35d251f3c6f324917d40f176ce8', 'source_tree': '9b11431b0a0cae4a2909fdcc3dfe20b81757bc12'}
 JOB_ID=121428360461
 EXPIRES_AT='2026-10-27T06:52:20Z'
 INVENTORY_SHA='8c41320cd51dfd719c326e5f3ef1dd823a9cf769149e177f0ab9aecf1fb939bd'
 # Inventory hashes bind the Git mode: SHA256(b'100644\0' + exact reviewed bytes).
-# Exact existing-path P82 mode-bound hashes; native/recipe source is unchanged.
-H_CHANGES={'.github/workflows/deadline-preflight.yml': 'a19aa9b6b2b6aee4bf4253172ce46a96b5f252659026cf254e07e147786ec933', 'scripts/ci-financial-flow.py': 'bcbe74423edd9789b8e30ef376bfd1d52c4215045c5abbbd375bebea57059655', 'scripts/financial-runtime-reuse/test_integration.py': '61c4f757319995e702571ca396e49346cc311315c78911f06a8f6f4fbaa8a900', 'scripts/tests/test_ci_financial_close_preflight.py': '889b103f55f459fa1ce43e0189e283cbcf0e1bf448401bccfda828b69e263ae3', 'scripts/tests/test_ci_financial_observer.py': '0108ee849174fe753c401160b6d49fb242c530a85a2a1873ec495c394eb945c9'}
+# Exact existing-path H83 mode-bound hashes; native/recipe source is unchanged.
+H_CHANGES={'.github/workflows/deadline-preflight.yml': 'dab8f69c07a128a7b67c03109c54963596ff52668e973d01131003e5c7b7a4cb', 'scripts/ci-financial-flow.py': '76ee039455ea9a386052c0fcef07ba34eed3fcd47688d3c66f5ee2ac5ee2a4b9', 'scripts/financial-runtime-reuse/test_integration.py': '61c4f757319995e702571ca396e49346cc311315c78911f06a8f6f4fbaa8a900', 'scripts/tests/test_ci_financial_close_preflight.py': '08f872f028c07b28f6c4ac2d2dbbc820accb4b92b1931cfcf651e277f5426bb3', 'scripts/tests/test_ci_financial_observer.py': '0108ee849174fe753c401160b6d49fb242c530a85a2a1873ec495c394eb945c9'}
 # The sole added test path has explicit raw, mode and mode-bound pins; never a glob.
-H_ADDED={'scripts/tests/test_ci_financial_initial_pair_navigation.py': {'mode': '100644', 'sha256': '9d1c05ab3d953eb268e9a13d4eaac8d54ee9f0fc38c101724c3d0930d5c2334f', 'mode_content_sha256': 'a16d54cd35ef812c4c153e151a7d1a344b6748821ad810d56ecf83066d7d5245'}}
+H_ADDED={'scripts/tests/test_ci_financial_initial_pair_navigation.py': {'mode': '100644', 'sha256': '85b1dc64d81f572c445df1180fd6fcebb81e850fbda4ade57bbcbf62b152c5cc', 'mode_content_sha256': '4dbf7bfdb4a1f1d94b30cb8adc51a3f804fc1066a7f5c4d4f1993fb15ca1c997'}}
 L_ADDED=frozenset(('scripts/ci-financial-p81-reuse.py','scripts/tests/test_ci_financial_p81_reuse.py'))
 L_CHANGED=frozenset(('.github/workflows/durable-native-linux.yml','scripts/qualification-gate-mode'))
 API_PINS={'run': '15045fc90e79d7c522f33b5bdc48a14f5c4928883f6f1056f97888cc6f7bdca3', 'job': '2e47e60fe2981c385c6385ff847c5e6025c2356add0f4d1949822a3fdcbb4a2e', 'artifact': '50474f359fe2eb2aa0db0f819755944e8accadf7fcda008b27f42decdba9abe1'}
 PINS={'artifact_id': 12632736595, 'archive_size': 122508785, 'archive_sha256': '84e1cd67254238eb9c24df4f76b24c6c3c6b9aa817565575e9aa41a00fd51efa', 'bundle_size': 355614720, 'bundle_sha256': '97d7e9a96d72057428930684f00e6b0c6701e7ed2e80c6f29ef8744cfdc6a2c4'}
 ELF_PINS={'coordinator-observed': {'sha256': 'da92f2e9c3ab4313ba905bedfc2d79e6a6be117141f4e03f8f9fb2cda393e44b', 'size': 100635120}, 'coordinator-production': {'sha256': 'c20a01683a7330a2eef8df2da2cea4d1dedfc06fde57649529c226ffe6933554', 'size': 99870504}, 'pristine-setup': {'sha256': 'e1a807fa1f925d05ddf6efa07c9356e56e2f0b55e45220afaa9cdcf2a1498987', 'size': 154828120}}
-# Complete fixed cleanup closure: exact P82 image and current contract/supervisor.
+# Complete fixed cleanup closure: exact H83 image and current contract/supervisor.
 # Nine files come from tracked L bytes;
 # the tenth is the original P81 semantic gate literal, independently pinned.
 # L's new activation mode never becomes P/H's native profile or source bytes.

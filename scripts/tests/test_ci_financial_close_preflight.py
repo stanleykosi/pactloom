@@ -610,7 +610,7 @@ class HeldSelectionNavigationPreflightTests(unittest.TestCase):
   for token in ('+HELD_SELECTION_TESTS','--no-run','--bin','--list','--exact','--test-threads=1','1 passed; 0 failed; 0 ignored;','deadline=time.monotonic()+60','run_provider_tls_probe(root,selected,raw)'):self.assertIn(token,runner)
   self.assertLess(runner.index('coordinator_test_executable(raw,'),runner.index('for name in names:'))
   workflow=(root/'.github/workflows/deadline-preflight.yml').read_text()
-  self.assertEqual(workflow.count('pair-purpose-preflight-p82'),4)
+  self.assertEqual(workflow.count('initial-inspection-preflight-h83'),4)
   spec=importlib.util.spec_from_file_location('p81_ui_inverse',P.parent/'ci-financial-admit-read-source-audit.py');audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
   self.assertEqual(hashlib.sha256(audit.restore_held_selection_ui(source).encode()).hexdigest(),'22659883eb0eaf88c75e453cbd1272bb6ce8493c75a8f5ddf562f5c78c835a6a')
   mutations=[source+'// unrelated source change\n']

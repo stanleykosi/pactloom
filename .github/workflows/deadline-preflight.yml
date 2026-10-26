@@ -1,14 +1,14 @@
-name: Exact Host Pair purpose preflight only
+name: Complete Host prompt sequence preflight only
 on:
   push:
-    branches: [checkpoint/pair-purpose-preflight-p82]
+    branches: [checkpoint/initial-inspection-preflight-h83]
 permissions: {}
 concurrency:
-  group: pair-purpose-preflight-p82
+  group: initial-inspection-preflight-h83
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/pair-purpose-preflight-p82' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/initial-inspection-preflight-h83' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -208,7 +208,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/pair-purpose-preflight-p82' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/initial-inspection-preflight-h83' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
