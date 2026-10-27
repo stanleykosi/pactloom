@@ -54,7 +54,9 @@ NEW_COLLECTOR_SAFE = tuple('host::manual_enrollment::command::roster_publication
     'delivery_first_failure_is_opt_in_and_isolated_per_child',
     'delivery_first_failure_insufficient_capture_budget_is_sticky'))
 LEGACY_SAFE = SAFE
-SAFE = SAFE + NEW_LEAF_SAFE + NEW_COLLECTOR_SAFE
+WORKER_SAFE = ('host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::worker::admission_diagnostic_tests::durable_worker_state_layout_keeps_nominal_owners_indirect', 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::worker::admission_diagnostic_tests::durable_worker_execute_retains_inert_error_and_slot_order')
+P93C_SAFE = SAFE + NEW_LEAF_SAFE + NEW_COLLECTOR_SAFE
+SAFE = P93C_SAFE + WORKER_SAFE
 SUMMARY = b'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.01s'
 LEGACY_GOLDEN = {
     'coordinated-financial-external-pre-v3-witness-v1': '31bdd6c62252ef49e14b301be720406f17b5099bf0966a37ce20afb86dc71ac7',
@@ -80,7 +82,8 @@ class DurableRecipeTests(unittest.TestCase):
                   (SAFE[4:5], 'crates/wholepact-native-host/src/host/financial/private_financial_v2/qualification_fault_v2.rs'),
                   (SAFE[5:7], 'crates/wholepact-native-host/src/host/financial/durable_financial_commands_v2.rs'),
                   (NEW_LEAF_SAFE, 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/durable_proposal_v1/durable_result_lifecycle_v2.rs'),
-                  (NEW_COLLECTOR_SAFE, 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/rolling_transcript_v1.rs')]
+                  (NEW_COLLECTOR_SAFE, 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/rolling_transcript_v1.rs'),
+                  (WORKER_SAFE, 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/durable_proposal_v1/worker.rs')]
         for selectors,path in leaves:
             text=(ROOT.parent/path).read_text()
             for selector in selectors:
@@ -93,7 +96,7 @@ class DurableRecipeTests(unittest.TestCase):
     def test_closed_recipe_and_selector_inventory(self):
         self.assertEqual(D.PROFILE, PROFILE); self.assertEqual(D.ROLE, ROLE)
         self.assertEqual(D.CASES, CASES); self.assertEqual(D.SAFE_TESTS, SAFE)
-        self.assertEqual(D.SAFE_TESTS[:7],LEGACY_SAFE);self.assertEqual(len(D.SAFE_TESTS),15)
+        self.assertEqual(D.SAFE_TESTS[:7],LEGACY_SAFE);self.assertEqual(D.SAFE_TESTS[:15],P93C_SAFE);self.assertEqual(len(D.SAFE_TESTS),17)
         self.assertEqual(len(SAFE), len(set(SAFE))); self.assertFalse(set(SAFE) & set(CASES.values()))
         self.assertEqual(D.recipe(), dict(build_recipe_version=4, qualification_profile=PROFILE,
             execution='native-owner-durable-correctness-selective-optimization', toolchain='1.99.0',

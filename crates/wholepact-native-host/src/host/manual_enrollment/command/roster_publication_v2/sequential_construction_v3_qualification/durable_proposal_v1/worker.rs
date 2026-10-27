@@ -496,13 +496,13 @@ struct OriginalPublic {
 enum State {
     DurableResultReopenV2(DeliveryReopenV2),
     DurableResultV2(Box<wholepact_signer::native_ui::synthetic_born_joined_qualification::EphemeralDurableResultNativeV2>),
-    Pending(EphemeralPendingBornV1),
-    ExportedBirth(EphemeralExportedBirthV1),
-    Acknowledged(EphemeralAcknowledgedBornV1),
-    SingleIntent(EphemeralFirstAnchorIntentV1),
-    SinglePublication(EphemeralFirstAnchorPublicationV1, bool),
-    RosterIntent(EphemeralOriginalRosterIntentV1),
-    RosterPublication(EphemeralRosterPublicationV1, bool),
+    Pending(Box<EphemeralPendingBornV1>),
+    ExportedBirth(Box<EphemeralExportedBirthV1>),
+    Acknowledged(Box<EphemeralAcknowledgedBornV1>),
+    SingleIntent(Box<EphemeralFirstAnchorIntentV1>),
+    SinglePublication(Box<EphemeralFirstAnchorPublicationV1>, bool),
+    RosterIntent(Box<EphemeralOriginalRosterIntentV1>),
+    RosterPublication(Box<EphemeralRosterPublicationV1>, bool),
     Durable(Box<EphemeralDurableNativeV1>),
     Delivery(Box<EphemeralDurableDeliveryNativeV2>),
     ClosedDelivery(Box<EphemeralClosedDeliveryNativeV3>),
@@ -903,7 +903,7 @@ fn create_originals(
         }
     }
     Ok((
-        accounts.map(|account| Some(State::Pending(account))),
+        accounts.map(|account| Some(State::Pending(Box::new(account)))),
         public,
     ))
 }
@@ -1129,7 +1129,94 @@ fn delivery_peer(
     })
 }
 
+// Keep the fresh roster opener off the large unrelated-command frame.
+// This dispatch observes only the closed command tag, never authority or slots.
+#[inline(never)]
 fn execute(
+    command: JoinedSignerCommandV1,
+    states: &mut [Option<State>; 3],
+    public: Option<&[OriginalPublic; 3]>,
+    cancelled: &AtomicBool,
+) -> Result<JoinedSignerReplyV1> {
+    if matches!(&command, JoinedSignerCommandV1::OpenRosterIntent(..)) {
+        execute_open_roster_intent(command, states)
+    } else if matches!(&command, JoinedSignerCommandV1::OpenRosterPublication(..)) {
+        execute_open_roster_publication(command, states)
+    } else {
+        execute_other(command, states, public, cancelled)
+    }
+}
+
+#[inline(never)]
+fn execute_open_roster_intent(
+    command: JoinedSignerCommandV1,
+    states: &mut [Option<State>; 3],
+) -> Result<JoinedSignerReplyV1> {
+    use JoinedSignerCommandV1 as C;
+    use JoinedSignerReplyV1 as R;
+    let index = command_index(&command);
+    let slot = states.get_mut(index).ok_or("durable account index")?;
+    let state = slot.take().ok_or("durable retained state missing")?;
+    let (next, reply) = match (command, state) {
+        (C::OpenRosterIntent(_, intent), State::Acknowledged(account)) if index > 0 => {
+            let entry = (*account)
+                .open_initial_intent(intent)
+                .map_err(|error| signer_error(error, "native roster intent entry"))?;
+            let reply = R::Peer(JoinedSignerPeerV1 {
+                endpoint: entry
+                    .endpoint()
+                    .map_err(|error| signer_error(error, "roster intent endpoint"))?,
+                provider: entry
+                    .provider()
+                    .map_err(|error| signer_error(error, "roster intent provider"))?,
+                deadline: entry
+                    .deadline()
+                    .map_err(|error| signer_error(error, "roster intent deadline"))?,
+            });
+            (State::RosterIntent(Box::new(entry)), reply)
+        }
+        _ => return Err("durable finite native transition mismatch"),
+    };
+    *slot = Some(next);
+    Ok(reply)
+}
+
+#[inline(never)]
+fn execute_open_roster_publication(
+    command: JoinedSignerCommandV1,
+    states: &mut [Option<State>; 3],
+) -> Result<JoinedSignerReplyV1> {
+    use JoinedSignerCommandV1 as C;
+    use JoinedSignerReplyV1 as R;
+    let index = command_index(&command);
+    let slot = states.get_mut(index).ok_or("durable account index")?;
+    let state = slot.take().ok_or("durable retained state missing")?;
+    let (next, reply) = match (command, state) {
+        (C::OpenRosterPublication(_, request), State::Acknowledged(account)) if index > 0 => {
+            let entry = (*account)
+                .open_initial_publication(request)
+                .map_err(|error| signer_error(error, "native initial roster publication entry"))?;
+            let reply = R::Peer(JoinedSignerPeerV1 {
+                endpoint: entry
+                    .endpoint()
+                    .map_err(|error| signer_error(error, "roster publication endpoint"))?,
+                provider: entry
+                    .provider()
+                    .map_err(|error| signer_error(error, "roster publication provider"))?,
+                deadline: entry
+                    .deadline()
+                    .map_err(|error| signer_error(error, "roster publication deadline"))?,
+            });
+            (State::RosterPublication(Box::new(entry), false), reply)
+        }
+        _ => return Err("durable finite native transition mismatch"),
+    };
+    *slot = Some(next);
+    Ok(reply)
+}
+
+#[inline(never)]
+fn execute_other(
     command: JoinedSignerCommandV1,
     states: &mut [Option<State>; 3],
     public: Option<&[OriginalPublic; 3]>,
@@ -1178,7 +1265,7 @@ fn execute(
             (State::PreservedDelivery, R::Done { index })
         }
         (C::OpenDelivery(_, proposal), State::Acknowledged(account)) if index > 0 => {
-            let entry = account
+            let entry = (*account)
                 .open_fresh_durable_delivery_v2(proposal, 1_000_000)
                 .map_err(durable_entry_error)?;
             let reply = delivery_peer(index, &entry)?;
@@ -1919,7 +2006,7 @@ fn execute(
             )
         }
         (C::ExportBirth(_), State::Pending(account)) => {
-            let exported = account
+            let exported = (*account)
                 .export_owner_request()
                 .map_err(|error| signer_error(error, "native birth request sign and export"))?;
             let reply = R::BirthExport {
@@ -1928,10 +2015,10 @@ fn execute(
                 birth_digest: exported.birth_digest().into(),
                 exported_file: exported.exported_file().into(),
             };
-            (State::ExportedBirth(exported), reply)
+            (State::ExportedBirth(Box::new(exported)), reply)
         }
         (C::Acknowledge(_), State::ExportedBirth(exported)) => {
-            let account = exported.acknowledge_original().map_err(|error| {
+            let account = (*exported).acknowledge_original().map_err(|error| {
                 signer_error(error, "native original birth history and acknowledgement")
             })?;
             let metadata = &public.ok_or("original birth metadata unavailable")?[index];
@@ -1949,10 +2036,10 @@ fn execute(
                 public_receive_address: account.public_receive_address().into(),
                 recipient_scope_digest: metadata.recipient_scope_digest.clone(),
             });
-            (State::Acknowledged(account), reply)
+            (State::Acknowledged(Box::new(account)), reply)
         }
         (C::OpenSingleIntent(_, intent), State::Acknowledged(account)) if index == 0 => {
-            let entry = account
+            let entry = (*account)
                 .open_first_anchor_intent(intent)
                 .map_err(|error| signer_error(error, "native first anchor intent entry"))?;
             let reply = R::Peer(JoinedSignerPeerV1 {
@@ -1966,7 +2053,7 @@ fn execute(
                     .deadline()
                     .map_err(|error| signer_error(error, "single intent deadline"))?,
             });
-            (State::SingleIntent(entry), reply)
+            (State::SingleIntent(Box::new(entry)), reply)
         }
         (C::PollAndExportSingle(_), State::SingleIntent(mut entry)) if index == 0 => {
             poll_until(
@@ -1978,7 +2065,7 @@ fn execute(
                 "native single pairing and exact intent retention",
             )?;
             diagnostic::emit(B::SignerExportSingle, Outcome::Begin);
-            let exported = entry
+            let exported = (*entry)
                 .export_original_single()
                 .map_err(|error| signer_error(error, "native single owner signature and export"))?;
             let reply = R::SingleExport {
@@ -1987,12 +2074,12 @@ fn execute(
                 enrollment_request: exported.enrollment_request().clone(),
             };
             (
-                State::Acknowledged(exported.close_for_witness_review()),
+                State::Acknowledged(Box::new(exported.close_for_witness_review())),
                 reply,
             )
         }
         (C::OpenSinglePublication(_, request), State::Acknowledged(account)) if index == 0 => {
-            let entry = account
+            let entry = (*account)
                 .open_first_anchor_publication(request)
                 .map_err(|error| signer_error(error, "native first anchor publication entry"))?;
             let reply = R::Peer(JoinedSignerPeerV1 {
@@ -2006,7 +2093,7 @@ fn execute(
                     .deadline()
                     .map_err(|error| signer_error(error, "single publication deadline"))?,
             });
-            (State::SinglePublication(entry, false), reply)
+            (State::SinglePublication(Box::new(entry), false), reply)
         }
         (C::PollSinglePublication(_), State::SinglePublication(mut entry, false)) if index == 0 => {
             poll_until(
@@ -2021,11 +2108,11 @@ fn execute(
             (State::SinglePublication(entry, true), R::Done { index })
         }
         (C::CloseSinglePublication(_), State::SinglePublication(entry, true)) if index == 0 => (
-            State::Acknowledged(entry.close_for_continuation()),
+            State::Acknowledged(Box::new((*entry).close_for_continuation())),
             R::Done { index },
         ),
         (C::OpenRosterIntent(_, intent), State::Acknowledged(account)) if index > 0 => {
-            let entry = account
+            let entry = (*account)
                 .open_initial_intent(intent)
                 .map_err(|error| signer_error(error, "native roster intent entry"))?;
             let reply = R::Peer(JoinedSignerPeerV1 {
@@ -2039,7 +2126,7 @@ fn execute(
                     .deadline()
                     .map_err(|error| signer_error(error, "roster intent deadline"))?,
             });
-            (State::RosterIntent(entry), reply)
+            (State::RosterIntent(Box::new(entry)), reply)
         }
         (C::PollAndExportRoster(_), State::RosterIntent(mut entry)) if index > 0 => {
             poll_until(
@@ -2051,7 +2138,7 @@ fn execute(
                 "native roster pairing and exact intent retention",
             )?;
             diagnostic::emit(B::SignerExportRoster, Outcome::Begin);
-            let exported = entry.export_original_roster().map_err(|error| {
+            let exported = (*entry).export_original_roster().map_err(|error| {
                 signer_error(error, "native roster owner signature and exact exports")
             })?;
             let reply = R::RosterExport {
@@ -2061,12 +2148,12 @@ fn execute(
                 enrollment_request: exported.enrollment_request().clone(),
             };
             (
-                State::Acknowledged(exported.close_for_witness_review()),
+                State::Acknowledged(Box::new(exported.close_for_witness_review())),
                 reply,
             )
         }
         (C::OpenRosterPublication(_, request), State::Acknowledged(account)) if index > 0 => {
-            let entry = account
+            let entry = (*account)
                 .open_initial_publication(request)
                 .map_err(|error| signer_error(error, "native initial roster publication entry"))?;
             let reply = R::Peer(JoinedSignerPeerV1 {
@@ -2080,7 +2167,7 @@ fn execute(
                     .deadline()
                     .map_err(|error| signer_error(error, "roster publication deadline"))?,
             });
-            (State::RosterPublication(entry, false), reply)
+            (State::RosterPublication(Box::new(entry), false), reply)
         }
         (C::PollRosterPublication(_), State::RosterPublication(mut entry, false)) if index > 0 => {
             poll_until(
@@ -2094,12 +2181,12 @@ fn execute(
             (State::RosterPublication(entry, true), R::Done { index })
         }
         (C::CloseRosterPublication(_), State::RosterPublication(entry, true)) if index > 0 => (
-            State::Acknowledged(entry.close_for_continuation()),
+            State::Acknowledged(Box::new((*entry).close_for_continuation())),
             R::Done { index },
         ),
 
         (C::OpenDurable(_, proposal), State::Acknowledged(account)) if index > 0 => {
-            let entry = account
+            let entry = (*account)
                 .open_fresh_durable(proposal, 1_000_000)
                 .map_err(durable_entry_error)?;
             let reply = R::DurablePeer {
@@ -2123,7 +2210,7 @@ fn execute(
         (C::OpenDurableObserved(_, proposal), State::Acknowledged(account)) if index > 0 => {
             // The same genuine opener and original deadline, with inert
             // lifecycle observation only for the pre-acquire qualification.
-            let entry = account
+            let entry = (*account)
                 .open_fresh_durable_diagnosed(proposal, 1_000_000)
                 .map_err(durable_entry_error)?;
             let reply = R::DurablePeer {
@@ -2394,7 +2481,7 @@ fn execute(
             let account = entry
                 .close_original_entry()
                 .map_err(|e| signer_error(e, "native revoke and drain"))?;
-            (State::Acknowledged(account), R::Done { index })
+            (State::Acknowledged(Box::new(account)), R::Done { index })
         }
         _ => return Err("durable finite native transition mismatch"),
     };
@@ -2405,6 +2492,138 @@ fn execute(
 #[cfg(test)]
 mod admission_diagnostic_tests {
     use super::*;
+
+    // Layout and inert error-order checks only. They construct no native
+    // authority and do not reproduce the genuine roster-intent call chain.
+    #[test]
+    fn durable_worker_state_layout_keeps_nominal_owners_indirect() {
+        use std::mem::size_of;
+        let pointer = size_of::<usize>();
+        for boxed in [
+            size_of::<Box<EphemeralPendingBornV1>>(),
+            size_of::<Box<EphemeralExportedBirthV1>>(),
+            size_of::<Box<EphemeralAcknowledgedBornV1>>(),
+            size_of::<Box<EphemeralFirstAnchorIntentV1>>(),
+            size_of::<Box<EphemeralFirstAnchorPublicationV1>>(),
+            size_of::<Box<EphemeralOriginalRosterIntentV1>>(),
+            size_of::<Box<EphemeralRosterPublicationV1>>(),
+        ] { assert_eq!(boxed, pointer); }
+        assert!(size_of::<State>() <= 64 * 1024);
+        assert!(size_of::<[Option<State>; 3]>() <= 192 * 1024);
+        // These caps alone do not prove the real caller stack budget. The
+        // exact built ELF frame chain and native A/B remain separate gates.
+    }
+
+    #[test]
+    fn durable_worker_execute_retains_inert_error_and_slot_order() {
+        std::thread::Builder::new()
+            .name("durable-worker-inert-order".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+        let cancelled = AtomicBool::new(true);
+        let mut states = [Some(State::PreservedDelivery), None, Some(State::PreservedDelivery)];
+        assert_eq!(execute(JoinedSignerCommandV1::Acknowledge(3), &mut states, None, &cancelled).err(),
+            Some("durable account index"));
+        assert!(matches!(states[0].as_ref(), Some(State::PreservedDelivery)));
+        assert!(states[1].is_none());
+        assert!(matches!(states[2].as_ref(), Some(State::PreservedDelivery)));
+        assert_eq!(execute(JoinedSignerCommandV1::Acknowledge(1), &mut states, None, &cancelled).err(),
+            Some("durable retained state missing"));
+        assert!(matches!(states[0].as_ref(), Some(State::PreservedDelivery)));
+        assert!(states[1].is_none());
+        assert!(matches!(states[2].as_ref(), Some(State::PreservedDelivery)));
+        assert_eq!(execute(JoinedSignerCommandV1::Acknowledge(0), &mut states, None, &cancelled).err(),
+            Some("durable finite native transition mismatch"));
+        assert!(states[0].is_none());
+        assert!(states[1].is_none());
+        assert!(matches!(states[2].as_ref(), Some(State::PreservedDelivery)));
+
+        // Deliberately invalid public request metadata, not native custody or
+        // a healthy admission. These paths must reject before any owner call.
+        let intent: HostManualRosterEnrollmentIntentV2 = serde_json::from_value(serde_json::json!({
+            "version": 0,
+            "account_intent": {
+                "version": 0, "operation_id": "",
+                "host": { "generation_id": "", "inventory_digest": "", "generation_plan_digest": "",
+                    "financial_journal_origin_digest": "", "store_destination_identity": "", "profile_id": "",
+                    "canonical_root": "", "destination_identity_digest": "", "inherited_identity_digest": "",
+                    "scope_predecessor_digest": null },
+                "scope": { "agreement_id": "", "obligation_id": "", "participant_id": "", "principal_id": "",
+                    "privacy_domain": "", "recipient_scope_digests": [], "aggregate_budget_zatoshis": 0,
+                    "per_operation_limit_zatoshis": 0, "maximum_fee_share_zatoshis": 0,
+                    "maximum_transaction_fee_zatoshis": 0, "maximum_permit_lifetime_ms": 0, "expires_at_ms": 0 }
+            },
+            "roster": { "version": 0, "generation_id": "", "store_destination_identity": "", "roster_sequence": 0,
+                "predecessor": { "kind": "enrollment_v1", "audit_digest": "" } }
+        })).expect("inert metadata must decode without constructing authority");
+        assert!(intent.validate().is_err());
+        for index in 0..=3 {
+            let empty = || [Some(State::PreservedDelivery), None, Some(State::PreservedDelivery)];
+            let mut routed = empty();
+            let mut original = empty();
+            let routed_error = execute(JoinedSignerCommandV1::OpenRosterIntent(index, intent.clone()),
+                &mut routed, None, &cancelled).err();
+            let original_error = execute_other(JoinedSignerCommandV1::OpenRosterIntent(index, intent.clone()),
+                &mut original, None, &cancelled).err();
+            let expected = match index {
+                3 => "durable account index",
+                1 => "durable retained state missing",
+                _ => "durable finite native transition mismatch",
+            };
+            assert_eq!(routed_error, Some(expected));
+            assert_eq!(original_error, Some(expected));
+            for (left, right) in routed.iter().zip(&original) {
+                assert_eq!(left.is_some(), right.is_some());
+                if left.is_some() { assert!(matches!(left, Some(State::PreservedDelivery))); }
+                if right.is_some() { assert!(matches!(right, Some(State::PreservedDelivery))); }
+            }
+            assert_eq!(routed[index.min(2)].is_some(), index == 3);
+        }
+        // The sibling publication request is likewise inert and invalid. No
+        // decoded historical claim is treated as a live account or permission.
+        let publication: HostManualRosterPublicationRequestV2 = serde_json::from_value(serde_json::json!({
+            "version": 0,
+            "enrollment": { "terms": {
+                "version": 0, "operation_id": "",
+                "identity": { "account_id": "", "full_viewing_key_digest": "", "network_profile_id": "", "derivation_domain": "" },
+                "birth_request_digest": "", "birth_commit_digest": "", "native_birth_digest": "",
+                "original_policy_digest": "", "account_use_genesis_digest": "", "original_witness_origin_digest": "",
+                "host": intent.account_intent.host.clone(), "scope": intent.account_intent.scope.clone(),
+                "signer": { "enrollment_generation_id": "", "signer_target_digest": "", "original_envelope_digest": "",
+                    "owner_certificate_digest": "", "writer_certificate_digest": "", "writer_epoch": 0, "native_signer_measurement": "" },
+                "transport_binding_digest": "", "issued_at_ms": 0
+            } },
+            "roster": intent.roster.clone(), "attempt": { "kind": "initial_v2" }
+        })).expect("inert publication metadata must decode without authority");
+        assert!(publication.validate().is_err());
+        for index in 0..=3 {
+            let empty = || [Some(State::PreservedDelivery), None, Some(State::PreservedDelivery)];
+            let mut routed = empty();
+            let mut original = empty();
+            let routed_error = execute(JoinedSignerCommandV1::OpenRosterPublication(index, publication.clone()),
+                &mut routed, None, &cancelled).err();
+            let original_error = execute_other(JoinedSignerCommandV1::OpenRosterPublication(index, publication.clone()),
+                &mut original, None, &cancelled).err();
+            let expected = match index {
+                3 => "durable account index",
+                1 => "durable retained state missing",
+                _ => "durable finite native transition mismatch",
+            };
+            assert_eq!(routed_error, Some(expected));
+            assert_eq!(original_error, Some(expected));
+            for (left, right) in routed.iter().zip(&original) {
+                assert_eq!(left.is_some(), right.is_some());
+                if left.is_some() { assert!(matches!(left, Some(State::PreservedDelivery))); }
+                if right.is_some() { assert!(matches!(right, Some(State::PreservedDelivery))); }
+            }
+            assert_eq!(routed[index.min(2)].is_some(), index == 3);
+        }
+
+            })
+            .expect("inert worker-order test thread must start")
+            .join()
+            .expect("inert worker-order test must finish without panic");
+    }
 
     #[test]
     fn durable_v2_command_indices_and_empty_reopen_are_data_only() {
