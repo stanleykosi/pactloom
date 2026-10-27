@@ -6,6 +6,22 @@ use crate::financial_signing_data::{
     FinancialSigningInputsV1, FinancialSigningPresentationV1, FinancialSigningOriginalV1, FinancialSigningServiceV1,
 };
 use std::sync::atomic::AtomicU64;
+// Only observe_restrictions calls observe_active; errors propagate to its
+// existing failure gate. Do not observe ordinary custody current/lease checks.
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+macro_rules! signing_retired_check {
+    ($owner:expr,$record:expr) => {
+        ($record).inspect_err(|error| {
+            use crate::financial_ci_actor_diagnostics as d;
+            let stage=match $owner {0=>d::DriverStage::SigningOwner1RetiredMissing,1=>d::DriverStage::SigningOwner2RetiredMissing,_=>return};
+            d::driver_detail(stage,d::classify_io(error.kind()));
+        })?.check_for_restriction()
+    };
+}
+#[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
+macro_rules! signing_retired_check {
+    ($owner:expr,$record:expr) => {($record)?.check()};
+}
 pub(super) const G_SETUP_REVIEW: u8 = 1;
 pub(super) const G_SETUP_ADMITTED: u8 = 2;
 pub(super) const G_REVIEW: u8 = 3;
@@ -597,7 +613,7 @@ impl CGSlot {
                 .ok_or_else(|| rejected("active financial signing review missing"))?
                 .check(),
             G_SERVING => self.review.as_ref().ok_or_else(||rejected("active Signing service missing"))?.service_check(),
-            6 => self.retired.as_ref().ok_or_else(||rejected("retired Signing custody absent"))?.check(),
+            6 => signing_retired_check!(i,self.retired.as_ref().ok_or_else(||rejected("retired Signing custody absent"))),
             _ => Ok(()),
         }
     }

@@ -18,6 +18,18 @@ macro_rules! boundary {
     }};
 }
 
+// Only callers whose returned failure immediately propagates to restriction
+// may use this observation. Ordinary custody/display probes remain silent.
+macro_rules! signed_result_fatal_check {
+    ($custody:expr) => {{
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        let result=wholepact_financial_coordinator_origin::financial_ci_actor_diagnostics::check_signed_result_for_fatal_restriction($custody);
+        #[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
+        let result=($custody).check_current();
+        result
+    }};
+}
+
 use crate::{
     financial_completed_pair_ui::{PairFlow, PairStage, PairOutbound},
     financial_source_driver::{Driver, HostStatus, Outcome},
@@ -808,9 +820,15 @@ impl RetainedFinancialRole {
         self.witness_ready.take();
     }
     fn current(&self) -> bool {
+        self.current_with_signed_check(|s| s.check_current())
+    }
+    fn current_for_restriction(&self) -> bool {
+        self.current_with_signed_check(|s| signed_result_fatal_check!(s))
+    }
+    fn current_with_signed_check(&self, check: impl FnOnce(&wholepact_financial_coordinator_origin::FinancialSignedResultCustodyV1) -> Result<()>) -> bool {
         // A parked signed role must carry actual normal-retirement custody.
         // Removing a dead Serving token is never evidence of successful retirement.
-        self.sign_flow.retired.as_ref().is_some_and(|s| s.check_current().is_ok())
+        self.sign_flow.retired.as_ref().is_some_and(|s| check(s).is_ok())
             && self
                 .return_flow
                 .read
@@ -2141,8 +2159,8 @@ impl Window {
                     return Err(rejected("Return Read without actual signed retirement"));
                 }
                 ticket.check_current()?;
-                self.sign_flow.retired.as_ref()
-                    .ok_or_else(|| rejected("actual signed retirement custody missing"))?.check_current()?;
+                signed_result_fatal_check!(self.sign_flow.retired.as_ref()
+                    .ok_or_else(|| rejected("actual signed retirement custody missing"))?)?;
                 self.return_flow.read = Some(ticket);
                 self.transition(Phase::ReturnReadReview, frame);
             }
@@ -3213,7 +3231,7 @@ impl Window {
                 || self
                     .financial_parked
                     .iter()
-                    .any(|p| p.as_ref().is_some_and(|p| !p.current()))
+                    .any(|p| p.as_ref().is_some_and(|p| !p.current_for_restriction()))
                 || self
                     .return_flow
                     .read
@@ -3258,11 +3276,11 @@ impl Window {
         if driver_revoked
             || self.normal_ticket.as_ref().is_some_and(|t| t.check_current().is_err())
             || self.pair_flow.current().is_err()
-            || self.sign_flow.retired.as_ref().is_some_and(|s| s.check_current().is_err())
+            || self.sign_flow.retired.as_ref().is_some_and(|s| signed_result_fatal_check!(s).is_err())
             || self
                 .financial_parked
                 .iter()
-                .any(|p| p.as_ref().is_some_and(|p| !p.current()))
+                .any(|p| p.as_ref().is_some_and(|p| !p.current_for_restriction()))
             || self
                 .return_flow
                 .read
@@ -3631,7 +3649,7 @@ impl Window {
                         || self.sign_flow.committed.as_ref() != Some(custody.signed_result())
                         || self.writer_flow.service_display.as_ref()
                             .is_none_or(|p| &p.original != custody.original_binding())
-                        || custody.check_current().is_err() {
+                        || signed_result_fatal_check!(&custody).is_err() {
                         self.revoke("Actual Signing retirement custody or Host resume changed."); drop(custody);
                     } else {
                         self.history_resume_pending = None;
@@ -6544,7 +6562,7 @@ impl Window {
                     let custody = self.financial_parked[index(role)].as_ref()
                         .and_then(|p| p.sign_flow.retired.as_ref())
                         .ok_or_else(|| rejected("CompletedPair requires both actual retired results"))?;
-                    custody.check_current()?;
+                    signed_result_fatal_check!(custody)?;
                     deadline = deadline.min(custody.original_service_deadline()).min(custody.original_writer_deadline());
                 }
                 let inputs = CompletedPairInputsV1 { owners: [self.retained_signing_inputs(Role::Signer1)?, self.retained_signing_inputs(Role::Signer2)?] };
@@ -6647,8 +6665,8 @@ impl Window {
                 if self.active != Some(role) || self.financial_parked[index(role)].is_some() {
                     return Err(rejected("financial owner changed"));
                 }
-                self.sign_flow.retired.as_ref()
-                    .ok_or_else(|| rejected("actual signed retirement custody missing"))?.check_current()?;
+                signed_result_fatal_check!(self.sign_flow.retired.as_ref()
+                    .ok_or_else(|| rejected("actual signed retirement custody missing"))?)?;
                 let mut held = RetainedFinancialRole::default();
                 held.phase = Some(self.phase);
                 held.exchange(self);
@@ -6665,7 +6683,7 @@ impl Window {
                 let mut held = self.financial_parked[index(role)]
                     .take()
                     .ok_or_else(|| rejected("retained financial owner absent"))?;
-                if !held.current() {
+                if !held.current_for_restriction() {
                     return Err(rejected("original financial custody expired"));
                 }
                 let phase = held
@@ -6689,7 +6707,7 @@ impl Window {
                 // original Signing owner on the shared protected installation.
                 let other = 1 - index(role);
                 if self.financial_setup_selected[other]
-                    && self.financial_parked[other].as_ref().is_none_or(|p| !p.current()) {
+                    && self.financial_parked[other].as_ref().is_none_or(|p| !p.current_for_restriction()) {
                     return Err(rejected("previous financial role not actually retired"));
                 }
                 self.financial_loaded = Some(role);

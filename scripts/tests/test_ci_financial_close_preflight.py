@@ -498,7 +498,7 @@ class OriginalFailureSelectionTests(unittest.TestCase):
   self.assertLess(workflow.index("rustup+['cargo'"),workflow.index(command))
   self.assertNotIn('--source-only',workflow)
   names=ast.literal_eval(re.search(r'semantic_names = (\[.*?\])',workflow,re.S).group(1))
-  self.assertEqual(len(names),13);self.assertEqual(len(set(names)),13)
+  self.assertEqual(len(names),17);self.assertEqual(len(set(names)),17)
   required={'financial_ci_actor_diagnostics::tests::coordinator_reported_witness_detail_precedes_cascading_peer_exit':'financial_ci_actor_diagnostics.rs','financial_ci_host_diagnostics::tests::relay_top_level_failure_preserves_inner_observation_and_first_failure':'financial_ci_host_diagnostics.rs','financial_ci_host_diagnostics::tests::copied_reporter_records_panicking_or_failed_append_before_second_flush':'financial_ci_host_diagnostics.rs','financial_observer::early_actor_observation_tests::host_pre_drop_flush_never_waits_for_owned_writer_lock':'financial_observer.rs'}
   for name,path in required.items():
    self.assertIn(name,names)
@@ -626,7 +626,7 @@ class HeldSelectionNavigationPreflightTests(unittest.TestCase):
   for token in ('+HELD_SELECTION_TESTS','--no-run','--bin','--list','--exact','--test-threads=1','1 passed; 0 failed; 0 ignored;','deadline=time.monotonic()+60','run_provider_tls_probe(root,selected,raw)'):self.assertIn(token,runner)
   self.assertLess(runner.index('coordinator_test_executable(raw,'),runner.index('for name in names:'))
   workflow=(root/'.github/workflows/deadline-preflight.yml').read_text()
-  self.assertEqual(workflow.count('parked-material-review-preflight-p91'),4)
+  self.assertEqual(workflow.count('retained-signing-check-preflight-p92'),4)
   spec=importlib.util.spec_from_file_location('p81_ui_inverse',P.parent/'ci-financial-admit-read-source-audit.py');audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
   self.assertEqual(hashlib.sha256(audit.restore_held_selection_ui(source).encode()).hexdigest(),'22659883eb0eaf88c75e453cbd1272bb6ce8493c75a8f5ddf562f5c78c835a6a')
   mutations=[source+'// unrelated source change\n']
@@ -658,7 +658,7 @@ class WriterReceiptWallCapPreflightTests(unittest.TestCase):
   diagnostic='financial_ci_actor_diagnostics::tests::writer_receipt_failure_keeps_innermost_original_io_class'
   semantic=workflow.split('          semantic_names = [',1)[1].split('          ]',1)[0]
   self.assertEqual(semantic.count(diagnostic),1)
-  self.assertEqual(workflow.count('assert len(semantic_names) == 13 and len(set(semantic_names)) == 13'),1)
+  self.assertEqual(workflow.count('assert len(semantic_names) == 17 and len(set(semantic_names)) == 17'),1)
   self.assertEqual((origin/'financial_ci_actor_diagnostics.rs').read_text().count('fn '+diagnostic.rsplit('::',1)[-1]+'('),1)
   for start,stop in [('          for name in names:','          # These actual Origin'),('          for name in semantic_names:',"          print('Four clock")]:
    gate=workflow.split(start,1)[1].split(stop,1)[0]

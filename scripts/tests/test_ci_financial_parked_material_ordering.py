@@ -181,8 +181,13 @@ class ParkedMaterialOrderingTests(unittest.TestCase):
         self.assertIn(prior+command,workflow)
         self.assertLess(workflow.index(command),workflow.index('scripts/ci-financial-admit-read-trace.py'))
         self.assertLess(workflow.index("print(profile+': compiler and API fences passed')"),workflow.index(command))
-        self.assertEqual(workflow.count('parked-material-review-preflight-p91'),4)
-        restored=workflow.replace(command,'',1).replace('name: Parked material review preflight only\n','name: Retained signing wall preflight only\n',1).replace('parked-material-review-preflight-p91','retained-signing-wall-preflight-p90')
+        self.assertEqual(workflow.count('retained-signing-check-preflight-p92'),4)
+        added="              'financial_ci_actor_diagnostics::tests::signed_result_minimum_masks_keep_atomic_detail_and_legacy_shape',\n              'financial_ci_actor_diagnostics::tests::signed_result_driver_rejects_invalid_bits_masks_roles_and_pids',\n              'financial_ci_actor_diagnostics::tests::signed_result_driver_first_wins_never_mixes_owner_class_or_mask',\n              'financial_ci_actor_diagnostics::tests::signed_result_stage_inventory_preserves_all_original_discriminants',\n"
+        current='          assert len(semantic_names) == 17 and len(set(semantic_names)) == 17\n'
+        historical='          assert len(semantic_names) == 13 and len(set(semantic_names)) == 13\n'
+        self.assertEqual(workflow.count(added),1);self.assertEqual(workflow.count(current),1)
+        workflow=workflow.replace(added,'',1).replace(current,historical,1)
+        restored=workflow.replace(command,'',1).replace('name: Retained signing check preflight only\n','name: Retained signing wall preflight only\n',1).replace('retained-signing-check-preflight-p92','retained-signing-wall-preflight-p90')
         self.assertEqual(G.sha(restored),'2296a3379ab8562a26cb82904009e6cd76cd568f4b1e5e14921ab9daad57f408')
 
 if __name__=='__main__':unittest.main()

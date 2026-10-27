@@ -44,10 +44,10 @@ class RestrictionReturnContractTests(unittest.TestCase):
     def test_exact_append_only_native_python_vocabulary_and_discriminant_bound(self):
         source=(ORIGIN/'financial_ci_actor_diagnostics.rs').read_text()
         names=source.split('codes!(DriverStage {',1)[1].split('});',1)[0].split(',')
-        self.assertEqual(len(names),211);self.assertLessEqual(len(names),256)
+        self.assertEqual(len(names),237);self.assertLessEqual(len(names),256)
         self.assertEqual(hashlib.sha256('\n'.join(names[:175]).encode()).hexdigest(),
                          '44c30eff24de3cd6bbb1ca63bff732eb383acdedaf7c617f1b23a359e231e975')
-        self.assertEqual(tuple(names[175:]),STAGES)
+        self.assertEqual(tuple(names[175:211]),STAGES)
         self.assertEqual(set(names),C.ACTOR_DRIVER_STAGES)
         self.assertEqual(len(set(names)),len(names))
     def test_all_new_stages_survive_actual_actor_and_first_observation_validators(self):
@@ -96,10 +96,10 @@ class RestrictionReturnContractTests(unittest.TestCase):
         texts,_=generator.extract(ROOT)
         stage=generator.item(texts['diagnostic'],'codes!(DriverStage {').split('{',1)[1].rsplit('}',1)[0]
         self.assertEqual(set(stage.split(',')),C.ACTOR_DRIVER_STAGES)
-        self.assertEqual(len(stage.split(',')),211)
+        self.assertEqual(len(stage.split(',')),237)
     def test_hosted_actual_compiler_profiles_precede_generated_traces_and_python(self):
         workflow=(ROOT/'.github/workflows/deadline-preflight.yml').read_text()
-        self.assertEqual(workflow.count('parked-material-review-preflight-p91'),4)
+        self.assertEqual(workflow.count('retained-signing-check-preflight-p92'),4)
         self.assertIn("for profile in ['minimal', 'production', 'observed-pixel', 'observed-semantic']:",workflow)
         self.assertIn("['cargo', 'check', '--locked', '-p', package, '--lib', '--no-default-features'",workflow)
         self.assertLess(workflow.index("args = rustup+['cargo', 'check'"),workflow.index("'scripts/ci-financial-cause-trace.py'"))
@@ -109,10 +109,11 @@ class RestrictionReturnContractTests(unittest.TestCase):
     def test_all_three_new_actual_native_tests_are_nonignored_exact_hosted_selections(self):
         workflow=(ROOT/'.github/workflows/deadline-preflight.yml').read_text()
         names=ast.literal_eval(re.search(r'semantic_names = (\[.*?\])',workflow,re.S).group(1))
-        self.assertEqual(len(names),13);self.assertEqual(len(set(names)),13)
-        self.assertEqual(tuple(names[-3:]),NATIVE_TESTS)
+        self.assertEqual(len(names),17);self.assertEqual(len(set(names)),17)
+        self.assertEqual(tuple(names[10:13]),NATIVE_TESTS)
+        self.assertEqual(tuple(names[13:]),('financial_ci_actor_diagnostics::tests::signed_result_minimum_masks_keep_atomic_detail_and_legacy_shape', 'financial_ci_actor_diagnostics::tests::signed_result_driver_rejects_invalid_bits_masks_roles_and_pids', 'financial_ci_actor_diagnostics::tests::signed_result_driver_first_wins_never_mixes_owner_class_or_mask', 'financial_ci_actor_diagnostics::tests::signed_result_stage_inventory_preserves_all_original_discriminants'))
         source=(ORIGIN/'financial_ci_actor_diagnostics.rs').read_text()
-        for name in NATIVE_TESTS:self.assertEqual(source.count('fn '+name.rsplit('::',1)[-1]+'('),1)
+        for name in (*NATIVE_TESTS,*names[13:]):self.assertEqual(source.count('fn '+name.rsplit('::',1)[-1]+'('),1)
         gate=workflow.split('for name in semantic_names:',1)[1].split("print('Four clock",1)[0]
         for token in ("'--list', '--exact'","'--exact', name, '--test-threads=1'",'1 passed; 0 failed; 0 ignored;','timeout=30'):
             self.assertIn(token,gate)

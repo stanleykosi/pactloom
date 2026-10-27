@@ -321,7 +321,7 @@ class SourceContracts(unittest.TestCase):
         self.assertLess(tail.index('self.writer_flow.serving.take();'),tail.index('self.retirement_paused = None;'))
         self.assertIn('if self.phase == Phase::SigningRetiring {\n                self.writer_flow.serving.take();\n            }',tail)
         custody=item(source,'Ok(Outcome::SigningResumed(custody)) =>')
-        for guard in ['self.phase != Phase::SigningRetiring','self.active != Some(role)','self.retirement_paused.is_some()','self.history_resume_pending != Some(role)','self.sign_flow.committed.as_ref() != Some(custody.signed_result())','&p.original != custody.original_binding()','custody.check_current().is_err()']:
+        for guard in ['self.phase != Phase::SigningRetiring','self.active != Some(role)','self.retirement_paused.is_some()','self.history_resume_pending != Some(role)','self.sign_flow.committed.as_ref() != Some(custody.signed_result())','&p.original != custody.original_binding()','signed_result_fatal_check!(&custody).is_err()']:
             self.assertIn(guard,custody)
         self.assertNotIn('self.sign_flow.retired = Some(custody);',tail)
         self.assertIn('self.sign_flow.retired = Some(custody);',custody)

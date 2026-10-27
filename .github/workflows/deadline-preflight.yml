@@ -1,14 +1,14 @@
-name: Parked material review preflight only
+name: Retained signing check preflight only
 on:
   push:
-    branches: [checkpoint/parked-material-review-preflight-p91]
+    branches: [checkpoint/retained-signing-check-preflight-p92]
 permissions: {}
 concurrency:
-  group: parked-material-review-preflight-p91
+  group: retained-signing-check-preflight-p92
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/parked-material-review-preflight-p91' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/retained-signing-check-preflight-p92' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -187,8 +187,12 @@ jobs:
               'financial_ci_actor_diagnostics::tests::restriction_return_details_preserve_error_identity_and_first_slots',
               'financial_ci_actor_diagnostics::tests::restriction_return_success_keeps_failure_gate_and_details_empty',
               'financial_ci_actor_diagnostics::tests::restriction_return_stage_inventory_stays_append_only_and_bounded',
+              'financial_ci_actor_diagnostics::tests::signed_result_minimum_masks_keep_atomic_detail_and_legacy_shape',
+              'financial_ci_actor_diagnostics::tests::signed_result_driver_rejects_invalid_bits_masks_roles_and_pids',
+              'financial_ci_actor_diagnostics::tests::signed_result_driver_first_wins_never_mixes_owner_class_or_mask',
+              'financial_ci_actor_diagnostics::tests::signed_result_stage_inventory_preserves_all_original_discriminants',
           ]
-          assert len(semantic_names) == 13 and len(set(semantic_names)) == 13
+          assert len(semantic_names) == 17 and len(set(semantic_names)) == 17
           for name in semantic_names:
               listing = run([exe, '--list', '--exact', name], env=env, timeout=30)
               assert [line for line in listing.splitlines() if line.endswith(': test')] == [name+': test'], name
@@ -216,7 +220,7 @@ jobs:
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B scripts/ci-financial-downstream-projection-audit.py --source "$PWD"
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/parked-material-review-preflight-p91' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/retained-signing-check-preflight-p92' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
