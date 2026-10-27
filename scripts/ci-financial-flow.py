@@ -223,7 +223,7 @@ class FullFlow:
         # ObserverFiles retains append-only validation and the original deadline.
         self.records=self._review_timed('ProofRead',self.observer.read,frame=snapshot)
         self._note_review_source_size(snapshot)
-        C.require(not any(r['kind']=='Failure' for r in self.records),'observer_failure')
+        C.observer_failure_checked('FlowFailureRecord',C.require,not any(r['kind']=='Failure' for r in self.records),'observer_failure')
         return snapshot
     @staticmethod
     def find(s,tag,owner):

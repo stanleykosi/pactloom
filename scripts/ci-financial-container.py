@@ -395,6 +395,21 @@ def emit_cached_actor_failure(flow):
     except Exception:return # Cached validated slots only; preserve failure/cleanup.
 
 
+def emit_cached_observer_failure(flow,error):
+    # First validated observation batch and exception-local site only: no IO,
+    # clock, raw errors or inference that record emission equals root cause.
+    try:
+        if getattr(error,'code',None)!='observer_failure':return
+        first=(dict(availability='Unavailable',read_index=None,
+                    since_first_successful_read_ns=None,events=[])
+               if flow is None else flow.observer.first_failure_observation())
+        value=dict(version=1,site=getattr(error,'observer_failure_site','Unclassified'),
+                   first_observed=first)
+        encoded=json.dumps(C.validate_observer_failure_diagnostic(value),separators=(',',':'))
+        print('CI_FINANCIAL_OBSERVER_FAILURE_DIAGNOSTIC '+encoded,flush=True)
+    except Exception:return # Diagnostic failure cannot replace original failure/cleanup.
+
+
 def emit_cached_input_failure(flow,error):
     # Original exception and cached checkpoint only; no fresh read/input/clock.
     try:
@@ -453,6 +468,7 @@ def main():
             print('CI_FINANCIAL_LOCATION '+json.dumps(flow.location,separators=(',',':')),flush=True)
         emit_cached_input_failure(flow,error)
         emit_snapshot_failure(error)
+        emit_cached_observer_failure(flow,error)
         emit_cached_progress_failure(flow)
         emit_cached_host_failure(flow)
         emit_cached_review_failure(flow)

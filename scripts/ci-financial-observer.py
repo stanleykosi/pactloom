@@ -26,6 +26,7 @@ class ObserverFiles:
         self._semantic_active=None
         self._diagnostics=None
         self._collection_size=None
+        self._first_failure=None;self._successful_reads=0;self._first_successful_read_ns=None
         self._failure_latched=False;self._failure_drain_deadline=None
         try:meta=self.directory.stat(follow_symlinks=False)
         except OSError:raise C.Rejected('observer_missing') from None
@@ -38,30 +39,37 @@ class ObserverFiles:
             C.require(type(bound) is int and bound<=self.deadline_ns,'deadline')
             started=time.monotonic_ns();C.require(started<bound,'deadline')
             records=self._read(final)
-            diagnostics=self._project_diagnostics(records)
+            first_events={} if self._first_failure is None else None
+            diagnostics=self._project_diagnostics(records,first_events)
             if diagnostics['timing']['availability']=='Observed':
                 diagnostics['timing']['observer_remaining_ns']=self.deadline_ns-started
             try:C.validate_observation_timing_diagnostic(diagnostics['timing'])
             except C.Rejected:diagnostics['timing']=self._unavailable_timing()
+            first_failure=self._stage_first_failure(first_events,started)
             # Final check follows all collection/projection validation. Monotonic
             # time can only reduce the already-validated positive remainder.
             now=time.monotonic_ns();C.require(started<=now<bound,'deadline')
             if diagnostics['timing']['availability']=='Observed':
                 diagnostics['timing']['observer_remaining_ns']=self.deadline_ns-now
             self._diagnostics=diagnostics
+            # Commit only after the original final bound. Freeze this entire
+            # first observed batch: later drain reads cannot add actors to it.
+            if first_failure is not None:self._first_failure=first_failure
+            self._successful_reads=min(self._successful_reads+1,2**31)
+            if self._first_successful_read_ns is None:self._first_successful_read_ns=started
             try:self._collection_size=dict(semantics='LastSuccessfulCompletePrefix',source_records=len(records),source_complete_bytes=sum(len(value[1]) for value in self._files.values()))
             except Exception:self._collection_size=None
             return records
         except C.Rejected:
             self._clear_host_view();raise
         except OSError:
-            self._clear_host_view();raise C.Rejected('observer_failure') from None
+            self._clear_host_view();raise C.observer_failure_at('ReadIo',C.Rejected('observer_failure')) from None
     def collection_diagnostic(self):
         # Previously successful collection metadata only; no IO or record values.
         return None if self._collection_size is None else self._collection_size.copy()
     def _read(self,final):
         meta=self.directory.stat(follow_symlinks=False)
-        C.require((meta.st_dev,meta.st_ino)==self._directory_identity,'observer_failure')
+        C.observer_failure_checked('DirectoryIdentity',C.require,(meta.st_dev,meta.st_ino)==self._directory_identity,'observer_failure')
         # Priority comes only from previously authenticated actor records.
         priority={self._roles.get('Coordinator'):0,self._roles.get('Host'):1}
         names=sorted((p.name for p in self.directory.iterdir()),key=lambda name:(priority.get(name,2),name))
@@ -81,7 +89,7 @@ class ObserverFiles:
             prior=self._files.get(name,(identity,b''))
             C.require(prior[0]==identity and raw.startswith(prior[1]) and after.st_nlink==1,'replay')
             complete=raw[:raw.rfind(b'\n')+1]
-            if final:C.require(raw==complete and len(raw)==before.st_size==after.st_size,'observer_failure')
+            if final:C.observer_failure_checked('FinalPrefixChanged',C.require,raw==complete and len(raw)==before.st_size==after.st_size,'observer_failure')
             C.require(len(raw)-len(complete)<=C.MAX_RECORD_BYTES,'record_limit')
             # The exact complete byte prefix already passed strict JSON and
             # shape validation under this profile/file identity. Batch-decode
@@ -123,7 +131,26 @@ class ObserverFiles:
             return dict(progress=None,native=dict(version=1,availability='Unavailable',
                 **{name:'Unobserved' for name in C.NATIVE_FAILURE_COMPONENTS}),timing=self._unavailable_timing(),host_exit=C.unavailable_host_exit_diagnostic(),actor=C.unavailable_actor_diagnostic())
         return copy.deepcopy(self._diagnostics)
-    def _project_diagnostics(self,records):
+    def first_failure_observation(self):
+        """First validated batch, not root cause or cross-actor latch order.
+
+        actor_elapsed_ns is the record emission offset, not failure onset.
+        No new IO, clock reads, native authority, or normal-completion proof.
+        """
+        return C.unavailable_first_failure_observation() if self._first_failure is None else copy.deepcopy(self._first_failure)
+    def _stage_first_failure(self,events,started):
+        if not events:return None
+        try:
+            value=dict(availability='Observed',read_index=self._successful_reads+1,
+                since_first_successful_read_ns=0 if self._first_successful_read_ns is None else started-self._first_successful_read_ns,
+                events=[events[role] for role in C.ROLES if role in events])
+            C.validate_observer_failure_diagnostic(dict(version=1,site='Unclassified',first_observed=value))
+            return value
+        except Exception:
+            # A diagnostic-only failure cannot replace the original result.
+            # Freeze unavailable rather than relabeling a later batch as first.
+            return C.unavailable_first_failure_observation()
+    def _project_diagnostics(self,records,first_events=None):
         # Called only after the entire collection and semantic join validate.
         # Do not revalidate the unbounded history merely to derive summaries.
         progress=dict(version=1,signer_counts=[[0]*len(C.SIGNER_STEPS) for _ in range(2)],
@@ -139,6 +166,14 @@ class ObserverFiles:
         prior_elapsed=None;ordered=True
         for record in records:
             kind=record['kind'];facts=record['facts'];row=None
+            if first_events is not None and None not in first_events and kind in C.OBSERVER_FAILURE_KINDS:
+                try:
+                    role=record['role'];prior=first_events.get(role)
+                    if prior is None or record['sequence']<prior['sequence']:
+                        first_events[role]=dict(role=role,kind=kind,sequence=record['sequence'],
+                            actor_elapsed_ns=record['elapsed_ns'],facts=copy.deepcopy(facts))
+                except Exception:
+                    first_events.clear();first_events[None]=None
             if kind=='SignerMilestone':
                 row=progress['signer_counts'][('Signer1','Signer2').index(facts['owner'])];index=C.SIGNER_STEPS.index(facts['step'])
             elif kind=='HostMilestone':row=progress['host_counts'];index=C.HOST_STEPS.index(facts['step'])
@@ -200,7 +235,7 @@ class ObserverFiles:
         except (C.Rejected,OSError):return # preserve original failure and last valid cache
 
     def next_snapshot(self,deadline_ns):
-        C.require(not self._failure_latched,'observer_failure')
+        C.observer_failure_checked('NextSnapshotLatched',C.require,not self._failure_latched,'observer_failure')
         C.require(type(deadline_ns) is int and deadline_ns<=self.deadline_ns,'deadline')
         while time.monotonic_ns()<deadline_ns:
             records=self.read(deadline_ns=deadline_ns)
@@ -208,7 +243,7 @@ class ObserverFiles:
             if any(r['kind'] in ('Failure','NativeFailureBoundary','HostFailureBoundary','ActorFailureBoundary') for r in records):
                 self._failure_latched=True
                 if self.expected_profile==C.SEMANTIC_PROFILE:self._drain_failure(deadline_ns,records)
-                raise C.Rejected('observer_failure')
+                raise C.observer_failure_at('NextSnapshotFailureRecords',C.Rejected('observer_failure'))
             candidates=[r['facts'] for r in records if r['kind']=='UiSnapshot' and
                         r['facts']['view_generation']>self._snapshot_generation]
             if candidates:

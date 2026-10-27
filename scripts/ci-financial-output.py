@@ -29,7 +29,7 @@ def validate_completed(records, actual_root_pid, actual_root_exit):
     by_role={role:[] for role in C.ROLES}
     for record in records:
         C.validate_record(record)
-        C.require(record['kind'] != 'Failure','observer_failure')
+        C.observer_failure_checked('FullOutputFailureRecord',C.require,record['kind'] != 'Failure','observer_failure')
         by_role[record['role']].append(record)
     births={}
     for role, entries in by_role.items():

@@ -108,6 +108,64 @@ def validate_snapshot_diagnostic(value):
     return value
 
 
+OBSERVER_FAILURE_SITES=frozenset(('Unclassified','ReadIo','DirectoryIdentity',
+    'FinalPrefixChanged','NextSnapshotLatched','NextSnapshotFailureRecords',
+    'FlowFailureRecord','NormalCloseFailureBoundary','ExternalOutputFailureRecord',
+    'FullOutputFailureRecord'))
+OBSERVER_FAILURE_KINDS=frozenset(('Failure','NativeFailureBoundary',
+    'HostFailureBoundary','ActorFailureBoundary'))
+
+def observer_failure_at(site,error):
+    """Best-effort first observation site; never replace the original error."""
+    try:
+        if (type(site) is str and site in OBSERVER_FAILURE_SITES and site!='Unclassified'
+                and getattr(error,'code',None)=='observer_failure'
+                and getattr(error,'observer_failure_site',None) is None):
+            error.observer_failure_site=site
+    except Exception:pass
+    return error
+
+def observer_failure_checked(site,operation,*args,**kwargs):
+    try:return operation(*args,**kwargs)
+    except Exception as error:
+        observer_failure_at(site,error)
+        raise
+
+def unavailable_first_failure_observation():
+    return dict(availability='Unavailable',read_index=None,
+                since_first_successful_read_ns=None,events=[])
+
+def validate_first_failure_observation(value):
+    exact(value,('availability','read_index','since_first_successful_read_ns','events'))
+    require(value['availability'] in ('Unavailable','Observed'))
+    events=value['events'];require(type(events) is list and len(events)<=len(ROLES))
+    if value['availability']=='Unavailable':
+        require(value['read_index'] is None and value['since_first_successful_read_ns'] is None and events==[])
+        return value
+    require(integer(value['read_index'],1,2**31-1)
+            and integer(value['since_first_successful_read_ns'],0,ORIGINAL_NS) and events)
+    roles=[]
+    for event in events:
+        exact(event,('role','kind','sequence','actor_elapsed_ns','facts'))
+        require(type(event['kind']) is str and event['kind'] in OBSERVER_FAILURE_KINDS)
+        # Bounded, already-observed facts only. Reuse the closed record
+        # vocabulary and role constraints, never raw text or process identity.
+        validate_record(dict(schema=SCHEMA,profile=SEMANTIC_PROFILE,role=event['role'],
+            kind=event['kind'],sequence=event['sequence'],elapsed_ns=event['actor_elapsed_ns'],
+            facts=event['facts']),SEMANTIC_PROFILE)
+        roles.append(event['role'])
+    require(roles==[role for role in ROLES if role in roles])
+    return value
+
+def validate_observer_failure_diagnostic(value):
+    exact(value,('version','site','first_observed'))
+    require(type(value['version']) is int and value['version']==1
+            and type(value['site']) is str and value['site'] in OBSERVER_FAILURE_SITES)
+    validate_first_failure_observation(value['first_observed'])
+    require(len(json.dumps(value,separators=(',',':')).encode())<=8000,'record_limit')
+    return value
+
+
 def exact(value, keys, code='record_shape'):
     require(type(value) is dict and set(value) == set(keys), code)
 

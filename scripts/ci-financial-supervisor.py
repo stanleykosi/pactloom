@@ -836,7 +836,7 @@ class RuntimeRecords:
     def __init__(self,mode,expected_profile=None):
         self.expected_profile=P.C.EXTERNAL_PROFILE if expected_profile is None else expected_profile
         require(self.expected_profile in (P.C.EXTERNAL_PROFILE,P.C.SEMANTIC_PROFILE),'projection','result_schema')
-        self.mode,self.first_failure,self.result,self.location,self.fixture_diagnostic=mode,None,None,None,None;self.progress_diagnostic=None;self.host_diagnostic=None;self.native_failure_diagnostic=None;self.observation_timing_diagnostic=None;self.host_exit_diagnostic=None;self.input_diagnostic=None;self.snapshot_diagnostic=None;self.actor_diagnostic=None;self.review_diagnostic=None
+        self.mode,self.first_failure,self.result,self.location,self.fixture_diagnostic=mode,None,None,None,None;self.progress_diagnostic=None;self.host_diagnostic=None;self.native_failure_diagnostic=None;self.observation_timing_diagnostic=None;self.host_exit_diagnostic=None;self.input_diagnostic=None;self.snapshot_diagnostic=None;self.actor_diagnostic=None;self.review_diagnostic=None;self.observer_failure_diagnostic=None
     def __call__(self,line):
         require(type(line) is bytes and 0<len(line)<=8192 and self.result is None,'projection','result_records')
         if line.startswith(b'CI_FINANCIAL_LOCATION '):
@@ -870,6 +870,13 @@ class RuntimeRecords:
             try:P.C.validate_snapshot_diagnostic(value)
             except Exception:raise Failure('projection','result_schema') from None
             self.snapshot_diagnostic=value
+        elif line.startswith(b'CI_FINANCIAL_OBSERVER_FAILURE_DIAGNOSTIC '):
+            require(self.observer_failure_diagnostic is None,'projection','result_schema')
+            value=loads(line[len(b'CI_FINANCIAL_OBSERVER_FAILURE_DIAGNOSTIC '):])
+            try:P.C.validate_observer_failure_diagnostic(value)
+            except Exception:raise Failure('projection','result_schema') from None
+            # Failure-only observation origin, never causal or success evidence.
+            self.observer_failure_diagnostic=value
         elif line.startswith(b'CI_FINANCIAL_PROGRESS_DIAGNOSTIC '):
             require(self.progress_diagnostic is None,'projection','result_schema')
             value=loads(line[len(b'CI_FINANCIAL_PROGRESS_DIAGNOSTIC '):])
@@ -920,19 +927,23 @@ class RuntimeRecords:
                           fixture_cleaned=True,display_cleaned=True,public_chain_verified=False,dispatch_attempted=False)
             require(type(value) is dict and value==expected and all(type(value[k]) is type(v) for k,v in expected.items())
                     and self.first_failure is None and self.location is None and self.fixture_diagnostic is None
-                    and self.progress_diagnostic is None and self.host_diagnostic is None and self.native_failure_diagnostic is None and self.observation_timing_diagnostic is None and self.host_exit_diagnostic is None and self.input_diagnostic is None and self.snapshot_diagnostic is None and self.actor_diagnostic is None and self.review_diagnostic is None,'projection','result_schema');self.result=value
+                    and self.progress_diagnostic is None and self.host_diagnostic is None and self.native_failure_diagnostic is None and self.observation_timing_diagnostic is None and self.host_exit_diagnostic is None and self.input_diagnostic is None and self.snapshot_diagnostic is None and self.actor_diagnostic is None and self.review_diagnostic is None and self.observer_failure_diagnostic is None,'projection','result_schema');self.result=value
         elif line.startswith(b'CI_FINANCIAL_RESULT '):
             value=loads(line[len(b'CI_FINANCIAL_RESULT '):])
             require(type(value) is dict and value==P.failure(value.get('code'),self.expected_profile),'projection','result_schema')
             require(self.input_diagnostic is None or value.get('code')==
                     ('input_budget' if self.input_diagnostic['version']==1 else 'input_disabled'),'projection','result_schema')
             require(self.snapshot_diagnostic is None or value.get('code')=='snapshot','projection','result_schema')
+            require(self.observer_failure_diagnostic is None or value.get('code')=='observer_failure','projection','result_schema')
             self.first_failure=value;self.result=value
             if self.input_diagnostic is not None:
                 try:emit('INPUT_DIAGNOSTIC',self.input_diagnostic)
                 except Exception:pass  # Preserve the original failure and cleanup.
             if self.snapshot_diagnostic is not None:
                 try:emit('SNAPSHOT_DIAGNOSTIC',self.snapshot_diagnostic)
+                except Exception:pass # Preserve the original failure and cleanup.
+            if self.observer_failure_diagnostic is not None:
+                try:emit('OBSERVER_FAILURE_DIAGNOSTIC',self.observer_failure_diagnostic)
                 except Exception:pass # Preserve the original failure and cleanup.
             if self.progress_diagnostic is not None:emit('PROGRESS_DIAGNOSTIC',self.progress_diagnostic)
             if self.host_diagnostic is not None:emit('HOST_DIAGNOSTIC',self.host_diagnostic)

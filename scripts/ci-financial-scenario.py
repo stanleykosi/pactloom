@@ -87,7 +87,7 @@ class NativeScenario:
         # actual root wait0 and cannot be replaced by these preconditions.
         for record in records:
             C.validate_record(record,expected_profile)
-            C.require(record['kind'] not in ('NativeFailureBoundary','HostFailureBoundary','ActorFailureBoundary'),'observer_failure')
+            C.observer_failure_checked('NormalCloseFailureBoundary',C.require,record['kind'] not in ('NativeFailureBoundary','HostFailureBoundary','ActorFailureBoundary'),'observer_failure')
         for kind in ('NormalFinishAdmitted','PtyHeld','PtyReleased','NormalFinished'):
             C.require(sum(r['role']=='Coordinator' and r['kind']==kind for r in records)==1,'normal_finish')
         key=('Finished',None,'Close',0);C.require(key not in self._used,'replay')

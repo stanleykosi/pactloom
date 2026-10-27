@@ -1,14 +1,14 @@
-name: Park control navigation preflight only
+name: Observer failure origin preflight only
 on:
   push:
-    branches: [checkpoint/park-control-preflight-h87]
+    branches: [checkpoint/observer-failure-preflight-h88]
 permissions: {}
 concurrency:
-  group: park-control-preflight-h87
+  group: observer-failure-preflight-h88
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/park-control-preflight-h87' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/observer-failure-preflight-h88' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -211,7 +211,7 @@ jobs:
           PY
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/park-control-preflight-h87' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/observer-failure-preflight-h88' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
