@@ -58,6 +58,10 @@ impl Witness for EphemeralNativeWitnessV1 {
 }
 fn authority(e:wholepact_authority::AuthorityError)->Error {witness_error(B::DeliveryHistoricalRead,e)}
 
+fn delivery_peer_command(index:usize,proposal:&wholepact_core::ProposalInput,already_open:bool)->C {
+    if already_open {C::DeliveryPeer(index)} else {C::OpenDelivery(index,proposal.clone())}
+}
+
 #[allow(clippy::too_many_arguments)]
 fn export_owner(terminal:&crate::terminal::Terminal, host:&Host, signers:&worker::JoinedSignerWorkerV1,
     witness:&mut impl Witness, workspace:&Path, proposal:&wholepact_core::ProposalInput,
@@ -66,9 +70,9 @@ fn export_owner(terminal:&crate::terminal::Terminal, host:&Host, signers:&worker
                 let mut import_complete = None;
                 let export_result = at(B::DeliverySourceExport, || {
                     host.private_original_financial_delivery_export_v2(&workspace, &choices, |prepared_fixed, payload_digest, payload_bytes, delivery, materials| {
-                if !already_open {
-                    signers.send(C::OpenDelivery(index, proposal.clone())).map_err(worker_error)?;
-                }
+                // Both fresh and reopened sources require one descriptor reply
+                // before pair_owner receives; startup does not enqueue one.
+                signers.send(delivery_peer_command(index,proposal,already_open)).map_err(worker_error)?;
                 let client = pair_owner(signers, index, true)?;
                 signers
                     .send(C::AcceptDelivery(index))
@@ -282,6 +286,38 @@ fn preserved(signers:&worker::JoinedSignerWorkerV1,index:usize)->Result<worker::
         R::DeliveryPreserved{index:actual,original} if actual==index=>Ok(original),
         _=>Err(Error::Authentication),
     }
+}
+// This projection consumes only the typed reply of this worker command. The
+// descriptor is dropped without pairing; neither scope nor digest grants access.
+fn unpaired_delivery_receipt(reply:R)->Option<(usize,wholepact_signer_origin::PairScope,String)> {
+    match reply {
+        R::DurablePeer{index,peer:_,scope,entry_digest}=>Some((index,scope,entry_digest)),
+        _=>None,
+    }
+}
+fn validate_unpaired_delivery_receipt(receipt:Option<(usize,wholepact_signer_origin::PairScope,String)>,
+    expected:&wholepact_signer_origin::PairScope)->Result<()> {
+    match receipt {
+        Some((2,scope,entry_digest)) if scope==*expected && scope.validate().is_ok() && hash(&entry_digest)=>Ok(()),
+        _=>Err(Error::Authentication),
+    }
+}
+fn expected_unpaired_delivery_scope(proposal:&wholepact_core::ProposalInput,account:&str)
+    ->Result<wholepact_signer_origin::PairScope> {
+    let validated=wholepact_core::Proposal::validate(proposal.clone()).map_err(|_|Error::Authentication)?;
+    let participant=validated.manifest().participants.iter().find(|p|p.account_id==account).ok_or(Error::Authentication)?;
+    Ok(wholepact_signer_origin::PairScope {
+        account_id:account.into(),agreement_id:validated.manifest().agreement.agreement_id.clone(),
+        participant_id:participant.participant_id.clone(),manifest_digest:validated.manifest_digest().into(),
+        history_read:true,authorization_export:false,preconstruction_export:true,
+    })
+}
+fn validate_unpaired_delivery_selector(original:&worker::DeliveryReopenV2,
+    proposal:&wholepact_core::ProposalInput,account:&str)->Result<()> {
+    if original.version!=2 || original.proposal!=*proposal || original.account_id!=account
+        || original.aggregate_budget_zatoshis!=1_000_000 || original.original_directory_preserved
+    {return Err(Error::Authentication);}
+    Ok(())
 }
 fn now_ms()->Result<u64>{SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_|Error::Invalid)?.as_millis().try_into().map_err(|_|Error::Invalid)}
 
@@ -554,6 +590,54 @@ impl PartialReadyV2 {
 }
 #[test]
 fn partial_ready_paths_reject_escape_alias_and_unpreserved_container(){
+    // Inert reply metadata only: no provider, native grant, socket or pairing.
+    let expected=wholepact_signer_origin::PairScope {
+        account_id:"owner-two".into(),agreement_id:"agreement".into(),participant_id:"participant-two".into(),
+        manifest_digest:"a".repeat(64),history_read:true,authorization_export:false,preconstruction_export:true,
+    };
+    let receipt=||Some((2,expected.clone(),"b".repeat(64)));
+    assert!(validate_unpaired_delivery_receipt(receipt(),&expected).is_ok());
+    assert!(validate_unpaired_delivery_receipt(None,&expected).is_err());
+    assert!(validate_unpaired_delivery_receipt(unpaired_delivery_receipt(R::Done{index:2}),&expected).is_err());
+    for index in [0,1,3,usize::MAX] {
+        assert!(validate_unpaired_delivery_receipt(Some((index,expected.clone(),"b".repeat(64))),&expected).is_err());
+    }
+    for field in 0..7 {
+        let mut scope=expected.clone();
+        match field {0=>scope.account_id="other".into(),1=>scope.agreement_id="other".into(),
+            2=>scope.participant_id="other".into(),3=>scope.manifest_digest="c".repeat(64),
+            4=>scope.history_read=false,5=>scope.authorization_export=true,_=>scope.preconstruction_export=false}
+        assert!(validate_unpaired_delivery_receipt(Some((2,scope,"b".repeat(64))),&expected).is_err());
+    }
+    for bad in [String::new(),"b".repeat(63),"B".repeat(64),"g".repeat(64)] {
+        assert!(validate_unpaired_delivery_receipt(Some((2,expected.clone(),bad)),&expected).is_err());
+    }
+
+    let proposal:wholepact_core::ProposalInput=serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../wholepact-signer/src/native_ui/synthetic-proposal.json"))).unwrap();
+    for index in [1,2] {
+        assert!(matches!(delivery_peer_command(index,&proposal,true),C::DeliveryPeer(actual) if actual==index));
+        assert!(matches!(delivery_peer_command(index,&proposal,false),C::OpenDelivery(actual,ref input) if actual==index && input==&proposal));
+    }
+    let account=proposal.manifest.participants[1].account_id.clone();
+    let scope=expected_unpaired_delivery_scope(&proposal,&account).unwrap();
+    assert_eq!(scope.account_id,account);
+    assert_eq!(scope.participant_id,proposal.manifest.participants[1].participant_id);
+    assert!(scope.history_read && !scope.authorization_export && scope.preconstruction_export);
+    assert!(expected_unpaired_delivery_scope(&proposal,"absent-owner").is_err());
+    let mut invalid_proposal=proposal.clone();invalid_proposal.proposal_id.clear();
+    assert!(expected_unpaired_delivery_scope(&invalid_proposal,&account).is_err());
+    let selector=worker::DeliveryReopenV2{version:2,root:PathBuf::from("/owned/synthetic/signers/two"),
+        proposal:proposal.clone(),aggregate_budget_zatoshis:1_000_000,account_id:account.clone(),
+        owner_setup_json:String::new(),original_directory_preserved:false};
+    assert!(validate_unpaired_delivery_selector(&selector,&proposal,&account).is_ok());
+    for field in 0..5 {
+        let mut changed=selector.clone();
+        match field {0=>changed.version=20,1=>changed.account_id="other".into(),
+            2=>changed.proposal.proposal_id="other".into(),3=>changed.aggregate_budget_zatoshis+=1,
+            _=>changed.original_directory_preserved=true}
+        assert!(validate_unpaired_delivery_selector(&changed,&proposal,&account).is_err());
+    }
     let root=Path::new("/owned/synthetic");
     let paths=[root.join("profile"),root.join("workspace"),root.join("financial"),root.join("signers/one"),root.join("signers/two")];
     assert!(validate_owned_paths(root,paths.each_ref().map(|p|p.as_path()),[true,false]).is_ok());
@@ -584,9 +668,12 @@ pub(super) fn continue_original_preexport(terminal:crate::terminal::Terminal,hos
     let admission=export_owner(&terminal,&host,&original.signers,&mut original.witness,&workspace,&proposal,&disclosures,&identity,&choices,1,&accounts[0],false)?;
     // Open/close Owner2's genuine original source solely to preserve the exact
     // selector. It has NO reviewer export, delivery admission or signing result.
-    original.signers.send(C::OpenDelivery(2,proposal.clone())).map_err(worker_error)?;done(&original.signers,2)?;
+    let expected=expected_unpaired_delivery_scope(&proposal,&accounts[1])?;
+    original.signers.send(C::OpenDelivery(2,proposal.clone())).map_err(worker_error)?;
+    validate_unpaired_delivery_receipt(unpaired_delivery_receipt(original.signers.receive().map_err(worker_error)?),&expected)?;
     original.signers.send(C::PreserveDelivery(2)).map_err(worker_error)?;
     let second_original=preserved(&original.signers,2)?;
+    validate_unpaired_delivery_selector(&second_original,&proposal,&accounts[1])?;
     let first=sign_and_intake(&host,&workspace,&original.signers,&mut original.witness,1,&admission,&wallet_setup,None,false,None)?;
     let progress=host.inspect_original_financial_progress_v2(&workspace)?;
     if progress.fixed_identity!=identity || progress.bound_accounts!=vec![accounts[0].clone()]
