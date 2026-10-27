@@ -2027,6 +2027,7 @@ mod tests {
             delivery_first_failure: transcript.delivery_first_failure(),
             private_fixed_diagnostic: None,
             diagnostic_withheld: false,
+            fatal_observation: fatal_output_v2::Observation::withheld(),
             outcome: Err(invalid()),
             process: owned_test_process_group_v1::ProcessCleanupV1 {
                 group_signal: owned_test_process_group_v1::GroupSignalV1::SentWhileLeaderOwned,

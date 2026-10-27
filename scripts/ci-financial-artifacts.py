@@ -54,7 +54,7 @@ RECIPE = dict(build_recipe_version=3, qualification_profile=PIXEL_PROFILE,
         'pristine-setup':['durable-proposal','financial-runtime','manual-admission',
             'synthetic-born-joined-qualification']})
 
-DURABLE_PROFILE='financial-durable-result-lifecycle-selective-v2'
+DURABLE_PROFILE='financial-durable-result-lifecycle-selective-v3'
 
 def durable_contract():
     spec=importlib.util.spec_from_file_location('financial_durable_contract',pathlib.Path(__file__).with_name('ci-financial-durable.py'))

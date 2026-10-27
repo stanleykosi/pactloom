@@ -18,6 +18,40 @@ build_spec=importlib.util.spec_from_file_location('ci_build_errors', ROOT/'scrip
 build_errors=importlib.util.module_from_spec(build_spec)
 build_spec.loader.exec_module(build_errors)
 
+# Current P93e observer source is pinned before an exact byte inverse.
+# This static legacy test view is never a runtime/profile conversion.
+P93E_OBSERVER_SOURCE_INVERSES={
+ 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification.rs':('38aa35569ba4ce853a4fc5875461609fb2646c35392e8d47d0b948494ead0a73','568f6664921c1acef59390b5a7a56a77b77ac4fb5306463c5944977f18332f7e',(
+  (87, 90, 'df2d6b28a35159f35592f48a2ec977b7d44c25dc116d4e3dc78b40abf0e56f34', b''),
+  (1354, 1355, '905e58c52ca12bd63cd98200f6d3242344c4ace2bcb3a9449cb97d75bd302377', b''),
+  (1411, 1418, 'ddecad9899750f4d19107feb686d6c09b7bb78292fbf844366b110d941a1909b', b''),
+  (1783, 1784, 'a31158ebca47873ba7095c199ff8149c8db14e3194b5f9d39293a430582225ef', b''),
+  (1877, 1878, '34422874dd6631e355e1df629df855128a9556052b07377d1dc382d3dc918116', b''),
+ )),
+ 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/rolling_transcript_v1.rs':('19b9321c112e9d7d535c00007efce656ceb0d25f8843cf8d17421f3ead828b7d','fae96946c71cfb0bf2d59c272f2b066e7468a770a86a8210d7dcf5f2db9d92d0',(
+  (28, 30, '7accb11746ca75bb82ee2ccc9adb4f15421fae8ec6f756260fdadcd5562671be', b''),
+  (194, 196, '3a2caa6afe9ef88ec1806d459925fa17103e029b610315306878a0cab48e8e64', b''),
+  (428, 450, '904d9b6f99f0d872c7c2877cd172e5ffed099c0a025ff4630c027ca6b6ee54ef', b''),
+  (451, 458, '58a3ee577aa7c5c939b3c51ccf5feb582c65b160260a5829ef02eefbfc862d03', b''),
+  (500, 502, 'a745ed88143ecc0f25ddfcfa8f62b689bcc78e26f451b19f02cae04763232488', b''),
+  (752, 754, 'b5bc7e91e43eec6c95984a8941835063a6d8836073faf5543086d9a236ca99b7', b''),
+  (773, 780, '1e310404ad54435de3ce8f9f26f45996bb7f5e8f8e706c500db346fa89decfba', b''),
+  (1960, 2166, '1288eca76b4541060f97814ae4deb4b7b2b81d0761557497f555c82d17a1bd3d', b''),
+ )),
+}
+
+def p93e_legacy_observer_source(test,path):
+    raw=path.read_bytes();current_pin,old_pin,spans=P93E_OBSERVER_SOURCE_INVERSES[str(path.relative_to(ROOT))]
+    test.assertEqual(hashlib.sha256(raw).hexdigest(),current_pin,'current observer whole-byte pin')
+    lines=raw.splitlines(keepends=True);restored=[];cursor=0
+    for first,last,span_pin,prior in spans:
+        test.assertTrue(type(first) is int and type(last) is int and cursor<=first<=last<=len(lines))
+        test.assertEqual(hashlib.sha256(b''.join(lines[first:last])).hexdigest(),span_pin,'exact observer inverse span')
+        test.assertIs(type(prior),bytes);restored.extend((b''.join(lines[cursor:first]),prior));cursor=last
+    restored.append(b''.join(lines[cursor:]));legacy=b''.join(restored)
+    test.assertEqual(hashlib.sha256(legacy).hexdigest(),old_pin,'exact whole P93d observer inverse')
+    return legacy.decode('utf-8')
+
 class PublicOutputTests(unittest.TestCase):
     def test_durable_owner_reopen_is_an_exact_ignored_distinct_phase(self):
         name,seconds,flags=output.phase_selection('durable-owner-reopen')
@@ -317,7 +351,7 @@ class PublicOutputTests(unittest.TestCase):
         return '[JOINED_FAILURE exit=Some(101) signal=None core_dumped=false inputs=1/2 reason='+reason+' static_boundaries='+summary+']'
 
     def test_harness_failure_reasons_match_exact_rust_enum(self):
-        source=(ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification.rs').read_bytes().decode('utf-8')
+        source=p93e_legacy_observer_source(self,ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification.rs')
         self.assertEqual(hashlib.sha256(source.encode()).hexdigest(),'568f6664921c1acef59390b5a7a56a77b77ac4fb5306463c5944977f18332f7e')
         body=re.search(r'enum HarnessFailureReason \{([^}]+)\}',source).group(1)
         # Current financial-only reasons do not enlarge the legacy public parser.
@@ -635,7 +669,7 @@ class PublicOutputTests(unittest.TestCase):
 
     def test_rolling_preflight_preserves_ten_original_plus_twelve_optional_cases(self):
         base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2'
-        source=(base/'sequential_construction_v3_qualification/rolling_transcript_v1.rs').read_bytes().decode('utf-8')
+        source=p93e_legacy_observer_source(self,base/'sequential_construction_v3_qualification/rolling_transcript_v1.rs')
         self.assertEqual(hashlib.sha256(source.encode()).hexdigest(),'fae96946c71cfb0bf2d59c272f2b066e7468a770a86a8210d7dcf5f2db9d92d0')
         # This later file-level test is not a ninth delivery-collector case.
         self.assertEqual(source.count('fn financial_progress_fragmented_lines_and_legacy_disabled() {'),1)

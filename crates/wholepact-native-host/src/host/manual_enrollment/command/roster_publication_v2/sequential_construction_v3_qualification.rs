@@ -85,6 +85,9 @@ mod pristine_diagnostics_v1;
 mod financial_progress_v1;
 #[path = "sequential_construction_v3_qualification/rolling_transcript_v1.rs"]
 mod rolling_transcript_v1;
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+#[path = "sequential_construction_v3_qualification/fatal_output_v2.rs"]
+mod fatal_output_v2;
 
 #[path = "sequential_construction_v3_qualification/owned_test_process_group_v1.rs"]
 mod owned_test_process_group_v1;
@@ -1349,6 +1352,7 @@ struct PrivateWorkspaceStageResultV1 {
     private_fixed_diagnostic:
         Option<crate::host::durable_private_workspace_v1::PrivateFixedDiagnosticV1>,
     diagnostic_withheld: bool,
+    fatal_observation: fatal_output_v2::Observation,
     outcome: std::io::Result<()>,
     process: owned_test_process_group_v1::ProcessCleanupV1,
     root: Option<tempfile::TempDir>,
@@ -1405,6 +1409,13 @@ fn private_workspace_stage_v1(
             _ => None,
         })),
     )?;
+    if matches!(stage,
+        PrivateWorkspaceStageV1::DurableResultProducer
+            | PrivateWorkspaceStageV1::DurableResultIntake
+            | PrivateWorkspaceStageV1::DurableResultReader
+            | PrivateWorkspaceStageV1::DurableResultStartedProducer
+            | PrivateWorkspaceStageV1::DurableResultStartedReader
+    ) { transcript.enable_fatal_output_v2(); }
     if matches!(stage, PrivateWorkspaceStageV1::PristineCoordinator) {
         transcript.enable_pristine_first_failure();
     }
@@ -1770,6 +1781,7 @@ fn private_workspace_stage_v1(
                 .as_ref()
                 .map(|root| root.path()),
         );
+        transcript.finish_fatal_output_v2(drained.is_ok());
         if drained.is_err() { coordinated_post_input = None; }
         if outcome.is_ok() {
             if let Err(error) = drained {
@@ -1863,6 +1875,7 @@ fn private_workspace_stage_v1(
         delivery_first_failure,
         private_fixed_diagnostic,
         diagnostic_withheld,
+        fatal_observation: transcript.fatal_observation_v2(process.verified()),
         outcome,
         process,
         root: finished.root_for_explicit_close,

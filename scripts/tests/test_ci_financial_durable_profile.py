@@ -26,7 +26,7 @@ D = load('ci-financial-durable')
 A = load('ci-financial-artifacts')
 I = load('ci-financial-image')
 S = load('ci-financial-supervisor')
-PROFILE = 'financial-durable-result-lifecycle-selective-v2'
+PROFILE = 'financial-durable-result-lifecycle-selective-v3'
 ROLE = 'durable-lifecycle-qualification'
 SOURCE = 'a' * 40
 IDENTITY = dict(repository='stanleykosi/pactloom', source=SOURCE, source_tree='b'*40, run_id=123, attempt=1)
@@ -57,6 +57,15 @@ LEGACY_SAFE = SAFE
 WORKER_SAFE = ('host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::worker::admission_diagnostic_tests::durable_worker_state_layout_keeps_nominal_owners_indirect', 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::worker::admission_diagnostic_tests::durable_worker_execute_retains_inert_error_and_slot_order')
 P93C_SAFE = SAFE + NEW_LEAF_SAFE + NEW_COLLECTOR_SAFE
 SAFE = P93C_SAFE + WORKER_SAFE
+P93D_SAFE = SAFE
+FATAL_COLLECTOR_SAFE = (
+    'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::rolling_transcript_v1::fatal_output_tests_v2::fatal_output_v2_actual_chunks_compaction_and_all_bit_orders',
+    'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::rolling_transcript_v1::fatal_output_tests_v2::fatal_output_v2_exact_grammar_truncation_and_private_fields',
+    'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::rolling_transcript_v1::fatal_output_tests_v2::fatal_output_v2_all_scan_refusals_preserve_original_behavior_and_sticky_loss',
+    'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::rolling_transcript_v1::fatal_output_tests_v2::fatal_output_v2_drain_loss_withholding_and_child_isolation',
+)
+FATAL_LEAF_SAFE = ('host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::durable_failure_v2_fatal_observations_all_stages_keep_error_order_and_withhold',)
+SAFE += FATAL_COLLECTOR_SAFE + FATAL_LEAF_SAFE
 SUMMARY = b'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.01s'
 LEGACY_GOLDEN = {
     'coordinated-financial-external-pre-v3-witness-v1': '31bdd6c62252ef49e14b301be720406f17b5099bf0966a37ce20afb86dc71ac7',
@@ -83,7 +92,9 @@ class DurableRecipeTests(unittest.TestCase):
                   (SAFE[5:7], 'crates/wholepact-native-host/src/host/financial/durable_financial_commands_v2.rs'),
                   (NEW_LEAF_SAFE, 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/durable_proposal_v1/durable_result_lifecycle_v2.rs'),
                   (NEW_COLLECTOR_SAFE, 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/rolling_transcript_v1.rs'),
-                  (WORKER_SAFE, 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/durable_proposal_v1/worker.rs')]
+                  (WORKER_SAFE, 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/durable_proposal_v1/worker.rs'),
+                  (FATAL_COLLECTOR_SAFE, 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/rolling_transcript_v1.rs'),
+                  (FATAL_LEAF_SAFE, 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/durable_proposal_v1/durable_result_lifecycle_v2.rs')]
         for selectors,path in leaves:
             text=(ROOT.parent/path).read_text()
             for selector in selectors:
@@ -92,20 +103,23 @@ class DurableRecipeTests(unittest.TestCase):
                 if selector in NEW_COLLECTOR_SAFE:
                     self.assertIn('::rolling_transcript_v1::delivery_first_failure_tests::',selector)
                     self.assertGreater(text.index('fn '+name+'('),text.index('mod delivery_first_failure_tests {'))
+                if selector in FATAL_COLLECTOR_SAFE:
+                    self.assertIn('::rolling_transcript_v1::fatal_output_tests_v2::',selector)
+                    self.assertGreater(text.index('fn '+name+'('),text.index('mod fatal_output_tests_v2 {'))
 
     def test_closed_recipe_and_selector_inventory(self):
         self.assertEqual(D.PROFILE, PROFILE); self.assertEqual(D.ROLE, ROLE)
         self.assertEqual(D.CASES, CASES); self.assertEqual(D.SAFE_TESTS, SAFE)
-        self.assertEqual(D.SAFE_TESTS[:7],LEGACY_SAFE);self.assertEqual(D.SAFE_TESTS[:15],P93C_SAFE);self.assertEqual(len(D.SAFE_TESTS),17)
+        self.assertEqual(D.SAFE_TESTS[:7],LEGACY_SAFE);self.assertEqual(D.SAFE_TESTS[:15],P93C_SAFE);self.assertEqual(D.SAFE_TESTS[:17],P93D_SAFE);self.assertEqual(len(D.SAFE_TESTS),22)
         self.assertEqual(len(SAFE), len(set(SAFE))); self.assertFalse(set(SAFE) & set(CASES.values()))
-        self.assertEqual(D.recipe(), dict(build_recipe_version=4, qualification_profile=PROFILE,
+        self.assertEqual(D.recipe(), dict(build_recipe_version=5, qualification_profile=PROFILE,
             execution='native-owner-durable-correctness-selective-optimization', toolchain='1.99.0',
             rustc='rustc 1.99.0 (b940084d7 2026-09-28)',target='x86_64-unknown-linux-gnu',jobs=3,
             incremental=False,profile='release',default_features=False,
             host_test_features='durable-proposal,synthetic-born-joined-qualification',
-            cargo_config_overrides=['profile.release.package.wholepact-signer.opt-level=0',
+            cargo_config_overrides=['profile.release.package.wholepact-signer.opt-level=1',
                                     'profile.release.package.wholepact-engine.opt-level=0'],
-            host_opt_level=3,signer_opt_level=0,engine_opt_level=0,debug_assertions=False,
+            host_opt_level=3,signer_opt_level=1,engine_opt_level=0,debug_assertions=False,
             overflow_checks=False,other_dependencies_release_optimized=True,rustflags='',
             sqlcipher='4.19.0',openssl='3.5.9',static_crypto=True,platform='linux-amd64',locked=True,
             artifact_features={ROLE:['durable-proposal','financial-runtime','manual-admission','synthetic-born-joined-qualification']},
@@ -122,7 +136,7 @@ class DurableRecipeTests(unittest.TestCase):
         def row(name):
             return dict(reason='compiler-artifact',manifest_path=f'{repo}/crates/{name}/Cargo.toml',
                 target={'name':name.replace('-','_'),'kind':['lib']},
-                profile=dict(opt_level='0',debug_assertions=False,overflow_checks=False,test=False))
+                profile=dict(opt_level='1' if name=='wholepact-signer' else '0',debug_assertions=False,overflow_checks=False,test=False))
         records = [row('wholepact-signer'), row('wholepact-engine')]
         encode = lambda values:b'\n'.join(raw(v) for v in values)
         D.validate_package_profiles(encode(records), repo)
@@ -134,6 +148,10 @@ class DurableRecipeTests(unittest.TestCase):
                 changed=copy.deepcopy(records); changed[index]['profile'][field]=bad
                 with self.subTest(index=index,field=field,bad=bad), self.assertRaises(D.Rejected):
                     D.validate_package_profiles(encode(changed), repo)
+            for opt in ('0','1','2','3'):
+                if opt==records[index]['profile']['opt_level']:continue
+                changed=copy.deepcopy(records);changed[index]['profile']['opt_level']=opt
+                with self.assertRaises(D.Rejected):D.validate_package_profiles(encode(changed),repo)
             for field in records[index]['profile']:
                 changed=copy.deepcopy(records); del changed[index]['profile'][field]
                 with self.assertRaises(D.Rejected): D.validate_package_profiles(encode(changed), repo)
@@ -142,6 +160,24 @@ class DurableRecipeTests(unittest.TestCase):
                 with self.assertRaises(D.Rejected): D.validate_package_profiles(encode(changed), repo)
             changed=copy.deepcopy(records); changed[index]['manifest_path']='/wrong/Cargo.toml'
             with self.assertRaises(D.Rejected): D.validate_package_profiles(encode(changed), repo)
+
+    def test_old_selective_recipe_cannot_masquerade_as_new_profile(self):
+        old='financial-durable-result-lifecycle-selective-v2'
+        self.assertNotEqual(PROFILE,old)
+        for method in (A.bundle_names,A.manifest_version,A.recipe):
+            with self.assertRaises(A.Rejected):method(old)
+        for case in CASES:
+            candidate=D.candidate(case,SOURCE,inert_receipt(case))
+            candidate['profile']=old
+            with self.assertRaises(D.Rejected):D.validate_candidate(candidate,case,SOURCE)
+            with self.assertRaises(D.Rejected):
+                D.RuntimeRecords(case,SOURCE)(b'CI_FINANCIAL_DURABLE_CANDIDATE '+raw(candidate))
+        # This is a new current producer recipe, not acceptance of historical
+        # opt0 artifacts. Historical archives retain their pinned old parser.
+        self.assertEqual(D.recipe()['build_recipe_version'],5)
+        self.assertEqual(D.recipe()['signer_opt_level'],1)
+        self.assertEqual(D.recipe()['engine_opt_level'],0)
+        self.assertEqual(D.recipe()['host_opt_level'],3)
 
     def test_safe_selectors_cannot_accept_ignored_lifecycle_or_zero_tests(self):
         for selector in SAFE:
@@ -273,7 +309,7 @@ class DurableBundleTests(unittest.TestCase):
         self.assertEqual(value['recipe'],D.recipe())
         for profile in LEGACY_GOLDEN:
             with self.assertRaises(A.Rejected): A.verify_bundle(output,IDENTITY,CLOSURE,profile)
-        for profile in ('unknown','financial-durable-result-lifecycle-v2',''):
+        for profile in ('unknown','financial-durable-result-lifecycle-v2','financial-durable-result-lifecycle-selective-v2',''):
             for method in (A.bundle_names,A.manifest_version,A.recipe):
                 with self.assertRaises(A.Rejected): method(profile)
 
@@ -282,11 +318,12 @@ class DurableBundleTests(unittest.TestCase):
         mutations=[{**value,'extra':0},{**value,'version':2},{**value,'version':True}]
         for key in value:
             changed=copy.deepcopy(value);del changed[key];mutations.append(changed)
-        for key,bad in [('host_opt_level',0),('signer_opt_level',3),('engine_opt_level',3),
+        for key,bad in [('host_opt_level',0),('signer_opt_level',0),('signer_opt_level',2),('signer_opt_level',3),('engine_opt_level',1),('engine_opt_level',3),
                         ('debug_assertions',True),('overflow_checks',True),('jobs',4),('locked',1),
                         ('default_features',0),('static_crypto',1),('rustflags','--cfg forged'),
                         ('cargo_config_overrides',[]),('test_selectors',{}),('safe_test_selectors',[]),
-                        ('build_recipe_version',3),('qualification_profile',A.SEMANTIC_PROFILE)]:
+                        ('build_recipe_version',3),('build_recipe_version',4),('qualification_profile',A.SEMANTIC_PROFILE),
+                        ('qualification_profile','financial-durable-result-lifecycle-selective-v2')]:
             changed=copy.deepcopy(value);changed['recipe'][key]=bad;mutations.append(changed)
         for bad_files in ({},{**value['files'],'pristine-setup':value['files'][ROLE]},
                           {'pristine-setup':value['files'][ROLE]}):
@@ -383,7 +420,7 @@ class DurableSelectionTests(unittest.TestCase):
         expected=['rustup','run','1.99.0','cargo','test','--no-run','--locked','--release',
             '--no-default-features','-p','wholepact-native-host','--lib','--features',
             'durable-proposal,synthetic-born-joined-qualification','--config',
-            'profile.release.package.wholepact-signer.opt-level=0','--config',
+            'profile.release.package.wholepact-signer.opt-level=1','--config',
             'profile.release.package.wholepact-engine.opt-level=0','--message-format=json']
         self.assertEqual(S.build_recipe(ROLE,PROFILE),expected)
         with tempfile.TemporaryDirectory() as temporary:
@@ -429,7 +466,8 @@ def inert_failure(case, site=None, stage=True):
             group_signal='SentWhileLeaderOwned',group_absence='OriginalGroupAbsentObserved',direct_child='Reaped',
             status_kind='exit',status_value=1,diagnostic_state='validated',
             private_fixed_primary=dict(operation='Checkpoint',site='HostCheckpointEntry',engine_code='NotApplicable',family='Host',cause='Permission'),
-            delivery_first_failure=dict(boundary='PrivateWorkspaceCapture',outcome='BridgePermission'))
+            delivery_first_failure=dict(boundary='PrivateWorkspaceCapture',outcome='BridgePermission'),
+            fatal_observation=dict(state='complete',observed_bits=0))
     return value
 
 class DurableNativeFailureTests(unittest.TestCase):
@@ -485,7 +523,8 @@ class DurableNativeFailureTests(unittest.TestCase):
                 changed=copy.deepcopy(value);changed['stage'][key]=bad
                 if key=='status_kind':changed['stage']['status_value']=None
                 with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
-                changed['stage'].update(diagnostic_state='withheld',private_fixed_primary=None,delivery_first_failure=None)
+                changed['stage'].update(diagnostic_state='withheld',private_fixed_primary=None,delivery_first_failure=None,
+                    fatal_observation=dict(state='withheld',observed_bits=None))
                 D.native_failure(case,raw(changed))
             for reason in ('process_cleanup_unverified','expected_process_status','stage_deadline'):
                 changed=copy.deepcopy(value);changed['reason']=reason
@@ -493,7 +532,8 @@ class DurableNativeFailureTests(unittest.TestCase):
                 else:
                     with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
                 if reason=='process_cleanup_unverified':
-                    changed['stage'].update(group_signal='Unverified',diagnostic_state='withheld',private_fixed_primary=None,delivery_first_failure=None)
+                    changed['stage'].update(group_signal='Unverified',diagnostic_state='withheld',private_fixed_primary=None,delivery_first_failure=None,
+                    fatal_observation=dict(state='withheld',observed_bits=None))
                     D.native_failure(case,raw(changed))
                 if reason=='expected_process_status':
                     changed['stage'].update(status_kind='signal',status_value=9)
@@ -514,6 +554,81 @@ class DurableNativeFailureTests(unittest.TestCase):
                              {'boundary':'PrivateWorkspaceCapture','outcome':'Complete'},{'boundary':'PrivateWorkspaceCapture','outcome':'BridgePermission','secret':0}):
                 changed=copy.deepcopy(value);changed['stage']['delivery_first_failure']=delivery
                 with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+
+    def test_fatal_observation_is_closed_lexical_bits_and_process_bound(self):
+        for case in CASES:
+            for site in set(D.FAILURE_STAGE_EXPECTATIONS)&D.FAILURE_CASE_SITES[case]:
+                value=inert_failure(case,site)
+                for state in ('complete','incomplete'):
+                    for mask in range(16):
+                        changed=copy.deepcopy(value)
+                        changed['stage']['fatal_observation']=dict(state=state,observed_bits=mask)
+                        self.assertEqual(D.native_failure(case,raw(changed)),changed)
+                # SIGABRT without a marker remains valid unknown evidence, not
+                # an invented explicit-abort or stack-overflow classification.
+                value['stage'].update(status_kind='signal',status_value=6)
+                self.assertEqual(D.native_failure(case,raw(value)),value)
+                bad_observations=[None,False,0,[],{},
+                    dict(state='complete'),dict(observed_bits=0),
+                    dict(state='complete',observed_bits=0,raw='private sentinel'),
+                    dict(state='complete',observed_bits=0,cause='stack_overflow'),
+                    dict(state='complete',observed_bits=0,thread='private sentinel'),
+                    dict(state='complete',observed_bits=0,path='private sentinel')]
+                bad_observations += [dict(state=state,observed_bits=0)
+                    for state in (None,True,1,[],'unknown','validated','withheld')]
+                bad_observations += [dict(state='complete',observed_bits=mask)
+                    for mask in (None,False,True,-1,16,255,0.0,'0',[],{})]
+                for observation in bad_observations:
+                    changed=copy.deepcopy(value);changed['stage']['fatal_observation']=observation
+                    with self.subTest(case=case,site=site,observation=observation),self.assertRaises(D.Rejected):
+                        D.native_failure(case,raw(changed))
+                historical=copy.deepcopy(value);del historical['stage']['fatal_observation']
+                with self.assertRaises(D.Rejected):D.native_failure(case,raw(historical))
+                encoded=raw(value)
+                for key in ('state','observed_bits'):
+                    needle=b'"'+key.encode()+b'":'
+                    replacement=(b'"state":"complete",' if key=='state' else b'"observed_bits":0,')+needle
+                    with self.assertRaises(D.Rejected):D.native_failure(case,encoded.replace(needle,replacement,1))
+                unverified=copy.deepcopy(value)
+                unverified['stage'].update(group_signal='Unverified',diagnostic_state='withheld',
+                    private_fixed_primary=None,delivery_first_failure=None,
+                    fatal_observation=dict(state='withheld',observed_bits=None))
+                self.assertEqual(D.native_failure(case,raw(unverified)),unverified)
+                for observation in (dict(state='withheld',observed_bits=0),
+                    dict(state='complete',observed_bits=0),dict(state='incomplete',observed_bits=15)):
+                    changed=copy.deepcopy(unverified);changed['stage']['fatal_observation']=observation
+                    with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+            setup=inert_failure(case,'tls_prepare',False)
+            setup['fatal_observation']=dict(state='complete',observed_bits=0)
+            with self.assertRaises(D.Rejected):D.native_failure(case,raw(setup))
+
+    def test_fatal_observations_never_promote_success_or_escape_case(self):
+        for case in CASES:
+            other=next(c for c in CASES if c!=case)
+            for state in ('complete','incomplete'):
+                for mask in (0,1,2,4,8,15):
+                    failure=inert_failure(case)
+                    observation=dict(state=state,observed_bits=mask)
+                    failure['stage']['fatal_observation']=observation
+                    output=D.TestOutput(case)
+                    output.line(D.NATIVE_FAILURE_MARKER+raw(failure))
+                    for line in native_lines(case):output.line(line)
+                    with self.assertRaises(D.Rejected):output.finish(0)
+                    self.assertEqual(output.native_failure,failure)
+                    with self.assertRaises(D.Rejected):output.line(D.NATIVE_FAILURE_MARKER+raw(failure))
+                    with self.assertRaises(D.Rejected):D.native_failure(other,raw(failure))
+                    outer=dict(schema=1,profile=PROFILE,case=case,code='native_assertion',
+                        native_receipt=inert_receipt(case),cleanup_unverified=True,native_failure=failure)
+                    records=D.RuntimeRecords(case,SOURCE)
+                    records(b'CI_FINANCIAL_DURABLE_FAILURE '+raw(outer))
+                    self.assertEqual(records.failure,outer)
+                    for code in (0,1):
+                        with self.assertRaises(D.Rejected):records.finish(code)
+                    success=D.candidate(case,SOURCE,inert_receipt(case))
+                    success['fatal_observation']=observation
+                    with self.assertRaises(D.Rejected):D.validate_candidate(success,case,SOURCE)
+                    with self.assertRaises(D.Rejected):
+                        D.native_receipt(case,raw({**inert_receipt(case),'fatal_observation':observation}))
 
     def test_marker_preserved_before_failed_summary_never_promotes_success(self):
         for case in CASES:

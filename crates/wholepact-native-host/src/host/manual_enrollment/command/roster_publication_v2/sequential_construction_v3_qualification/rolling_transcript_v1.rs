@@ -27,6 +27,8 @@ struct CapturedPath {
 
 pub(super) struct Transcript<'a> {
     #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    fatal_output: Option<super::fatal_output_v2::Capture>,
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
     pristine_first_failure: Option<super::pristine_diagnostics_v1::Capture>,
     #[cfg(all(
         feature = "durable-proposal",
@@ -190,6 +192,8 @@ impl<'a> Transcript<'a> {
             }
         }
         Ok(Self {
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+            fatal_output: None,
             #[cfg(all(
                 feature = "durable-proposal",
                 feature = "synthetic-born-joined-qualification"
@@ -422,7 +426,36 @@ impl<'a> Transcript<'a> {
         self.timing.finish_input(drained);
     }
 
+    // An opted-in stage owns one capture for its full lifetime. Re-enabling
+    // cannot erase previous bits or sticky loss. Disabled profiles stay silent.
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    pub(super) fn enable_fatal_output_v2(&mut self) {
+        self.fatal_output.get_or_insert_with(Default::default);
+    }
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    fn lose_fatal_output_v2(&mut self) {
+        if let Some(capture) = &mut self.fatal_output { capture.lost(); }
+    }
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    pub(super) fn finish_fatal_output_v2(&mut self, drained: bool) {
+        if !drained || self.line_start != self.bytes.len() { self.lose_fatal_output_v2(); }
+    }
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    pub(super) fn fatal_observation_v2(&self, verified: bool) -> super::fatal_output_v2::Observation {
+        self.fatal_output.as_ref().map_or_else(
+            super::fatal_output_v2::Observation::withheld,
+            |capture| capture.observation(verified),
+        )
+    }
+
     pub(super) fn append(&mut self, chunk: &[u8], root: &Path) -> Result<(), Failure> {
+        let result = self.append_original_v1(chunk, root);
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+        if result.is_err() { self.lose_fatal_output_v2(); }
+        result
+    }
+
+    fn append_original_v1(&mut self, chunk: &[u8], root: &Path) -> Result<(), Failure> {
         #[cfg(feature = "synthetic-born-joined-qualification")]
         self.capture_timing(chunk);
         // Optional retained copies yield to the original transcript budget.
@@ -465,6 +498,8 @@ impl<'a> Transcript<'a> {
         {
             let end = self.line_start + relative_end;
             let line = &self.bytes[self.line_start..end];
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+            if let Some(capture) = &mut self.fatal_output { capture.observe(line); }
             #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
             if let Some(capture) = &mut self.pristine_first_failure {
                 capture.observe(line);
@@ -715,6 +750,8 @@ impl<'a> Transcript<'a> {
             if let Some(capture) = &mut self.delivery_first_failure {
                 capture.discard_for_budget();
             }
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+            self.lose_fatal_output_v2();
             return Err(Failure::OutputLimit);
         };
         let path = self
@@ -734,6 +771,13 @@ impl<'a> Transcript<'a> {
     /// Preserve the original end-of-read cursor, including already-read prompt
     /// bytes, and preserve any unfinished metadata line without rematching it.
     pub(super) fn consume(&mut self, captured: Option<&str>) -> Result<(), Failure> {
+        let result = self.consume_original_v1(captured);
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+        if result.is_err() { self.lose_fatal_output_v2(); }
+        result
+    }
+
+    fn consume_original_v1(&mut self, captured: Option<&str>) -> Result<(), Failure> {
         if let Some(marker) = captured {
             *self.paths.get_mut(marker).ok_or(Failure::MissingPath)? = None;
         }
@@ -1913,4 +1957,210 @@ fn financial_progress_fragmented_lines_and_legacy_disabled() {
         .is_none());
     transcript.financial_progress_global_deadline();
     assert!(transcript.financial_progress_failure().is_none());
+}
+
+#[cfg(all(test, feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+mod fatal_output_tests_v2 {
+    use super::*;
+    const ROOT: &str = "/tmp/owned";
+    const MARKER: &str = "SYNTHETIC_JOINED_DRAFT_PATH=";
+    const LINES: [&[u8]; 4] = [
+        b"fatal runtime error: stack overflow, aborting",
+        b"thread 'PRIVATE_THREAD_SENTINEL' (12345) panicked at /PRIVATE_PATH_SENTINEL.rs:12:34:",
+        b"memory allocation of 987654321 bytes failed",
+        b"thread caused non-unwinding panic. aborting.",
+    ];
+    fn enabled() -> Transcript<'static> {
+        let mut transcript = Transcript::new([MARKER]).unwrap();
+        transcript.enable_fatal_output_v2();
+        transcript
+    }
+    fn value(transcript: &Transcript<'_>, verified: bool) -> serde_json::Value {
+        let bytes = serde_json::to_vec(&transcript.fatal_observation_v2(verified)).unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        for secret in ["PRIVATE", "12345", "987654321", "panicked", "tmp/owned"] {
+            assert!(!text.contains(secret));
+        }
+        serde_json::from_slice(&bytes).unwrap()
+    }
+    fn assert_value(transcript: &Transcript<'_>, state: &str, bits: Option<u8>) {
+        assert_eq!(value(transcript, true), serde_json::json!({"state":state,"observed_bits":bits}));
+    }
+    #[test]
+    fn fatal_output_v2_actual_chunks_compaction_and_all_bit_orders() {
+        // The fixed inline state is not another retained transcript allocation.
+        assert!(std::mem::size_of::<Option<super::super::fatal_output_v2::Capture>>() <= 3);
+        for (index, line) in LINES.iter().enumerate() {
+            for ending in [b"\n".as_slice(), b"\r\n".as_slice()] {
+                let complete = [*line, ending].concat();
+                for split in 0..=complete.len() {
+                    let mut transcript = enabled();
+                    transcript.append(&complete[..split], Path::new(ROOT)).unwrap();
+                    if split < complete.len() { assert_value(&transcript,"complete",Some(0)); }
+                    // Actual compaction preserves an unfinished metadata line.
+                    transcript.consume(None).unwrap();
+                    transcript.append(&complete[split..], Path::new(ROOT)).unwrap();
+                    transcript.finish_fatal_output_v2(true);
+                    assert_value(&transcript,"complete",Some(1 << index));
+                }
+            }
+        }
+        let mut permutations = 0;
+        for a in 0..4 { for b in 0..4 { for c in 0..4 { for d in 0..4 {
+            let order = [a,b,c,d];
+            if order.iter().enumerate().any(|(i,n)| order[..i].contains(n)) { continue; }
+            permutations += 1;
+            let mut transcript = enabled();
+            for index in order.into_iter().chain(order) {
+                transcript.append(&[LINES[index],b"\n"].concat(),Path::new(ROOT)).unwrap();
+                transcript.consume(None).unwrap();
+            }
+            for _ in 0..80 {
+                transcript.append(b"[JOINED_DIAGNOSTIC Bootstrap Begin]\n",Path::new(ROOT)).unwrap();
+                transcript.consume(None).unwrap();
+            }
+            transcript.finish_fatal_output_v2(true);
+            assert_value(&transcript,"complete",Some(15));
+            assert_eq!(transcript.diagnostics.len(),MAX_DIAGNOSTICS);
+        }}}}
+        assert_eq!(permutations,24);
+    }
+    #[test]
+    fn fatal_output_v2_exact_grammar_truncation_and_private_fields() {
+        for line in LINES {
+            for cut in 0..=line.len() {
+                let mut transcript = enabled();
+                transcript.append(&line[..cut],Path::new(ROOT)).unwrap();
+                transcript.finish_fatal_output_v2(true);
+                assert_value(&transcript,if cut == 0 {"complete"} else {"incomplete"},Some(0));
+            }
+            for altered in [
+                [b"quoted: ".as_slice(),line].concat(),
+                [line,b" trailing"].concat(), [line,b"\0"].concat(),
+                [b"\x1b[31m".as_slice(),line].concat(),
+                [line,b"\r\r"].concat(),
+            ] {
+                let mut transcript = enabled();
+                transcript.append(&[altered.as_slice(),b"\n"].concat(),Path::new(ROOT)).unwrap();
+                transcript.finish_fatal_output_v2(true);
+                assert_value(&transcript,"complete",Some(0));
+            }
+            // An injected physical newline inside the fixed prefix is not a marker.
+            let mut transcript=enabled();
+            transcript.append(&[&line[..2],b"\n",&line[2..],b"\n"].concat(),Path::new(ROOT)).unwrap();
+            transcript.finish_fatal_output_v2(true);assert_value(&transcript,"complete",Some(0));
+        }
+        for line in [
+            b"thread 'main' panicked at src/main.rs:1:2:".as_slice(),
+            b"thread 'main' (1) panicked at C:/src/main.rs:1:2:",
+        ] {
+            let mut t=enabled();t.append(&[line,b"\n"].concat(),Path::new(ROOT)).unwrap();
+            assert_value(&t,"complete",Some(2));
+        }
+        for line in [
+            b"thread '' panicked at path:1:2:".as_slice(),
+            b"thread 'main' (x) panicked at path:1:2:",
+            b"thread 'main' panicked at path:x:2:",
+            b"thread 'main' panicked at path:1::",b"thread 'main' panicked at :1:2:",
+            b"thread 'main' panicked at path:1:2: PRIVATE_MESSAGE",
+            b"memory allocation of -1 bytes failed",b"memory allocation of 1.2 bytes failed",
+            b"memory allocation of 111111111111111111111 bytes failed",
+        ] {
+            let mut t=enabled();t.append(&[line,b"\n"].concat(),Path::new(ROOT)).unwrap();assert_value(&t,"complete",Some(0));
+        }
+        // Boundaries of each discarded dynamic field, including non-ASCII and
+        // controls. Dynamic bytes are never part of the serialized projection.
+        let header=|name:&[u8],tid:&[u8],path:&[u8],line:&[u8],column:&[u8]| {
+            [b"thread '".as_slice(),name,b"' (",tid,b") panicked at ",path,b":",line,b":",column,b":\n"].concat()
+        };
+        let mut edges=Vec::new();
+        for size in [128,129] {edges.push((header(&vec![b'a';size],b"1",b"path",b"1",b"2"),size==128));}
+        for size in [4096,4097] {edges.push((header(b"main",b"1",&vec![b'a';size],b"1",b"2"),size==4096));}
+        for size in [20,21] {
+            let digits=vec![b'1';size];
+            edges.push((header(b"main",&digits,b"path",b"1",b"2"),size==20));
+            edges.push((header(b"main",b"1",b"path",&digits,b"2"),size==20));
+            edges.push((header(b"main",b"1",b"path",b"1",&digits),size==20));
+        }
+        for field in [b"private\tvalue".as_slice(),b"private\0value",b"private\rvalue",b"private\nvalue",b"private\x1bvalue",b"private\xc3\xa9value"] {
+            edges.push((header(field,b"1",b"path",b"1",b"2"),false));
+            edges.push((header(b"main",field,b"path",b"1",b"2"),false));
+            edges.push((header(b"main",b"1",field,b"1",b"2"),false));
+            edges.push((header(b"main",b"1",b"path",field,b"2"),false));
+            edges.push((header(b"main",b"1",b"path",b"1",field),false));
+        }
+        for (line,valid) in edges {
+            let mut t=enabled();t.append(&line,Path::new(ROOT)).unwrap();
+            t.finish_fatal_output_v2(true);assert_value(&t,"complete",Some(if valid{2}else{0}));
+        }
+        for line in [b"thread caused panic while panicking. aborting.".as_slice(),
+            b"panic in a destructor during cleanup",
+            b"fatal runtime error: Rust panics must be rethrown, aborting",
+            b"fatal runtime error: Rust cannot catch foreign exceptions, aborting"] {
+            let mut t=enabled();t.append(&[line,b"\n"].concat(),Path::new(ROOT)).unwrap();assert_value(&t,"complete",Some(8));
+        }
+    }
+    fn same_original_state(a:&Transcript<'_>,b:&Transcript<'_>) {
+        assert_eq!(a.bytes,b.bytes);assert_eq!(a.base,b.base);assert_eq!(a.consumed,b.consumed);
+        assert_eq!(a.line_start,b.line_start);assert_eq!(a.summary(),b.summary());
+        assert_eq!(a.tail(),b.tail());assert_eq!(a.retained_bytes(),b.retained_bytes());
+        let paths=|t:&Transcript<'_>|t.paths.iter().map(|(m,p)|(m.to_string(),p.as_ref().map(|p|(p.value.to_string(),p.end)))).collect::<Vec<_>>();
+        assert_eq!(paths(a),paths(b));
+    }
+    fn refusal(t:&mut Transcript<'_>,mode:usize)->Result<(),Failure> {
+        let root=Path::new(ROOT);
+        match mode {
+            0=>t.append(&vec![b'x';MAX_BYTES+1],root),
+            1=>t.append(b"\xff\n",root),
+            2|3=>{
+                let metadata=if mode==2 {b"[JOINED_DIAGNOSTIC Bootstrap Begin]\n".as_slice()}
+                    else {b"SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/exact\n".as_slice()};
+                let filler=MAX_BYTES-t.retained_bytes()-metadata.len()-1;
+                t.append(&[vec![b'x';filler],b"\n".to_vec(),metadata.to_vec()].concat(),root)
+            },
+            4=>t.append(b"SYNTHETIC_JOINED_DRAFT_PATH=/outside/private\n",root),
+            5=>{t.base=usize::MAX;t.append(b"SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/exact\n",root)},
+            6=>{t.append(b"complete\n",root).unwrap();t.base=usize::MAX;t.consume(None)},
+            7=>{t.base=usize::MAX;t.path(MARKER,1).map(|_|())},
+            _=>t.consume(Some("UNKNOWN=")),
+        }
+    }
+    #[test]
+    fn fatal_output_v2_all_scan_refusals_preserve_original_behavior_and_sticky_loss() {
+        for mode in 0..9 {
+            let mut observed=enabled();let mut original=Transcript::new([MARKER]).unwrap();
+            for t in [&mut observed,&mut original] {
+                t.append(&[LINES[0],b"\n"].concat(),Path::new(ROOT)).unwrap();t.consume(None).unwrap();
+            }
+            let a=refusal(&mut observed,mode);let b=refusal(&mut original,mode);
+            assert!(a.is_err(),"refusal mode {mode}");assert_eq!(a,b);same_original_state(&observed,&original);
+            observed.enable_fatal_output_v2();observed.finish_fatal_output_v2(true);
+            assert_value(&observed,"incomplete",Some(1));
+            assert_value(&original,"withheld",None);
+        }
+    }
+    #[test]
+    fn fatal_output_v2_drain_loss_withholding_and_child_isolation() {
+        for drained in [false,true] {
+            for partial in [false,true] {
+                let mut transcript=enabled();
+                transcript.append(&[LINES[0],b"\n"].concat(),Path::new(ROOT)).unwrap();
+                if partial {transcript.append(b"unfinished private text",Path::new(ROOT)).unwrap();}
+                transcript.finish_fatal_output_v2(drained);
+                let state=if drained && !partial {"complete"}else{"incomplete"};
+                assert_value(&transcript,state,Some(1));
+                assert_eq!(value(&transcript,false),serde_json::json!({"state":"withheld","observed_bits":null}));
+                transcript.enable_fatal_output_v2();transcript.finish_fatal_output_v2(true);
+                assert_value(&transcript,state,Some(1));
+                assert_value(&enabled(),"complete",Some(0));
+            }
+        }
+        let mut invalid=enabled();invalid.append(b"\xc3",Path::new(ROOT)).unwrap();
+        assert_eq!(invalid.finish_text(),Err(Failure::IncompleteUtf8));
+        invalid.finish_fatal_output_v2(false);assert_value(&invalid,"incomplete",Some(0));
+        // No scan or finalization action introduces observation in older profiles.
+        let mut disabled=Transcript::new([]).unwrap();
+        disabled.append(&[LINES[0],b"\n"].concat(),Path::new(ROOT)).unwrap();
+        disabled.finish_fatal_output_v2(false);assert_value(&disabled,"withheld",None);
+    }
 }

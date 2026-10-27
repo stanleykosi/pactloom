@@ -73,7 +73,7 @@ RUNTIME_FILES=('ci-financial-container.py','ci-financial-flow.py','ci-financial-
  'ci-financial-observer.py','ci-financial-output.py','ci-financial-external-output.py',
  'ci-financial-external-operator.py','ci-financial-weston-module.so')
 ARTIFACTS=('coordinator-observed','coordinator-production','pristine-setup')
-DURABLE_PROFILE='financial-durable-result-lifecycle-selective-v2'
+DURABLE_PROFILE='financial-durable-result-lifecycle-selective-v3'
 DURABLE_CASES=('durable-resume','durable-started')
 
 

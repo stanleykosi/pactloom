@@ -2,7 +2,7 @@
 """Closed NativeV3 durable correctness profile; import is inert.
 
 This is not the coordinated/rendered-UI oracle. The explicit selective recipe
-keeps only Signer and Engine at opt-level 0; it never changes an authority bound.
+uses Signer opt-level 1 and Engine opt-level 0; it never changes an authority bound.
 Runtime output remains private except for the exact finite receipts below.
 """
 import ctypes
@@ -16,14 +16,14 @@ import signal
 import subprocess
 import time
 
-PROFILE = 'financial-durable-result-lifecycle-selective-v2'
+PROFILE = 'financial-durable-result-lifecycle-selective-v3'
 GATE = b'financial-durable-v2\n'
 ROLE = 'durable-lifecycle-qualification'
 ARTIFACTS = (ROLE,)
 MANIFEST_VERSION = 3
 FEATURE_TEXT = 'durable-proposal,synthetic-born-joined-qualification'
 FEATURES = ['durable-proposal','financial-runtime','manual-admission','synthetic-born-joined-qualification']
-OVERRIDES = ('profile.release.package.wholepact-signer.opt-level=0',
+OVERRIDES = ('profile.release.package.wholepact-signer.opt-level=1',
              'profile.release.package.wholepact-engine.opt-level=0')
 PREFIX = ('host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::'
           'qualification::durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::')
@@ -32,6 +32,14 @@ CASES = {
     'durable-started': PREFIX + 'original_financial_started_without_result_remains_uncertain_after_process_death_v2',
 }
 SAFE_TESTS = ('host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::partial_ready_paths_reject_escape_alias_and_unpreserved_container', 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::partial_death_marker_cannot_promote_old_profile_or_partial_line', 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::intake_death_marker_requires_exact_committed_ack_boundary', 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::started_death_marker_cannot_claim_result_or_unterminated_line', 'host::financial::private_financial_v2::qualification_fault_v2::tests::intake_ack_fault_latch_is_one_shot_exact_and_rejects_elapsed_arm', 'host::financial::durable_financial_commands_v2::tests::exact_two_owner_command_keys_are_disjoint_and_profile_specific', 'host::financial::durable_financial_commands_v2::tests::versioned_command_selector_rejects_unknown_fields', 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::durable_failure_v2_preserves_setup_and_tls_errors_without_private_text', 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::durable_failure_v2_projects_each_returned_stage_rejection_and_healthy_status', 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::durable_failure_v2_preserves_first_failure_through_all_cleanup_modes', 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::durable_failure_v2_covers_all_final_boundaries_and_diagnostic_states', 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::rolling_transcript_v1::delivery_first_failure_tests::delivery_first_failure_survives_more_than_64_later_diagnostics', 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::rolling_transcript_v1::delivery_first_failure_tests::delivery_first_failure_requires_complete_exact_finite_marker', 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::rolling_transcript_v1::delivery_first_failure_tests::delivery_first_failure_is_opt_in_and_isolated_per_child', 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::rolling_transcript_v1::delivery_first_failure_tests::delivery_first_failure_insufficient_capture_budget_is_sticky', 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::worker::admission_diagnostic_tests::durable_worker_state_layout_keeps_nominal_owners_indirect', 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::worker::admission_diagnostic_tests::durable_worker_execute_retains_inert_error_and_slot_order')
+# Preserve the exact earlier SAFE17 prefix; append only owning finite-observer tests.
+SAFE_TESTS += (
+    'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::rolling_transcript_v1::fatal_output_tests_v2::fatal_output_v2_actual_chunks_compaction_and_all_bit_orders',
+    'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::rolling_transcript_v1::fatal_output_tests_v2::fatal_output_v2_exact_grammar_truncation_and_private_fields',
+    'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::rolling_transcript_v1::fatal_output_tests_v2::fatal_output_v2_all_scan_refusals_preserve_original_behavior_and_sticky_loss',
+    'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::rolling_transcript_v1::fatal_output_tests_v2::fatal_output_v2_drain_loss_withholding_and_child_isolation',
+    'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::durable_failure_v2_fatal_observations_all_stages_keep_error_order_and_withhold',
+)
 NATIVE_SECONDS = 1800
 ATTACH_SECONDS = 1830
 ATTACH_SUITE_SECONDS = 3660
@@ -102,12 +110,12 @@ def loads(raw):
     except (ValueError, UnicodeError, RecursionError): raise Rejected('schema') from None
 
 def recipe():
-    return dict(build_recipe_version=4, qualification_profile=PROFILE,
+    return dict(build_recipe_version=5, qualification_profile=PROFILE,
         execution='native-owner-durable-correctness-selective-optimization',
         toolchain='1.99.0',rustc='rustc 1.99.0 (b940084d7 2026-09-28)',target='x86_64-unknown-linux-gnu',
         jobs=3,incremental=False,profile='release',default_features=False,
         host_test_features=FEATURE_TEXT,cargo_config_overrides=list(OVERRIDES),
-        host_opt_level=3,signer_opt_level=0,engine_opt_level=0,
+        host_opt_level=3,signer_opt_level=1,engine_opt_level=0,
         debug_assertions=False,overflow_checks=False,other_dependencies_release_optimized=True,
         rustflags='',sqlcipher='4.19.0',openssl='3.5.9',static_crypto=True,platform='linux-amd64',locked=True,
         artifact_features={ROLE:list(FEATURES)},test_selectors=dict(CASES),safe_test_selectors=list(SAFE_TESTS),
@@ -130,7 +138,8 @@ def validate_package_profiles(raw, repo):
         target, profile = row.get('target'), row.get('profile')
         if type(target) is not dict or target.get('kind') != ['lib']: continue
         need(target.get('name') == name.replace('-','_') and type(profile) is dict
-             and profile.get('opt_level') == '0' and profile.get('debug_assertions') is False
+             and profile.get('opt_level') == ('1' if name=='wholepact-signer' else '0')
+             and profile.get('debug_assertions') is False
              and profile.get('test') is False)
         need(profile.get('overflow_checks') is False)
         need(name not in found); found.add(name)
@@ -186,7 +195,7 @@ def native_failure(case, raw):
     if value['reason']=='stage_deadline':need(site in ('a2_reader','b_reader'))
     need(site in FAILURE_STAGE_EXPECTATIONS and type(stage) is dict and set(stage)=={
         'failure_reason','next','expected','expected_process','group_signal','group_absence','direct_child',
-        'status_kind','status_value','diagnostic_state','private_fixed_primary','delivery_first_failure'})
+        'status_kind','status_value','diagnostic_state','private_fixed_primary','delivery_first_failure','fatal_observation'})
     expected,process=FAILURE_STAGE_EXPECTATIONS[site]
     need(type(stage['failure_reason']) is str and stage['failure_reason'] in FAILURE_HARNESS_REASONS
          and type(stage['next']) is int and type(stage['expected']) is int
@@ -199,6 +208,16 @@ def native_failure(case, raw):
     else:need(type(status) is int and ((0<=status<=255) if kind=='exit' else (1<=status<=64)))
     verified=(stage['group_signal']!='Unverified' and stage['group_absence']=='OriginalGroupAbsentObserved'
               and stage['direct_child']=='Reaped' and kind!='absent')
+    # Bits: 1 stack marker, 2 panic header, 4 allocation marker, 8 fatal runtime marker.
+    # Lexical observations only: neither an empty mask nor incomplete capture
+    # establishes an abort cause. Process custody is required before disclosure.
+    fatal=stage['fatal_observation']
+    need(type(fatal) is dict and set(fatal)=={'state','observed_bits'})
+    if verified:
+        need(type(fatal['state']) is str and fatal['state'] in ('complete','incomplete')
+             and type(fatal['observed_bits']) is int and 0<=fatal['observed_bits']<=15)
+    else:
+        need(fatal['state']=='withheld' and fatal['observed_bits'] is None)
     expected_status=((process=='sigkill' and stage['group_signal']=='SentWhileLeaderOwned'
                       and kind=='signal' and status==9) or (process=='success' and kind=='exit' and status==0))
     reason=value['reason']

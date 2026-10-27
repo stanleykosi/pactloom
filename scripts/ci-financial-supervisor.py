@@ -1235,7 +1235,7 @@ def main():
             if durable:
                 emit('DURABLE_SOURCE',dict(source=sha,profile=D.PROFILE,toolchain='1.99.0',container_base=BASE,
                     cargo_lock_sha256=hashlib.sha256((REPO/'Cargo.lock').read_bytes()).hexdigest(),
-                    artifact_role=D.ROLE,selective_optimization_correctness=True,signer_opt_level=0,engine_opt_level=0,
+                    artifact_role=D.ROLE,selective_optimization_correctness=True,signer_opt_level=1,engine_opt_level=0,
                     host_opt_level=3,native_case_seconds=D.NATIVE_SECONDS,attach_suite_seconds=D.ATTACH_SUITE_SECONDS,
                     runtime_suite_seconds=D.RUNTIME_SUITE_SECONDS,runtime_and_cleanup_seconds=D.RUNTIME_AND_CLEANUP_SECONDS,
                     rendered_ui_verified=False,production_coordinator_executed=False,public_chain_verified=False,live_funds=False))

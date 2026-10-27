@@ -946,6 +946,7 @@ struct FailureStageV2 {
     status_kind:&'static str, status_value:Option<i32>, diagnostic_state:&'static str,
     private_fixed_primary:Option<crate::host::financial::private_durable_fixed_v2::PrivateDiagnosticPrimaryV1>,
     delivery_first_failure:Option<FailureDeliveryV2>,
+    fatal_observation:fatal_output_v2::Observation,
 }
 #[derive(Clone, Serialize)]
 struct FailureRecordV2 {
@@ -1007,6 +1008,7 @@ fn failure_stage_v2(stage:&PrivateWorkspaceStageResultV1, expected:ExpectedProce
         group_absence:match stage.process.group_absence {A::OriginalGroupAbsentObserved=>"OriginalGroupAbsentObserved",A::Unverified=>"Unverified"},
         direct_child:match stage.process.direct_child {C::Reaped=>"Reaped",C::Unverified=>"Unverified"},
         status_kind,status_value,diagnostic_state,private_fixed_primary:primary,delivery_first_failure,
+        fatal_observation:stage.fatal_observation.for_process(trusted),
     }
 }
 impl FailureTrackerV2 {
@@ -1397,10 +1399,13 @@ fn failure_test_record_v2(bytes:&[u8])->serde_json::Value {
 }
 fn failure_test_stage_v2(expected:usize,status:std::process::ExitStatus)->PrivateWorkspaceStageResultV1 {
     use owned_test_process_group_v1::{GroupSignalV1,GroupAbsenceV1,DirectChildV1,ProcessCleanupV1};
+    let mut transcript=rolling_transcript_v1::Transcript::new([]).unwrap();
+    transcript.enable_fatal_output_v2();
     PrivateWorkspaceStageResultV1 {
         coordinated_post_input_phase:None,child_pid:1,pristine_first_failure:None,
         financial_progress_failure:None,financial_progress_timing:None,financial_diagnostic:None,
         delivery_first_failure:None,private_fixed_diagnostic:None,diagnostic_withheld:false,
+        fatal_observation:transcript.fatal_observation_v2(true),
         outcome:Ok(()),process:ProcessCleanupV1{group_signal:GroupSignalV1::SentWhileLeaderOwned,
             group_absence:GroupAbsenceV1::OriginalGroupAbsentObserved,direct_child:DirectChildV1::Reaped,status:Some(status)},
         root:None,summary:"PRIVATE_TEST_TRANSCRIPT_DO_NOT_FORWARD".into(),
@@ -1550,5 +1555,51 @@ fn durable_failure_v2_covers_all_final_boundaries_and_diagnostic_states(){
         assert_eq!(wire["stage"]["private_fixed_primary"].is_null(),expected!="validated");
         if expected=="validated"{assert_eq!(wire["stage"]["private_fixed_primary"],serde_json::to_value(&diagnostic.primary).unwrap());}
         assert_eq!(wire["stage"]["delivery_first_failure"].is_null(),mode==4);
+    }
+}
+
+#[test]
+fn durable_failure_v2_fatal_observations_all_stages_keep_error_order_and_withhold() {
+    use std::os::unix::process::ExitStatusExt;
+    let cases=[(FailureCaseV2::DurableResume,FailureSiteV2::A0Producer,ExpectedProcessV2::Sigkill,127),
+        (FailureCaseV2::DurableResume,FailureSiteV2::A1Intake,ExpectedProcessV2::Sigkill,23),
+        (FailureCaseV2::DurableResume,FailureSiteV2::A2Reader,ExpectedProcessV2::Success,147),
+        (FailureCaseV2::DurableStarted,FailureSiteV2::BProducer,ExpectedProcessV2::Sigkill,118),
+        (FailureCaseV2::DurableStarted,FailureSiteV2::BReader,ExpectedProcessV2::Success,0)];
+    for (case,site,expected,count) in cases {
+        for drained in [false,true] { for verified in [false,true] { for mask in 0..16u8 {
+            let mut transcript=rolling_transcript_v1::Transcript::new([]).unwrap();
+            transcript.enable_fatal_output_v2();
+            for (bit,line) in [(1,b"fatal runtime error: stack overflow, aborting\n".as_slice()),
+                (2,b"thread 'PRIVATE_NAME' (12345) panicked at /PRIVATE_PATH:12:34:\n"),
+                (4,b"memory allocation of 987654321 bytes failed\n"),
+                (8,b"thread caused non-unwinding panic. aborting.\n")] {
+                if mask & bit != 0 {transcript.append(line,Path::new("/tmp/owned")).unwrap();}
+            }
+            transcript.finish_fatal_output_v2(drained);
+            let raw=if expected==ExpectedProcessV2::Sigkill{libc::SIGKILL}else{0};
+            let mut stage=failure_test_stage_v2(count,std::process::ExitStatus::from_raw(raw));
+            stage.fatal_observation=transcript.fatal_observation_v2(true);
+            if !verified {stage.process.direct_child=owned_test_process_group_v1::DirectChildV1::Unverified;}
+            let error=io::Error::new(io::ErrorKind::TimedOut,FailureIdentitySentinelV2);
+            let identity=error.get_ref().unwrap() as *const _ as *const ();
+            stage.outcome=Err(error);
+            let mut bytes=Vec::new();
+            assert!(failure_boundary_v2(case,&mut bytes,|r|r.check_stage(site,&stage,expected,
+                ||panic!("outcome failure must short circuit the existing clock"))).is_err());
+            assert_eq!(stage.outcome.as_ref().unwrap_err().get_ref().unwrap() as *const _ as *const (),identity);
+            let wire=failure_test_record_v2(&bytes);
+            assert_eq!(wire["reason"],"stage_outcome_error");assert_eq!(wire["io_kind"],"timed_out");
+            assert_eq!(wire["stage"]["fatal_observation"],if verified {
+                serde_json::json!({"state":if drained{"complete"}else{"incomplete"},"observed_bits":mask})
+            } else {serde_json::json!({"state":"withheld","observed_bits":null})});
+            let text=std::str::from_utf8(&bytes).unwrap();
+            for private in ["PRIVATE_NAME","PRIVATE_PATH","12345","987654321"] {assert!(!text.contains(private));}
+            // Observation is not an acceptance predicate, including incomplete.
+            stage.outcome=Ok(());stage.process.direct_child=owned_test_process_group_v1::DirectChildV1::Reaped;
+            let mut output=Vec::new();
+            assert!(failure_boundary_v2(case,&mut output,|r|r.check_stage(site,&stage,expected,||false)).is_ok());
+            assert!(output.is_empty());
+        }}}
     }
 }

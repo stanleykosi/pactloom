@@ -23,7 +23,13 @@ class LaunchTests(unittest.TestCase):
     def legacy_workflow(self):
         # New V2 job steps have their own strict owning tests. Preserve these
         # original legacy assertions against the exact remaining workflow.
-        workflow=(HERE.parent/'.github/workflows/durable-native-linux.yml').read_text()
+        raw=(HERE.parent/'.github/workflows/durable-native-linux.yml').read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(),'3f6b9e0ab03a35798f066aac76c6286b88d0fb1ef3067361401eb1d4e65aec4a')
+        new=b'financial-durable-result-lifecycle-selective-v3'
+        old=b'financial-durable-result-lifecycle-selective-v2'
+        self.assertEqual(raw.count(new),1);raw=raw.replace(new,old,1)
+        self.assertEqual(hashlib.sha256(raw).hexdigest(),'18171bf69e496c99fc6e8abaeb5533bdb41b886e0e79ea2c13ec97258faf4190')
+        workflow=raw.decode('utf-8')
         start='      - name: Durable V2 recipe and projection gates (no build or fixture)\n'
         end='      - name: Fetch exact independent producer P and reviewed harness H without credentials\n'
         self.assertEqual(workflow.count(start),1);self.assertEqual(workflow.count(end),1)

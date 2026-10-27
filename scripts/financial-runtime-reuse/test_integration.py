@@ -82,9 +82,21 @@ CURRENT_DURABLE_PROFILE_INVERSES={
   (1295,1300,'3cb27b9f25d1e722aec6743ddc0997224b8e48ab193bf3a89b695b3dc1b15d0e',b''),
  )),
 }
+# Exact compiler-profile identity inverse before the unchanged P93/P92 guards.
+CURRENT_SELECTIVE_V3_INVERSES={
+ 'scripts/ci-financial-artifacts.py':('f4161507fe0cb4c79da51e698e7ba2a4f1324ea6d9c2373e180b388c3bbf6f85','68a2c6023a631e1e62ad48cee887dd864a388b95dd08e052dcad87a5247f8166',b"DURABLE_PROFILE='financial-durable-result-lifecycle-selective-v3'\n",b"DURABLE_PROFILE='financial-durable-result-lifecycle-selective-v2'\n"),
+ 'scripts/ci-financial-container.py':('bfaa454098aca9b29fe6a2f72757b4c3d3f2a5a533270a4e9efab7824839b8d1','a32958eccd9b77879b245e8dcad4520dc2782fa44093918b50ffaa22e96b35c8',b"DURABLE_PROFILE='financial-durable-result-lifecycle-selective-v3'\n",b"DURABLE_PROFILE='financial-durable-result-lifecycle-selective-v2'\n"),
+ 'scripts/ci-financial-supervisor.py':('14abd19049c9c058336d44e3b90c75409ecead3b1c22b10ccaa1b02ce3c6eedb','3e37d95a2bb9112f5af6814661535e16f075122aa2aaca801ea4141f84315014',b'selective_optimization_correctness=True,signer_opt_level=1,engine_opt_level=0,',b'selective_optimization_correctness=True,signer_opt_level=0,engine_opt_level=0,'),
+}
 class IntegrationTests(unittest.TestCase):
  def legacy_current_script_bytes(self,relative):
   current=(ROOT/relative).read_bytes()
+  profile_inverse=CURRENT_SELECTIVE_V3_INVERSES.get(relative)
+  if profile_inverse is not None:
+   new_pin,previous_pin,new,old=profile_inverse
+   self.assertEqual(hashlib.sha256(current).hexdigest(),new_pin,'current source whole-byte pin (V3 identity)')
+   self.assertEqual(current.count(new),1);current=current.replace(new,old,1)
+   self.assertEqual(hashlib.sha256(current).hexdigest(),previous_pin,'exact V3-to-V2 identity inverse')
   specification=CURRENT_DURABLE_PROFILE_INVERSES.get(relative)
   if specification is None:return current
   current_pin,old_pin,spans=specification

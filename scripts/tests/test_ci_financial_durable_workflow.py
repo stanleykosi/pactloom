@@ -117,7 +117,7 @@ class DurableWorkflowTests(unittest.TestCase):
         self.assertIn('rm -rf -- "$directory"', steps[5][2])
         self.assertFalse(condition(steps[6][1]['if'], mode=MODE, build_ok=True, ready=True, run_ok=False))
         summary = steps[6][2]
-        self.assertIn('financial-durable-result-lifecycle-selective-v2', summary)
+        self.assertIn('financial-durable-result-lifecycle-selective-v3', summary)
         self.assertIn('not standard fully optimized release or performance qualification', summary)
         self.assertIn('not the legacy coordinated', summary)
         self.assertIn('No intended-payee receipt, broadcast, chain inclusion', summary)

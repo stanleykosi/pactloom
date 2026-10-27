@@ -196,6 +196,12 @@ class FixtureProviderTrustTests(unittest.TestCase):
     def test_source_bound_install_before_drop_and_native_environment_unchanged(self):
         import hashlib
         current=(ROOT/'ci-financial-container.py').read_bytes()
+        # Exact current compiler-profile identity inverse; the original whole
+        # byte guard and all legacy trust/order assertions remain unchanged.
+        self.assertEqual(hashlib.sha256(current).hexdigest(),'bfaa454098aca9b29fe6a2f72757b4c3d3f2a5a533270a4e9efab7824839b8d1')
+        new=b"DURABLE_PROFILE='financial-durable-result-lifecycle-selective-v3'\n"
+        old=b"DURABLE_PROFILE='financial-durable-result-lifecycle-selective-v2'\n"
+        self.assertEqual(current.count(new),1);current=current.replace(new,old,1)
         self.assertEqual(hashlib.sha256(current).hexdigest(),'a32958eccd9b77879b245e8dcad4520dc2782fa44093918b50ffaa22e96b35c8')
         actual=current.decode('utf-8');actual_main=actual[actual.index('def main():'):]
         # V2 owns separate child TLS material; the legacy NativeSession trust
