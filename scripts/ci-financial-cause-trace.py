@@ -299,7 +299,13 @@ class SourceContracts(unittest.TestCase):
         self.assertIn('return Ok(false)',e['received_progress'])
         self.assertIn('original workflow restricted, quiescent or closing',e['action_restrictions'])
         legacy,_=build_legacy_harness()
-        self.assertEqual(sha(legacy),P80_LEGACY_GENERATED_SHA)
+        self.assertEqual(sha(legacy),'a0708310a47903b5d0d78f69bc6587b8bdc80376649cb8e458c18b21f947d6d3')
+        # The current finite Host Stage appends only the parked-bound observation.
+        # Consume that exact suffix once before the unchanged historical pin.
+        appended=', RelayFinish, ParkedMaterialBounds});'
+        self.assertEqual(legacy.count(appended),1)
+        restored=legacy.replace(appended,', RelayFinish});',1)
+        self.assertEqual(sha(restored),P80_LEGACY_GENERATED_SHA)
         self.assertEqual(len(TEST_NAMES)+len(RETIREMENT_TEST_NAMES),20)
         self.assertEqual(len(TERMINAL_PHASE_TEST_NAMES),4)
         for name in TERMINAL_PHASE_TEST_NAMES:self.assertEqual(rust.count('fn '+name+'()'),1,name)

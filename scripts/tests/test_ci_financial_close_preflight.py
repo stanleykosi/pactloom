@@ -598,6 +598,21 @@ class TerminalPhaseAndResumePreflightTests(unittest.TestCase):
    self.assertIn(old,raw);mutations.append(raw.replace(old,new,1))
   for bad in mutations:
    with self.assertRaises(AssertionError):audit.restore_terminal_resume_ui(bad)
+  # Execute the embedded source contract, not only its test-name inventory.
+  from unittest import mock
+  check=cause.SourceContracts('test_p80_terminal_producers_and_original_consumers_are_exact').test_p80_terminal_producers_and_original_consumers_are_exact
+  check()
+  legacy,items=cause.build_legacy_harness()
+  appended=', RelayFinish, ParkedMaterialBounds});'
+  self.assertEqual(legacy.count(appended),1)
+  for label,bad in [
+   ('missing',legacy.replace(appended,', RelayFinish});',1)),
+   ('duplicate',legacy.replace(appended,', RelayFinish, ParkedMaterialBounds, ParkedMaterialBounds});',1)),
+   ('renamed',legacy.replace(appended,', RelayFinish, ParkedMaterialBoundsChanged});',1)),
+   ('unrelated',legacy+'// unrelated source change\n'),
+  ]:
+   with self.subTest(legacy_mutation=label),mock.patch.object(cause,'build_legacy_harness',return_value=(bad,items)):
+    with self.assertRaises(AssertionError):check()
 
 class HeldSelectionNavigationPreflightTests(unittest.TestCase):
  def test_actual_egui_pair_navigation_tests_and_exact_ui_inverse_are_mandatory(self):

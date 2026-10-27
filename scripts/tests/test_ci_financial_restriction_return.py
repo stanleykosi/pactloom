@@ -99,7 +99,7 @@ class RestrictionReturnContractTests(unittest.TestCase):
         self.assertEqual(len(stage.split(',')),211)
     def test_hosted_actual_compiler_profiles_precede_generated_traces_and_python(self):
         workflow=(ROOT/'.github/workflows/deadline-preflight.yml').read_text()
-        self.assertEqual(workflow.count('retained-signing-wall-preflight-p90'),4)
+        self.assertEqual(workflow.count('parked-material-review-preflight-p91'),4)
         self.assertIn("for profile in ['minimal', 'production', 'observed-pixel', 'observed-semantic']:",workflow)
         self.assertIn("['cargo', 'check', '--locked', '-p', package, '--lib', '--no-default-features'",workflow)
         self.assertLess(workflow.index("args = rustup+['cargo', 'check'"),workflow.index("'scripts/ci-financial-cause-trace.py'"))
