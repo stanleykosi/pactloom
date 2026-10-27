@@ -348,6 +348,29 @@ fn writer_evidence(history:&AuthenticatedFinancialContinuationHistoryV1)->Result
     Ok((receipt.expires_at_ms,digest(permit)?))
 }
 
+// Existing first-error collector, promoted before stopping/draining the worker.
+// Only closed enum labels leave this operation; timing and nested call details
+// are deliberately omitted. This has no effect on the returned Result.
+static RESULT_FAILURE_EMITTED_V2: AtomicBool = AtomicBool::new(false);
+fn finite_result_failure_v2(record:Option<crate::host::financial_diagnostics_v1::FinancialDiagnosticV1>,
+    failed:bool,emitted:&AtomicBool)->Option<crate::host::financial_diagnostics_v1::FinancialDiagnosticV1> {
+    let mut record=record.filter(|record|record.is_valid_v1())?;
+    if !failed || emitted.swap(true,Ordering::SeqCst){return None;}
+    record.current_timing=None;record.authority_call=None;
+    Some(record)
+}
+fn promote_result_failure_v2<T>(result:&Result<T>) {
+    use crate::host::financial_diagnostics_v1 as fd;
+    let captured=fd::take_operation_failure();
+    if let Err(error)=result {
+        let captured=captured.or_else(|| {
+            fd::host(fd::FinancialStageV1::LifecycleHarness,fd::FinancialCommitStateV1::NotEstablished,error);
+            fd::take_operation_failure()
+        });
+        if let Some(record)=finite_result_failure_v2(captured,true,&RESULT_FAILURE_EMITTED_V2){fd::emit(record);}
+    }
+}
+
 fn return_exact(host:&Host,workspace:&Path,signers:&worker::JoinedSignerWorkerV1,index:usize,
     original:worker::DeliveryReopenV2,history:&AuthenticatedFinancialContinuationHistoryV1,
     expected:Option<&DurableFinancialResultRequestV2>,pair:Option<&Arc<PreservedDurablePairV2>>)->Result<(worker::DeliveryReopenV2,DurableFinancialResultRequestV2)>{
@@ -364,12 +387,14 @@ fn return_exact(host:&Host,workspace:&Path,signers:&worker::JoinedSignerWorkerV1
         || request.continuation_request_digest!=history.continuation_record().request_digest(history.continuation_request()).map_err(authority)?
     {return Err(Error::Authentication);}
     let stop=Arc::new(AtomicBool::new(false));
+    crate::host::financial_diagnostics_v1::reset_operation();
     signers.send(C::ServeDurableResultV2(index,stop.clone())).map_err(worker_error)?;
     let result=(||{
         let receiver=host.prepare_durable_financial_preview_with_provider_v2(
             workspace,&peer.endpoint,&request,history,peer.provider)?;
         host.intake_original_financial_result_v2(workspace,&format!("durable-v2-intake-{index}"),receiver,history)
     })();
+    promote_result_failure_v2(&result);
     stop.store(true,Ordering::Release);
     let returned=done(signers,index);result?;returned?;
     signers.send(C::PreserveDurableResultV2(index)).map_err(worker_error)?;
@@ -1046,12 +1071,20 @@ enum ExpectedProcessV2 { Sigkill, Success }
 #[derive(Clone, Serialize)]
 struct FailureDeliveryV2 { boundary:&'static str, outcome:&'static str }
 #[derive(Clone, Serialize)]
+struct FailureFinancialV2 {
+    stage:crate::host::financial_diagnostics_v1::FinancialStageV1,
+    component:crate::host::financial_diagnostics_v1::FinancialComponentV1,
+    error_class:crate::host::financial_diagnostics_v1::FinancialErrorClassV1,
+    commit_state:crate::host::financial_diagnostics_v1::FinancialCommitStateV1,
+}
+#[derive(Clone, Serialize)]
 struct FailureStageV2 {
     failure_reason:&'static str, next:usize, expected:usize, expected_process:ExpectedProcessV2,
     group_signal:&'static str, group_absence:&'static str, direct_child:&'static str,
     status_kind:&'static str, status_value:Option<i32>, diagnostic_state:&'static str,
     private_fixed_primary:Option<crate::host::financial::private_durable_fixed_v2::PrivateDiagnosticPrimaryV1>,
     delivery_first_failure:Option<FailureDeliveryV2>,
+    financial_first_failure:Option<FailureFinancialV2>,
     fatal_observation:fatal_output_v2::Observation,
 }
 #[derive(Clone, Serialize)]
@@ -1101,19 +1134,24 @@ fn failure_stage_v2(stage:&PrivateWorkspaceStageResultV1, expected:ExpectedProce
     let primary=if trusted && !stage.diagnostic_withheld {
         stage.private_fixed_diagnostic.as_ref().filter(|d|d.canonical_json().is_some()).map(|d|d.primary.clone())
     } else {None};
-    let diagnostic_state=if primary.is_some(){"validated"}
-        else if !trusted || stage.diagnostic_withheld || stage.private_fixed_diagnostic.is_some(){"withheld"}
-        else {"unavailable"};
     let delivery_first_failure=if trusted {stage.delivery_first_failure.map(|d|{
         let (boundary,outcome)=d.labels();FailureDeliveryV2{boundary,outcome}
     })} else {None};
+    let financial_first_failure=if trusted && !stage.diagnostic_withheld {
+        stage.financial_diagnostic.as_ref().filter(|d|d.is_valid_v1()).map(|d|FailureFinancialV2 {
+            stage:d.stage,component:d.component,error_class:d.error_class,commit_state:d.commit_state,
+        })
+    } else {None};
+    let diagnostic_state=if primary.is_some() || financial_first_failure.is_some(){"validated"}
+        else if !trusted || stage.diagnostic_withheld || stage.private_fixed_diagnostic.is_some() || stage.financial_diagnostic.is_some(){"withheld"}
+        else {"unavailable"};
     FailureStageV2 {
         failure_reason:harness_reason_v2(stage.failure_reason),next:stage.next,expected:stage.expected,
         expected_process:expected,
         group_signal:match stage.process.group_signal {S::SentWhileLeaderOwned=>"SentWhileLeaderOwned",S::AlreadyAbsentWhileLeaderOwned=>"AlreadyAbsentWhileLeaderOwned",S::Unverified=>"Unverified"},
         group_absence:match stage.process.group_absence {A::OriginalGroupAbsentObserved=>"OriginalGroupAbsentObserved",A::Unverified=>"Unverified"},
         direct_child:match stage.process.direct_child {C::Reaped=>"Reaped",C::Unverified=>"Unverified"},
-        status_kind,status_value,diagnostic_state,private_fixed_primary:primary,delivery_first_failure,
+        status_kind,status_value,diagnostic_state,private_fixed_primary:primary,delivery_first_failure,financial_first_failure,
         fatal_observation:stage.fatal_observation.for_process(trusted),
     }
 }
@@ -1627,6 +1665,74 @@ fn durable_failure_v2_preserves_first_failure_through_all_cleanup_modes(){
 }
 #[test]
 fn durable_failure_v2_covers_all_final_boundaries_and_diagnostic_states(){
+    use crate::host::financial_diagnostics_v1 as fd;
+    let first=fd::FinancialDiagnosticV1{schema:1,stage:fd::FinancialStageV1::AuthenticatedIntake,
+        component:fd::FinancialComponentV1::Engine,error_class:fd::FinancialErrorClassV1::Permission,
+        commit_state:fd::FinancialCommitStateV1::OutcomeUncertain,current_timing:None,authority_call:None};
+    let emitted=AtomicBool::new(false);
+    assert!(finite_result_failure_v2(Some(first),false,&emitted).is_none());
+    assert!(!emitted.load(Ordering::SeqCst));
+    let mut invalid_record=first;invalid_record.schema=2;
+    assert!(finite_result_failure_v2(Some(invalid_record),true,&emitted).is_none());
+    assert!(!emitted.load(Ordering::SeqCst));
+    assert_eq!(finite_result_failure_v2(Some(first),true,&emitted),Some(first));
+    let mut later=first;later.stage=fd::FinancialStageV1::WorkerDrain;
+    assert!(finite_result_failure_v2(Some(later),true,&emitted).is_none());
+    let mut timed=first;timed.stage=fd::FinancialStageV1::ResultCurrentRead;
+    timed.component=fd::FinancialComponentV1::SignerBridge;
+    timed.current_timing=Some(fd::FinancialCurrentTimingV1{budget_ms:1000,provider_elapsed_ms:Some(1),
+        remaining_before_write_ms:Some(999),remaining_before_read_ms:Some(998),roundtrip_elapsed_ms:2});
+    assert!(timed.is_valid_v1());
+    let stripped=finite_result_failure_v2(Some(timed),true,&AtomicBool::new(false)).unwrap();
+    assert!(stripped.current_timing.is_none() && stripped.authority_call.is_none());
+    assert_eq!(stripped.stage,timed.stage);assert_eq!(stripped.error_class,timed.error_class);
+    let mut invalid_nested=timed;invalid_nested.component=fd::FinancialComponentV1::Engine;
+    assert!(finite_result_failure_v2(Some(invalid_nested),true,&AtomicBool::new(false)).is_none());
+    let mut call=first;call.stage=fd::FinancialStageV1::NativeAuthorityAdmit;
+    call.authority_call=Some(serde_json::from_value(serde_json::json!({
+        "stage":"ExchangeDeadline","check_site":"AfterResponseRead","checkpoint":"AfterCallback",
+        "selected_limit":"Exchange","selected_budget_us":10000000,"caller_remaining_at_failure_us":100000000,
+        "selected_remaining_at_failure_us":0,"exchange_elapsed_us":10000001,"exchange_cost":null,
+        "clamped":false,"incomplete":false,"pre_budget_callback_calls":1,"pre_budget_callback_us":100
+    })).unwrap());
+    assert!(call.is_valid_v1());
+    let stripped=finite_result_failure_v2(Some(call),true,&AtomicBool::new(false)).unwrap();
+    assert!(stripped.current_timing.is_none() && stripped.authority_call.is_none());
+    call.stage=fd::FinancialStageV1::ResultCurrentRead;
+    assert!(finite_result_failure_v2(Some(call),true,&AtomicBool::new(false)).is_none());
+    let line=format!("[FINANCIAL_DIAGNOSTIC_V1 {}]\n",serde_json::to_string(&first).unwrap());
+    for split in 0..line.len() {
+        let mut transcript=rolling_transcript_v1::Transcript::new([]).unwrap();
+        transcript.append(&line.as_bytes()[..split],Path::new("/tmp/owned")).unwrap();
+        assert!(transcript.financial_diagnostic().is_none());
+        transcript.append(&line.as_bytes()[split..],Path::new("/tmp/owned")).unwrap();
+        transcript.finish_private_fixed_diagnostic();
+        assert_eq!(transcript.financial_diagnostic(),Some(&first));
+    }
+    for changed in [line.replace("AuthenticatedIntake","UNRECOGNIZED"),line.replace("\"schema\":1","\"extra\":true,\"schema\":1"),line.trim_end().into(),line.repeat(2)] {
+        let mut transcript=rolling_transcript_v1::Transcript::new([]).unwrap();
+        transcript.append(changed.as_bytes(),Path::new("/tmp/owned")).unwrap();
+        transcript.finish_private_fixed_diagnostic();assert!(transcript.financial_diagnostic().is_none());
+    }
+    for (verified,valid,withheld) in [(true,true,false),(false,true,false),(true,false,false),(true,true,true)] {
+        let mut stage=failure_test_stage_v2(23,std::process::ExitStatus::from_raw(101<<8));
+        stage.financial_diagnostic=Some(if valid{first}else{invalid_record});
+        stage.diagnostic_withheld=withheld;
+        if !verified{stage.process.direct_child=owned_test_process_group_v1::DirectChildV1::Unverified;}
+        let projected=failure_stage_v2(&stage,ExpectedProcessV2::Sigkill);
+        let value=serde_json::to_value(projected).unwrap();
+        let diagnostic=&value["financial_first_failure"];
+        assert_eq!(diagnostic.is_null(),!verified || !valid || withheld);
+        if verified && valid && !withheld {
+            assert_eq!(value["diagnostic_state"],"validated");
+            assert_eq!(diagnostic.as_object().unwrap().len(),4);
+            assert_eq!(diagnostic["stage"],"AuthenticatedIntake");
+            assert_eq!(diagnostic["component"],"Engine");
+            assert_eq!(diagnostic["error_class"],"Permission");
+            assert_eq!(diagnostic["commit_state"],"OutcomeUncertain");
+        }
+    }
+
     use FailureSiteV2 as S;
     use crate::host::financial::private_durable_fixed_v2 as D;
     use std::os::unix::process::ExitStatusExt;

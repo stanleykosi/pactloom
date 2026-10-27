@@ -467,10 +467,64 @@ def inert_failure(case, site=None, stage=True):
             status_kind='exit',status_value=1,diagnostic_state='validated',
             private_fixed_primary=dict(operation='Checkpoint',site='HostCheckpointEntry',engine_code='NotApplicable',family='Host',cause='Permission'),
             delivery_first_failure=dict(boundary='PrivateWorkspaceCapture',outcome='BridgePermission'),
+            financial_first_failure=None,
             fatal_observation=dict(state='complete',observed_bits=0))
     return value
 
 class DurableNativeFailureTests(unittest.TestCase):
+    def test_financial_failure_exact_finite_projection_and_custody(self):
+        record=dict(stage='ResultReceive',component='SignerBridge',error_class='Permission',commit_state='NotEstablished')
+        for case in CASES:
+            value=inert_failure(case)
+            value['stage']['financial_first_failure']=record.copy()
+            self.assertEqual(D.native_failure(case,raw(value)),value)
+            financial_only=copy.deepcopy(value);financial_only['stage']['private_fixed_primary']=None
+            self.assertEqual(D.native_failure(case,raw(financial_only)),financial_only)
+            for state in ('withheld','unavailable'):
+                for source in (value,financial_only):
+                    changed=copy.deepcopy(source);changed['stage']['diagnostic_state']=state
+                    with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+            changed=copy.deepcopy(financial_only);changed['stage']['financial_first_failure']=None
+            with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+            for state in ('withheld','unavailable'):
+                changed['stage']['diagnostic_state']=state
+                self.assertEqual(D.native_failure(case,raw(changed)),changed)
+            for key,labels in [('stage',D.FINANCIAL_STAGES),('component',D.FINANCIAL_COMPONENTS),
+                               ('error_class',D.FINANCIAL_ERRORS),('commit_state',D.FINANCIAL_COMMIT_STATES)]:
+                for label in labels:
+                    changed=copy.deepcopy(value);changed['stage']['financial_first_failure'][key]=label
+                    self.assertEqual(D.native_failure(case,raw(changed)),changed)
+                for bad in (None,False,0,[],{},'', 'unknown', '/private/account-secret'):
+                    changed=copy.deepcopy(value);changed['stage']['financial_first_failure'][key]=bad
+                    with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+                changed=copy.deepcopy(value);del changed['stage']['financial_first_failure'][key]
+                with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+            for extra in ('authority_call','timing','schema','message','path','account_id'):
+                changed=copy.deepcopy(value);changed['stage']['financial_first_failure'][extra]='private'
+                with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+            for bad in (True,0,'Permission',[],[record]):
+                changed=copy.deepcopy(value);changed['stage']['financial_first_failure']=bad
+                with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+            for field,bad in [('group_signal','Unverified'),('group_absence','Unverified'),('direct_child','Unverified'),('status_kind','absent')]:
+                changed=copy.deepcopy(value);changed['stage'][field]=bad
+                changed['stage'].update(diagnostic_state='withheld',private_fixed_primary=None,delivery_first_failure=None,
+                    fatal_observation=dict(state='withheld',observed_bits=None))
+                if field=='status_kind':changed['stage']['status_value']=None
+                with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+                changed['stage']['financial_first_failure']=None
+                self.assertEqual(D.native_failure(case,raw(changed)),changed)
+
+    def test_financial_projection_domains_equal_rust_and_legacy_domains(self):
+        native=(ROOT.parent/'crates/wholepact-native-host/src/host/financial_diagnostics_v1.rs').read_text()
+        legacy=load('ci-durable-financial-output')
+        for name,enum in [('FINANCIAL_STAGES','FinancialStageV1'),('FINANCIAL_COMPONENTS','FinancialComponentV1'),
+                          ('FINANCIAL_ERRORS','FinancialErrorClassV1'),('FINANCIAL_COMMIT_STATES','FinancialCommitStateV1')]:
+            body=re.search(r'enum '+enum+r'\s*\{(.*?)\}',native,re.S).group(1)
+            body=re.sub(r'//[^\n]*','',body)
+            actual={x.strip() for x in body.split(',') if x.strip()}
+            self.assertEqual(getattr(D,name),actual)
+            self.assertEqual(getattr(D,name),getattr(legacy,name))
+
     def test_exact_schema_case_sites_stage_counts_and_types(self):
         for case in CASES:
             for site in D.FAILURE_COMMON_SITES|D.FAILURE_CASE_SITES[case]:
@@ -691,6 +745,8 @@ class DurableNativeFailureTests(unittest.TestCase):
                 stage['private_fixed_primary']=dict(operation=max(D.PRIVATE_FIXED_OPERATIONS,key=len),site=max(D.PRIVATE_FIXED_SITES,key=len),
                     engine_code=max(D.PRIVATE_FIXED_ENGINE_CODES,key=len),family=family,cause=max(D.PRIVATE_FIXED_FAMILIES[family],key=len))
                 stage['delivery_first_failure']=dict(boundary=max(D.FAILURE_DELIVERY_BOUNDARIES,key=len),outcome=max(D.FAILURE_DELIVERY_OUTCOMES,key=len))
+                stage['financial_first_failure']=dict(stage=max(D.FINANCIAL_STAGES,key=len),component=max(D.FINANCIAL_COMPONENTS,key=len),
+                    error_class=max(D.FINANCIAL_ERRORS,key=len),commit_state=max(D.FINANCIAL_COMMIT_STATES,key=len))
                 value.update(reason='stage_outcome_error',io_kind=max(D.FAILURE_IO_KINDS,key=len),cleanup=max(D.FAILURE_CLEANUP,key=len))
                 D.native_failure(case,raw(value))
                 lengths.append(len(D.NATIVE_FAILURE_MARKER+raw(value)))
