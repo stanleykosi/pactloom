@@ -10,10 +10,12 @@ pub(super) struct SignedResultRecord {
 }
 impl SignedResultRecord {
     pub(super) fn check(&self)->Result<()> {
-        crate::channel::require_time(self.service.min(self.writer).min(self.writer_wall).min(self.entry.original_source))?;
+        let original=self.service.min(self.writer).min(self.writer_wall).min(self.entry.original_source);
+        crate::channel::require_time(original)?;
         self.entry.retirement_clock_bounds()?;
-        let wall=state::wall_ms()?;let prior=self.last_wall.fetch_max(wall,Ordering::AcqRel);
-        if wall<prior||wall<self.service_valid_from_ms||wall>=self.service_valid_until_ms{return Err(rejected("retired Signing original wall bounds"));}
+        let wall=state::observe_shared_wall(&self.last_wall,original,state::wall_ms)?
+            .ok_or_else(||rejected("retired Signing original wall bounds"))?;
+        if wall<self.service_valid_from_ms||wall>=self.service_valid_until_ms{return Err(rejected("retired Signing original wall bounds"));}
         if self.core.phase.revoked() || self.core.phase.signing_phase(self.entry.slot())!=6
             || self.retired_index>=32 || self.core.retired_roots.load(Ordering::Acquire)&(1<<self.retired_index)==0 {
             return Err(rejected("actual retired signed custody restricted"));
