@@ -590,6 +590,23 @@ impl PartialReadyV2 {
 }
 #[test]
 fn partial_ready_paths_reject_escape_alias_and_unpreserved_container(){
+    // A1/A2 do more than inspection: intake/completion requires the unchanged
+    // manual-effect guard. Re-enroll this fresh OWNED native-only session;
+    // do not restore an old grant or skip any exact per-action review.
+    for (inputs,count) in [(intake_inputs_v2(),23),(reader_inputs_v2(),147)] {
+        assert_eq!(inputs.len(),count);
+        assert!(matches!(&inputs[3],Input::Text{prompt:"Local application principal ID: ",response:"synthetic-roster-host"}));
+        assert!(matches!(&inputs[4],Input::Text{prompt:"Scope choice: type SELECTED",response:"OWNED"}));
+        assert!(matches!(&inputs[5],Input::Text{prompt:"Additional shared agreement IDs, comma-separated; blank for none: ",response:""}));
+        assert!(matches!(&inputs[6],Input::Text{prompt:"Grant READ only, or PREPARE",response:"PREPARE"}));
+        assert!(matches!(&inputs[7],Input::Text{prompt:"Optional exact browser origin for this session",response:""}));
+        assert!(matches!(&inputs[9],Input::ExactReview{detail:"Grant this session until lock/restart/revoke.",approve:true}));
+    }
+    let intake=intake_inputs_v2();
+    assert!(matches!(&intake[20],Input::ExactReview{detail:"Verify and retain one actual authenticated original signer result",approve:true}));
+    assert!(matches!(&intake[21],Input::ExactReview{detail:"Approve retain exact usable signatures for this EXACT scope?",approve:true}));
+    assert!(matches!(&intake[22],Input::ExactReview{detail:"Prepare this ONE EXACT local signature intake",approve:true}));
+
     // Inert reply metadata only: no provider, native grant, socket or pairing.
     let expected=wholepact_signer_origin::PairScope {
         account_id:"owner-two".into(),agreement_id:"agreement".into(),participant_id:"participant-two".into(),
@@ -929,14 +946,16 @@ fn intake_inputs_v2()->Vec<Input<'static>>{
     let mut inputs=vec![Input::Text{prompt:"Storage passphrase: ",response:"synthetic-recovery-review-password"},
         Input::Text{prompt:"Original primary financial passphrase: ",response:"synthetic-recovery-review-password"},
         review("Authenticate the same final-v4 original workspace")];
-    private_fixed_v2::session_inputs(&mut inputs,true);
+    // Fresh OWNED non-signing session: this path performs separately approved local effects.
+    private_fixed_v2::session_inputs(&mut inputs,false);
     progress_inputs(&mut inputs);commitment_inputs(&mut inputs);history_inputs(&mut inputs);return_inputs(&mut inputs);inputs
 }
 fn reader_inputs_v2()->Vec<Input<'static>>{
     let mut inputs=vec![Input::Text{prompt:"Storage passphrase: ",response:"synthetic-recovery-review-password"},
         Input::Text{prompt:"Original primary financial passphrase: ",response:"synthetic-recovery-review-password"},
         review("Authenticate the same final-v4 original workspace")];
-    private_fixed_v2::session_inputs(&mut inputs,true);
+    // Fresh OWNED non-signing session: this path performs separately approved local effects.
+    private_fixed_v2::session_inputs(&mut inputs,false);
     progress_inputs(&mut inputs);commitment_inputs(&mut inputs);complete_inputs(&mut inputs,false);progress_inputs(&mut inputs);
     history_inputs(&mut inputs);return_inputs(&mut inputs);progress_inputs(&mut inputs);commitment_inputs(&mut inputs);
     for read_probe in [true,true,true,false,false,false] {
