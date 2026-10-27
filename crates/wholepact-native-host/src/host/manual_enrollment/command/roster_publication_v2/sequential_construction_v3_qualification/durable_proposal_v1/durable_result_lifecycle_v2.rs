@@ -913,6 +913,161 @@ fn partial_death_marker_cannot_promote_old_profile_or_partial_line(){
     assert!(death_marker_v2(&line.repeat(2),true,true,true).is_err());
     assert!(death_marker_v2("SYNTHETIC_DURABLE_FINANCIAL_COMPLETED_V1=1\n",true,true,true).is_err());
 }
+// Failure-only projection of already returned controller data. No source reads,
+// clock observations, authority decisions, raw error strings or PTY text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all="kebab-case")]
+enum FailureCaseV2 { DurableResume, DurableStarted }
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all="snake_case")]
+enum FailureSiteV2 {
+    CorePolicy, ChildWaitPolicy, Cutoff, TemporaryRoot, TlsPrepare,
+    A0Producer, A0ReadyRead, A0ReadyValidate, A1Intake, WriterExpiryWait,
+    A2Reader, A2ReadyRead, A2CompletionRead, A2FinalVerify,
+    BProducer, BReadyRead, BReadyValidate, BReader, BReadyReread,
+    BCompletionRead, BFinalVerify, TemporaryCleanup, PublicReceipt,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all="snake_case")]
+enum FailureReasonV2 { IoError, StageCallError, StageOutcomeError, ProcessCleanupUnverified,
+    ExpectedProcessStatus, StageDeadline, Verification, CleanupUnverified }
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all="snake_case")]
+enum FailureCleanupV2 { NotStarted, RootUnavailable, ClosedAbsent, CloseUnverified }
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all="snake_case")]
+enum ExpectedProcessV2 { Sigkill, Success }
+#[derive(Clone, Serialize)]
+struct FailureDeliveryV2 { boundary:&'static str, outcome:&'static str }
+#[derive(Clone, Serialize)]
+struct FailureStageV2 {
+    failure_reason:&'static str, next:usize, expected:usize, expected_process:ExpectedProcessV2,
+    group_signal:&'static str, group_absence:&'static str, direct_child:&'static str,
+    status_kind:&'static str, status_value:Option<i32>, diagnostic_state:&'static str,
+    private_fixed_primary:Option<crate::host::financial::private_durable_fixed_v2::PrivateDiagnosticPrimaryV1>,
+    delivery_first_failure:Option<FailureDeliveryV2>,
+}
+#[derive(Clone, Serialize)]
+struct FailureRecordV2 {
+    schema:u8, case:FailureCaseV2, callsite:FailureSiteV2, reason:FailureReasonV2,
+    io_kind:&'static str, stage:Option<FailureStageV2>, cleanup:FailureCleanupV2,
+}
+struct FailureTrackerV2 {
+    case:FailureCaseV2, current:FailureSiteV2, reason:FailureReasonV2,
+    first:Option<FailureRecordV2>, cleanup:FailureCleanupV2,
+}
+fn failure_io_kind_v2(error:&io::Error)->&'static str {
+    use io::ErrorKind as K;
+    match error.kind() {
+        K::NotFound=>"not_found",K::PermissionDenied=>"permission_denied",
+        K::ConnectionRefused|K::ConnectionReset|K::ConnectionAborted|K::NotConnected|K::BrokenPipe=>"connection",
+        K::InvalidInput=>"invalid_input",K::InvalidData=>"invalid_data",K::TimedOut=>"timed_out",
+        K::Interrupted=>"interrupted",K::UnexpectedEof=>"unexpected_eof",K::WouldBlock=>"would_block",
+        _=>"other",
+    }
+}
+fn harness_reason_v2(reason:HarnessFailureReason)->&'static str {
+    use HarnessFailureReason::*;
+    match reason {
+        Unclassified=>"Unclassified",Deadline=>"Deadline",ChildObservation=>"ChildObservation",
+        ChildExit=>"ChildExit",PollIo=>"PollIo",ReadIo=>"ReadIo",OutputLimit=>"OutputLimit",
+        IncompleteUtf8=>"IncompleteUtf8",InvalidUtf8=>"InvalidUtf8",MultilineInput=>"MultilineInput",
+        WriteIo=>"WriteIo",FlushIo=>"FlushIo",MissingPathMarker=>"MissingPathMarker",
+        InvalidPath=>"InvalidPath",InvalidChallenge=>"InvalidChallenge",OutcomeRead=>"OutcomeRead",
+        CleanupUnverified=>"CleanupUnverified",FinancialPhaseDeadline=>"FinancialPhaseDeadline",
+        FinancialProgressInvalid=>"FinancialProgressInvalid",
+    }
+}
+fn failure_stage_v2(stage:&PrivateWorkspaceStageResultV1, expected:ExpectedProcessV2)->FailureStageV2 {
+    use owned_test_process_group_v1::{GroupSignalV1 as S,GroupAbsenceV1 as A,DirectChildV1 as C};
+    let (status_kind,status_value)=match stage.process.status.as_ref() {
+        None=>("absent",None),
+        Some(status)=>match (status.code(),status.signal()) {
+            (Some(code),_) if (0..=255).contains(&code)=>("exit",Some(code)),
+            (_,Some(signal)) if (1..=64).contains(&signal)=>("signal",Some(signal)),
+            _=>("other",None),
+        },
+    };
+    // The unchanged shared controller already validates and gates this value.
+    // Revalidation is pure and never makes an unverified process diagnostic public.
+    let trusted=stage.process.verified();
+    let primary=if trusted && !stage.diagnostic_withheld {
+        stage.private_fixed_diagnostic.as_ref().filter(|d|d.canonical_json().is_some()).map(|d|d.primary.clone())
+    } else {None};
+    let diagnostic_state=if primary.is_some(){"validated"}
+        else if !trusted || stage.diagnostic_withheld || stage.private_fixed_diagnostic.is_some(){"withheld"}
+        else {"unavailable"};
+    let delivery_first_failure=if trusted {stage.delivery_first_failure.map(|d|{
+        let (boundary,outcome)=d.labels();FailureDeliveryV2{boundary,outcome}
+    })} else {None};
+    FailureStageV2 {
+        failure_reason:harness_reason_v2(stage.failure_reason),next:stage.next,expected:stage.expected,
+        expected_process:expected,
+        group_signal:match stage.process.group_signal {S::SentWhileLeaderOwned=>"SentWhileLeaderOwned",S::AlreadyAbsentWhileLeaderOwned=>"AlreadyAbsentWhileLeaderOwned",S::Unverified=>"Unverified"},
+        group_absence:match stage.process.group_absence {A::OriginalGroupAbsentObserved=>"OriginalGroupAbsentObserved",A::Unverified=>"Unverified"},
+        direct_child:match stage.process.direct_child {C::Reaped=>"Reaped",C::Unverified=>"Unverified"},
+        status_kind,status_value,diagnostic_state,private_fixed_primary:primary,delivery_first_failure,
+    }
+}
+impl FailureTrackerV2 {
+    fn new(case:FailureCaseV2)->Self {Self{case,current:FailureSiteV2::CorePolicy,
+        reason:FailureReasonV2::IoError,first:None,cleanup:FailureCleanupV2::NotStarted}}
+    fn enter(&mut self,site:FailureSiteV2,reason:FailureReasonV2){self.current=site;self.reason=reason;}
+    fn record(&mut self,site:FailureSiteV2,reason:FailureReasonV2,error:&io::Error,stage:Option<FailureStageV2>){
+        if self.first.is_none(){self.first=Some(FailureRecordV2{schema:1,case:self.case,callsite:site,
+            reason,io_kind:failure_io_kind_v2(error),stage,cleanup:self.cleanup});}
+    }
+    fn observe<T>(&mut self,site:FailureSiteV2,result:io::Result<T>)->io::Result<T>{
+        if let Err(error)=&result{self.record(site,FailureReasonV2::IoError,error,None);}result
+    }
+    fn stage_call(&mut self,site:FailureSiteV2,result:io::Result<PrivateWorkspaceStageResultV1>)->io::Result<PrivateWorkspaceStageResultV1>{
+        if let Err(error)=&result{self.record(site,FailureReasonV2::StageCallError,error,None);}result
+    }
+    fn capture<T>(&mut self,result:&io::Result<T>){
+        if let Err(error)=result{self.record(self.current,self.reason,error,None);}
+    }
+    fn check_stage(&mut self,site:FailureSiteV2,stage:&PrivateWorkspaceStageResultV1,
+        expected:ExpectedProcessV2,expired:impl FnOnce()->bool)->io::Result<()> {
+        // Exactly the old predicate order. In particular the existing reader
+        // clock is called only after outcome/cleanup/status checks succeeded.
+        let reason=if stage.outcome.is_err(){Some(FailureReasonV2::StageOutcomeError)}
+        else if !stage.process.verified(){Some(FailureReasonV2::ProcessCleanupUnverified)}
+        else if match expected {
+            ExpectedProcessV2::Sigkill=>stage.process.group_signal!=owned_test_process_group_v1::GroupSignalV1::SentWhileLeaderOwned
+                || !stage.process.status.as_ref().is_some_and(|s|s.signal()==Some(libc::SIGKILL)),
+            ExpectedProcessV2::Success=>!stage.process.status.as_ref().is_some_and(|s|s.success()),
+        } {Some(FailureReasonV2::ExpectedProcessStatus)}
+        else if expired(){Some(FailureReasonV2::StageDeadline)}else{None};
+        if let Some(reason)=reason{
+            let error=invalid();
+            // Preserve the returned controller error KIND without exposing its
+            // message; the outer Result remains the same original invalid().
+            let cause=stage.outcome.as_ref().err().unwrap_or(&error);
+            self.record(site,reason,cause,Some(failure_stage_v2(stage,expected)));Err(error)
+        }else{Ok(())}
+    }
+    fn closed(&mut self,outcome:TemporaryRootCleanupV1){
+        self.cleanup=match outcome {
+            TemporaryRootCleanupV1::ClosedAndAbsenceVerified=>FailureCleanupV2::ClosedAbsent,
+            TemporaryRootCleanupV1::RetainedForUnverifiedProcess=>FailureCleanupV2::RootUnavailable,
+            TemporaryRootCleanupV1::CloseOrAbsenceUnverified=>FailureCleanupV2::CloseUnverified,
+        };
+        if let Some(first)=self.first.as_mut(){first.cleanup=self.cleanup;}
+    }
+    fn emit(&self,output:&mut impl io::Write){
+        if let Some(first)=&self.first {
+            if let Ok(json)=serde_json::to_string(first){
+                let _=writeln!(output,"CI_SYNTHETIC_DURABLE_FAILURE_V2 {json}");
+            }
+        }
+    }
+}
+fn failure_boundary_v2<T>(case:FailureCaseV2,output:&mut impl io::Write,
+    operation:impl FnOnce(&mut FailureTrackerV2)->io::Result<T>)->io::Result<T>{
+    let mut report=FailureTrackerV2::new(case);let result=operation(&mut report);
+    report.capture(&result);if result.is_err(){report.emit(output);}result
+}
+
 #[derive(Serialize)]
 struct PublicV2 {
     profile:&'static str,producer_killed_reaped_group_absent:bool,
@@ -930,11 +1085,16 @@ fn original_two_owner_durable_results_resume_unfinished_counterpart_v2(){
     run_process_lifecycle_v2().expect("exact first result survives actual writer expiry and producer death before genuine counterpart completion; no network submission");
 }
 fn run_process_lifecycle_v2()->io::Result<()> {
-    process_containment_v1::require_and_report_core_policy()?;
-    owned_test_process_group_v1::require_default_child_wait_policy()?;
+    failure_boundary_v2(FailureCaseV2::DurableResume, &mut io::stdout(), run_process_lifecycle_v2_observed)
+}
+fn run_process_lifecycle_v2_observed(report:&mut FailureTrackerV2)->io::Result<()> {
+    report.observe(FailureSiteV2::CorePolicy,process_containment_v1::require_and_report_core_policy())?;
+    report.observe(FailureSiteV2::ChildWaitPolicy,owned_test_process_group_v1::require_default_child_wait_policy())?;
     let deadline=Instant::now()+LIMIT;
-    let cutoff=monotonic_now_ns()?.checked_add(deadline.saturating_duration_since(Instant::now()).as_nanos().try_into().map_err(|_|invalid())?).ok_or_else(invalid)?;
-    let mut root=Some(tempfile::Builder::new().prefix(CHILD_TEMPORARY_PREFIX).permissions(std::fs::Permissions::from_mode(0o700)).tempdir()?);
+    let cutoff=report.observe(FailureSiteV2::Cutoff,(||{
+        monotonic_now_ns()?.checked_add(deadline.saturating_duration_since(Instant::now()).as_nanos().try_into().map_err(|_|invalid())?).ok_or_else(invalid)
+    })())?;
+    let mut root=Some(report.observe(FailureSiteV2::TemporaryRoot,tempfile::Builder::new().prefix(CHILD_TEMPORARY_PREFIX).permissions(std::fs::Permissions::from_mode(0o700)).tempdir())?);
     let mut public=PublicV2{profile:"durable-result-lifecycle-v2",producer_killed_reaped_group_absent:false,
         signer_result_preintake_checkpoint_verified:false,intake_ack_child_killed_reaped_group_absent:false,
         observed_original_writer_expiry:false,first_result_outbox_unchanged:false,first_exposure_unchanged:false,
@@ -942,43 +1102,43 @@ fn run_process_lifecycle_v2()->io::Result<()> {
         local_read_return_intake_finish_verified:false,reader_reaped_group_absent:false,
         six_scoped_protocol_refusals_verified:false,economic_proposal_verifier_succeeded:false,cleanup_verified:false,native_runtime_executed:false,live_funds:false};
     let workflow=(||->io::Result<()>{
-        let tls=synthetic_provider_tls_v1::ChildTlsMaterialV1::prepare(root.as_ref().unwrap().path())?;
-        let mut producer=private_workspace_stage_v1(root.take().unwrap(),Some(&tls),PrivateWorkspaceStageV1::DurableResultProducer,&producer_inputs_v2(),deadline,cutoff)?;
+        let tls=report.observe(FailureSiteV2::TlsPrepare,synthetic_provider_tls_v1::ChildTlsMaterialV1::prepare(root.as_ref().unwrap().path()))?;
+        let mut producer=report.stage_call(FailureSiteV2::A0Producer,private_workspace_stage_v1(root.take().unwrap(),Some(&tls),PrivateWorkspaceStageV1::DurableResultProducer,&producer_inputs_v2(),deadline,cutoff))?;
         root=producer.root.take();
-        if producer.outcome.is_err() || !producer.process.verified()
-            || producer.process.group_signal!=owned_test_process_group_v1::GroupSignalV1::SentWhileLeaderOwned
-            || !producer.process.status.as_ref().is_some_and(|s|s.signal()==Some(libc::SIGKILL)) {return Err(invalid());}
+        report.check_stage(FailureSiteV2::A0Producer,&producer,ExpectedProcessV2::Sigkill,||false)?;
         public.producer_killed_reaped_group_absent=true;
         public.native_runtime_executed=true;
+        report.enter(FailureSiteV2::A0ReadyRead,FailureReasonV2::IoError);
         let ready:PartialReadyV2=read_record(root.as_ref().ok_or_else(invalid)?.path(),READY)?;
+        report.enter(FailureSiteV2::A0ReadyValidate,FailureReasonV2::Verification);
         ready.validate(root.as_ref().unwrap().path())?;
         public.counterpart_unsigned_at_death=true; // actual producer+pristine source audit, not a count
         public.signer_result_preintake_checkpoint_verified=true;
         // Same genuine originals, now commit the first Host intake but lose its
         // Finish ACK through actual supervised process death. No Sign is called.
-        let mut intake=private_workspace_stage_v1(root.take().unwrap(),Some(&tls),PrivateWorkspaceStageV1::DurableResultIntake,&intake_inputs_v2(),deadline,cutoff)?;
+        let mut intake=report.stage_call(FailureSiteV2::A1Intake,private_workspace_stage_v1(root.take().unwrap(),Some(&tls),PrivateWorkspaceStageV1::DurableResultIntake,&intake_inputs_v2(),deadline,cutoff))?;
         root=intake.root.take();
-        if intake.outcome.is_err() || !intake.process.verified()
-            || intake.process.group_signal!=owned_test_process_group_v1::GroupSignalV1::SentWhileLeaderOwned
-            || !intake.process.status.as_ref().is_some_and(|s|s.signal()==Some(libc::SIGKILL))
-        {return Err(invalid());}
+        report.check_stage(FailureSiteV2::A1Intake,&intake,ExpectedProcessV2::Sigkill,||false)?;
         public.intake_ack_child_killed_reaped_group_absent=true;
         // The only deliberate human-delay simulation is AFTER authenticated
         // writer expiry was captured and the original group was killed/reaped.
+        report.enter(FailureSiteV2::WriterExpiryWait,FailureReasonV2::IoError);
         loop {
             if Instant::now()>=deadline{return Err(invalid());}
             let now=now_ms().map_err(|_|invalid())?;
             if now>ready.first.original_writer_expiry_ms{break;}
             std::thread::sleep(Duration::from_millis((ready.first.original_writer_expiry_ms-now+1).min(100)));
         }
-        let mut reader=private_workspace_stage_v1(root.take().unwrap(),Some(&tls),PrivateWorkspaceStageV1::DurableResultReader,&reader_inputs_v2(),deadline,cutoff)?;
+        let mut reader=report.stage_call(FailureSiteV2::A2Reader,private_workspace_stage_v1(root.take().unwrap(),Some(&tls),PrivateWorkspaceStageV1::DurableResultReader,&reader_inputs_v2(),deadline,cutoff))?;
         root=reader.root.take();
-        if reader.outcome.is_err() || !reader.process.verified()
-            || !reader.process.status.as_ref().is_some_and(|s|s.success()) || Instant::now()>=deadline{return Err(invalid());}
+        report.check_stage(FailureSiteV2::A2Reader,&reader,ExpectedProcessV2::Success,||Instant::now()>=deadline)?;
         public.reader_reaped_group_absent=true;
+        report.enter(FailureSiteV2::A2ReadyRead,FailureReasonV2::IoError);
         let path=root.as_ref().ok_or_else(invalid)?.path();
         let after:PartialReadyV2=read_record(path,READY)?;
+        report.enter(FailureSiteV2::A2CompletionRead,FailureReasonV2::IoError);
         let finished:CompletionV2=read_record(path,FINISHED)?;
+        report.enter(FailureSiteV2::A2FinalVerify,FailureReasonV2::Verification);
         if digest(&ready).map_err(|_|invalid())?!=digest(&after).map_err(|_|invalid())?
             || finished.version!=2 || finished.original_ready_digest!=digest(&ready).map_err(|_|invalid())?
             || finished.first_result_digest!=ready.first.result.result_digest || finished.first_outbox_digest!=ready.first.result.outbox_digest
@@ -994,9 +1154,14 @@ fn run_process_lifecycle_v2()->io::Result<()> {
         public.six_scoped_protocol_refusals_verified=true;public.economic_proposal_verifier_succeeded=true;
         drop(tls);Ok(())
     })();
-    if let Some(root)=root.take(){public.cleanup_verified=matches!(close_owned_temporary_root(root),TemporaryRootCleanupV1::ClosedAndAbsenceVerified);}
+    report.capture(&workflow);
+    if let Some(root)=root.take(){let closed=close_owned_temporary_root(root);public.cleanup_verified=matches!(closed,TemporaryRootCleanupV1::ClosedAndAbsenceVerified);report.closed(closed);}
+    else {report.closed(TemporaryRootCleanupV1::RetainedForUnverifiedProcess);}
+    report.enter(FailureSiteV2::PublicReceipt,FailureReasonV2::IoError);
     println!("CI_SYNTHETIC_DURABLE_RESULT_V2 {}",serde_json::to_string(&public).map_err(|_|invalid())?);
-    workflow?;if !public.cleanup_verified{return Err(invalid());}Ok(())
+    workflow?;
+    report.enter(FailureSiteV2::TemporaryCleanup,FailureReasonV2::CleanupUnverified);
+    if !public.cleanup_verified{return Err(invalid());}Ok(())
 }
 
 // The unrelated peer owns no source, review, credential or private payload.
@@ -1165,41 +1330,225 @@ fn original_financial_started_without_result_remains_uncertain_after_process_dea
     run_started_process_lifecycle_v2().expect("genuine Started commit survives actual death as uncertainty with no result/outbox or repeat signing");
 }
 fn run_started_process_lifecycle_v2()->io::Result<()> {
-    process_containment_v1::require_and_report_core_policy()?;
-    owned_test_process_group_v1::require_default_child_wait_policy()?;
+    failure_boundary_v2(FailureCaseV2::DurableStarted, &mut io::stdout(), run_started_process_lifecycle_v2_observed)
+}
+fn run_started_process_lifecycle_v2_observed(report:&mut FailureTrackerV2)->io::Result<()> {
+    report.observe(FailureSiteV2::CorePolicy,process_containment_v1::require_and_report_core_policy())?;
+    report.observe(FailureSiteV2::ChildWaitPolicy,owned_test_process_group_v1::require_default_child_wait_policy())?;
     let deadline=Instant::now()+LIMIT;
-    let cutoff=monotonic_now_ns()?.checked_add(deadline.saturating_duration_since(Instant::now()).as_nanos().try_into().map_err(|_|invalid())?).ok_or_else(invalid)?;
-    let mut root=Some(tempfile::Builder::new().prefix(CHILD_TEMPORARY_PREFIX).permissions(std::fs::Permissions::from_mode(0o700)).tempdir()?);
+    let cutoff=report.observe(FailureSiteV2::Cutoff,(||{
+        monotonic_now_ns()?.checked_add(deadline.saturating_duration_since(Instant::now()).as_nanos().try_into().map_err(|_|invalid())?).ok_or_else(invalid)
+    })())?;
+    let mut root=Some(report.observe(FailureSiteV2::TemporaryRoot,tempfile::Builder::new().prefix(CHILD_TEMPORARY_PREFIX).permissions(std::fs::Permissions::from_mode(0o700)).tempdir())?);
     let mut died=false;let mut audited=false;let mut reader_reaped=false;let mut cleanup=false;
     let workflow=(||->io::Result<()>{
-        let tls=synthetic_provider_tls_v1::ChildTlsMaterialV1::prepare(root.as_ref().unwrap().path())?;
-        let mut producer=private_workspace_stage_v1(root.take().unwrap(),Some(&tls),PrivateWorkspaceStageV1::DurableResultStartedProducer,&started_producer_inputs_v2(),deadline,cutoff)?;
+        let tls=report.observe(FailureSiteV2::TlsPrepare,synthetic_provider_tls_v1::ChildTlsMaterialV1::prepare(root.as_ref().unwrap().path()))?;
+        let mut producer=report.stage_call(FailureSiteV2::BProducer,private_workspace_stage_v1(root.take().unwrap(),Some(&tls),PrivateWorkspaceStageV1::DurableResultStartedProducer,&started_producer_inputs_v2(),deadline,cutoff))?;
         root=producer.root.take();
-        if producer.outcome.is_err() || !producer.process.verified()
-            || producer.process.group_signal!=owned_test_process_group_v1::GroupSignalV1::SentWhileLeaderOwned
-            || !producer.process.status.as_ref().is_some_and(|s|s.signal()==Some(libc::SIGKILL)) {return Err(invalid());}
+        report.check_stage(FailureSiteV2::BProducer,&producer,ExpectedProcessV2::Sigkill,||false)?;
         died=true;
+        report.enter(FailureSiteV2::BReadyRead,FailureReasonV2::IoError);
         let ready:StartedReadyV2=read_record(root.as_ref().ok_or_else(invalid)?.path(),STARTED_READY)?;
+        report.enter(FailureSiteV2::BReadyValidate,FailureReasonV2::Verification);
         ready.validate(root.as_ref().unwrap().path())?;
-        let mut reader=private_workspace_stage_v1(root.take().unwrap(),None,PrivateWorkspaceStageV1::DurableResultStartedReader,&[],deadline,cutoff)?;
+        let mut reader=report.stage_call(FailureSiteV2::BReader,private_workspace_stage_v1(root.take().unwrap(),None,PrivateWorkspaceStageV1::DurableResultStartedReader,&[],deadline,cutoff))?;
         root=reader.root.take();
-        if reader.outcome.is_err() || !reader.process.verified()
-            || !reader.process.status.as_ref().is_some_and(|s|s.success()) || Instant::now()>=deadline{return Err(invalid());}
+        report.check_stage(FailureSiteV2::BReader,&reader,ExpectedProcessV2::Success,||Instant::now()>=deadline)?;
         reader_reaped=true;
+        report.enter(FailureSiteV2::BReadyReread,FailureReasonV2::IoError);
         let path=root.as_ref().ok_or_else(invalid)?.path();
         let after:StartedReadyV2=read_record(path,STARTED_READY)?;
+        report.enter(FailureSiteV2::BCompletionRead,FailureReasonV2::IoError);
         let finished:StartedCompletionV2=read_record(path,STARTED_FINISHED)?;
+        report.enter(FailureSiteV2::BFinalVerify,FailureReasonV2::Verification);
         if finished.version!=2 || digest(&ready).map_err(|_|invalid())?!=digest(&after).map_err(|_|invalid())?
             || finished.original_ready_digest!=digest(&ready).map_err(|_|invalid())? {return Err(invalid());}
         finished.audit.validate(&ready).map_err(|_|invalid())?;audited=true;
         drop(tls);Ok(())
     })();
-    if let Some(root)=root.take(){cleanup=matches!(close_owned_temporary_root(root),TemporaryRootCleanupV1::ClosedAndAbsenceVerified);}
+    report.capture(&workflow);
+    if let Some(root)=root.take(){let closed=close_owned_temporary_root(root);cleanup=matches!(closed,TemporaryRootCleanupV1::ClosedAndAbsenceVerified);report.closed(closed);}
+    else {report.closed(TemporaryRootCleanupV1::RetainedForUnverifiedProcess);}
+    report.enter(FailureSiteV2::PublicReceipt,FailureReasonV2::IoError);
     println!("CI_SYNTHETIC_DURABLE_STARTED_V2 {}",serde_json::json!({
         "profile":"durable-result-started-uncertainty-v2","producer_killed_reaped_group_absent":died,
         "actual_native_reopen_source_kernel_uncertain":audited,"started_one_result_zero_outbox_zero_unchanged":audited,
         "exposure_outstanding_uncertain":audited,"reader_reaped_group_absent":reader_reaped,
         "cleanup_verified":cleanup,"native_runtime_executed":died,"live_funds":false,
         "not_full_v2_result_opener_or_return_success":true}));
-    workflow?;if !cleanup{return Err(invalid());}Ok(())
+    workflow?;
+    report.enter(FailureSiteV2::TemporaryCleanup,FailureReasonV2::CleanupUnverified);
+    if !cleanup{return Err(invalid());}Ok(())
+}
+
+// Pure tests of the exact failure-only wrappers used above. Returned-stage
+// values here are inert controller observations, not native/source authority.
+#[derive(Debug)]
+struct FailureIdentitySentinelV2;
+impl std::fmt::Display for FailureIdentitySentinelV2 {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("PRIVATE_TEST_ERROR_DO_NOT_FORWARD")}
+}
+impl std::error::Error for FailureIdentitySentinelV2 {}
+fn failure_test_record_v2(bytes:&[u8])->serde_json::Value {
+    let text=std::str::from_utf8(bytes).unwrap();assert_eq!(text.lines().count(),1);assert!(bytes.len()<4096);
+    assert!(!text.contains("PRIVATE_TEST_ERROR_DO_NOT_FORWARD"));
+    assert!(!text.contains("PRIVATE_TEST_TRANSCRIPT_DO_NOT_FORWARD"));
+    serde_json::from_str(text.strip_prefix("CI_SYNTHETIC_DURABLE_FAILURE_V2 ").unwrap().trim_end()).unwrap()
+}
+fn failure_test_stage_v2(expected:usize,status:std::process::ExitStatus)->PrivateWorkspaceStageResultV1 {
+    use owned_test_process_group_v1::{GroupSignalV1,GroupAbsenceV1,DirectChildV1,ProcessCleanupV1};
+    PrivateWorkspaceStageResultV1 {
+        coordinated_post_input_phase:None,child_pid:1,pristine_first_failure:None,
+        financial_progress_failure:None,financial_progress_timing:None,financial_diagnostic:None,
+        delivery_first_failure:None,private_fixed_diagnostic:None,diagnostic_withheld:false,
+        outcome:Ok(()),process:ProcessCleanupV1{group_signal:GroupSignalV1::SentWhileLeaderOwned,
+            group_absence:GroupAbsenceV1::OriginalGroupAbsentObserved,direct_child:DirectChildV1::Reaped,status:Some(status)},
+        root:None,summary:"PRIVATE_TEST_TRANSCRIPT_DO_NOT_FORWARD".into(),
+        failure_reason:HarnessFailureReason::Unclassified,next:expected,expected,
+    }
+}
+#[test]
+fn durable_failure_v2_preserves_setup_and_tls_errors_without_private_text(){
+    use FailureSiteV2 as S;
+    for case in [FailureCaseV2::DurableResume,FailureCaseV2::DurableStarted] {
+        for site in [S::CorePolicy,S::ChildWaitPolicy,S::Cutoff,S::TemporaryRoot,S::TlsPrepare] {
+            for (kind,label) in [(io::ErrorKind::PermissionDenied,"permission_denied"),(io::ErrorKind::TimedOut,"timed_out"),
+                (io::ErrorKind::InvalidData,"invalid_data"),(io::ErrorKind::NotFound,"not_found"),
+                (io::ErrorKind::ConnectionReset,"connection"),(io::ErrorKind::InvalidInput,"invalid_input"),
+                (io::ErrorKind::Interrupted,"interrupted"),(io::ErrorKind::UnexpectedEof,"unexpected_eof"),
+                (io::ErrorKind::WouldBlock,"would_block"),(io::ErrorKind::Other,"other")] {
+                let error=io::Error::new(kind,FailureIdentitySentinelV2);
+                let identity=error.get_ref().unwrap() as *const _ as *const ();
+                let mut bytes=Vec::new();let returned=failure_boundary_v2(case,&mut bytes,|r|r.observe::<()>(site,Err(error))).unwrap_err();
+                assert_eq!(returned.kind(),kind);assert_eq!(returned.get_ref().unwrap() as *const _ as *const (),identity);
+                let record=failure_test_record_v2(&bytes);assert_eq!(record["io_kind"],label);
+                assert_eq!(record["callsite"],serde_json::to_value(site).unwrap());
+                assert_eq!(record["reason"],"io_error");assert_eq!(record["cleanup"],"not_started");assert!(record["stage"].is_null());
+            }
+        }
+        let mut bytes=Vec::new();assert_eq!(failure_boundary_v2(case,&mut bytes,|r|r.observe(S::TlsPrepare,Ok(37))).unwrap(),37);assert!(bytes.is_empty());
+    }
+    struct FailedOutput;
+    impl io::Write for FailedOutput {
+        fn write(&mut self,_:&[u8])->io::Result<usize>{Err(io::Error::from_raw_os_error(libc::EPIPE))}
+        fn flush(&mut self)->io::Result<()>{Ok(())}
+    }
+    let returned=failure_boundary_v2(FailureCaseV2::DurableResume,&mut FailedOutput,|r|r.observe::<()>(S::TlsPrepare,Err(io::Error::from_raw_os_error(libc::EPERM)))).unwrap_err();
+    assert_eq!(returned.raw_os_error(),Some(libc::EPERM));
+}
+#[test]
+fn durable_failure_v2_projects_each_returned_stage_rejection_and_healthy_status(){
+    use std::os::unix::process::ExitStatusExt;
+    use owned_test_process_group_v1::{GroupSignalV1 as G,GroupAbsenceV1 as A,DirectChildV1 as C};
+    // Exact source plans, not a permissive generic counter bound.
+    assert_eq!(producer_inputs_v2().len(),127);
+    assert_eq!(intake_inputs_v2().len(),23);
+    assert_eq!(reader_inputs_v2().len(),147);
+    assert_eq!(started_producer_inputs_v2().len(),118);
+    let cases=[(FailureCaseV2::DurableResume,FailureSiteV2::A0Producer,ExpectedProcessV2::Sigkill,127),
+        (FailureCaseV2::DurableResume,FailureSiteV2::A1Intake,ExpectedProcessV2::Sigkill,23),
+        (FailureCaseV2::DurableResume,FailureSiteV2::A2Reader,ExpectedProcessV2::Success,147),
+        (FailureCaseV2::DurableStarted,FailureSiteV2::BProducer,ExpectedProcessV2::Sigkill,118),
+        (FailureCaseV2::DurableStarted,FailureSiteV2::BReader,ExpectedProcessV2::Success,0)];
+    for (case,site,expected,count) in cases {
+        let good_raw=if expected==ExpectedProcessV2::Sigkill{libc::SIGKILL}else{0};
+        let mut bytes=Vec::new();let error=io::Error::new(io::ErrorKind::PermissionDenied,FailureIdentitySentinelV2);
+        let identity=error.get_ref().unwrap() as *const _ as *const ();
+        let result=failure_boundary_v2(case,&mut bytes,|r|r.stage_call(site,Err(error)).map(|_|()));
+        let returned=result.unwrap_err();assert_eq!(returned.kind(),io::ErrorKind::PermissionDenied);
+        assert_eq!(returned.get_ref().unwrap() as *const _ as *const (),identity);let wire=failure_test_record_v2(&bytes);
+        assert_eq!(wire["reason"],"stage_call_error");assert!(wire["stage"].is_null());
+        for mode in 0..9 {
+            // Only actual reader callsites evaluate the original cutoff.
+            if mode==8 && expected==ExpectedProcessV2::Sigkill{continue;}
+            let mut stage=failure_test_stage_v2(count,std::process::ExitStatus::from_raw(good_raw));
+            let reason=match mode {
+                0=>{stage.outcome=Err(io::Error::new(io::ErrorKind::TimedOut,FailureIdentitySentinelV2));stage.failure_reason=HarnessFailureReason::ChildExit;"stage_outcome_error"},
+                1=>{stage.process.group_signal=G::Unverified;"process_cleanup_unverified"},
+                2=>{stage.process.group_absence=A::Unverified;"process_cleanup_unverified"},
+                3=>{stage.process.direct_child=C::Unverified;"process_cleanup_unverified"},
+                4=>{stage.process.status=None;"process_cleanup_unverified"},
+                5=>{stage.process.status=Some(std::process::ExitStatus::from_raw(1<<8));"expected_process_status"},
+                6=>{stage.process.status=Some(std::process::ExitStatus::from_raw(libc::SIGTERM));"expected_process_status"},
+                7=>{stage.process.status=Some(std::process::ExitStatus::from_raw(0x7f));"expected_process_status"},
+                _=>"stage_deadline",
+            };
+            let observed=std::cell::Cell::new(0);let mut bytes=Vec::new();
+            let result=failure_boundary_v2(case,&mut bytes,|r|r.check_stage(site,&stage,expected,||{observed.set(observed.get()+1);true}));
+            assert!(result.is_err());assert_eq!(observed.get(),usize::from(mode==8));
+            let wire=failure_test_record_v2(&bytes);assert_eq!(wire["reason"],reason);
+            assert_eq!(wire["stage"]["expected"],count);assert_eq!(wire["stage"]["next"],count);
+            assert_eq!(wire["stage"]["expected_process"],serde_json::to_value(expected).unwrap());
+            if mode==0{assert_eq!(wire["io_kind"],"timed_out");assert_eq!(wire["stage"]["failure_reason"],"ChildExit");}
+        }
+        let mut stage=failure_test_stage_v2(count,std::process::ExitStatus::from_raw(good_raw));
+        stage.process.group_signal=G::AlreadyAbsentWhileLeaderOwned;
+        let mut bytes=Vec::new();let result=failure_boundary_v2(case,&mut bytes,|r|r.check_stage(site,&stage,expected,||false));
+        if expected==ExpectedProcessV2::Sigkill{assert!(result.is_err());assert_eq!(failure_test_record_v2(&bytes)["reason"],"expected_process_status");}
+        else{assert!(result.is_ok());assert!(bytes.is_empty());}
+        stage.process.group_signal=G::SentWhileLeaderOwned;let mut bytes=Vec::new();
+        assert!(failure_boundary_v2(case,&mut bytes,|r|r.check_stage(site,&stage,expected,||false)).is_ok());assert!(bytes.is_empty());
+    }
+}
+#[test]
+fn durable_failure_v2_preserves_first_failure_through_all_cleanup_modes(){
+    for cleanup in [None,Some(TemporaryRootCleanupV1::ClosedAndAbsenceVerified),Some(TemporaryRootCleanupV1::RetainedForUnverifiedProcess),Some(TemporaryRootCleanupV1::CloseOrAbsenceUnverified)] {
+        let mut bytes=Vec::new();let original=io::Error::new(io::ErrorKind::TimedOut,FailureIdentitySentinelV2);
+        let identity=original.get_ref().unwrap() as *const _ as *const ();
+        let returned=failure_boundary_v2(FailureCaseV2::DurableResume,&mut bytes,|r|{
+            let workflow=r.observe::<()>(FailureSiteV2::TlsPrepare,Err(original));r.capture(&workflow);
+            if let Some(cleanup)=cleanup{r.closed(cleanup);}
+            let _=r.observe::<()>(FailureSiteV2::PublicReceipt,Err(io::Error::from_raw_os_error(libc::EIO)));
+            workflow
+        }).unwrap_err();
+        assert_eq!(returned.get_ref().unwrap() as *const _ as *const (),identity);
+        let wire=failure_test_record_v2(&bytes);assert_eq!(wire["callsite"],"tls_prepare");assert_eq!(wire["io_kind"],"timed_out");
+        assert_eq!(wire["cleanup"],match cleanup {None=>"not_started",Some(TemporaryRootCleanupV1::ClosedAndAbsenceVerified)=>"closed_absent",Some(TemporaryRootCleanupV1::RetainedForUnverifiedProcess)=>"root_unavailable",Some(TemporaryRootCleanupV1::CloseOrAbsenceUnverified)=>"close_unverified"});
+    }
+    for closed in [TemporaryRootCleanupV1::RetainedForUnverifiedProcess,TemporaryRootCleanupV1::CloseOrAbsenceUnverified] {
+        let mut bytes=Vec::new();let result=failure_boundary_v2(FailureCaseV2::DurableStarted,&mut bytes,|r|{
+            let workflow=Ok(());r.capture(&workflow);r.closed(closed);workflow?;
+            r.enter(FailureSiteV2::TemporaryCleanup,FailureReasonV2::CleanupUnverified);Err::<(),_>(invalid())
+        });assert!(result.is_err());let wire=failure_test_record_v2(&bytes);
+        assert_eq!(wire["callsite"],"temporary_cleanup");assert_eq!(wire["reason"],"cleanup_unverified");
+    }
+    let mut bytes=Vec::new();assert!(failure_boundary_v2(FailureCaseV2::DurableResume,&mut bytes,|r|{r.closed(TemporaryRootCleanupV1::ClosedAndAbsenceVerified);Ok(())}).is_ok());assert!(bytes.is_empty());
+}
+#[test]
+fn durable_failure_v2_covers_all_final_boundaries_and_diagnostic_states(){
+    use FailureSiteV2 as S;
+    use crate::host::financial::private_durable_fixed_v2 as D;
+    use std::os::unix::process::ExitStatusExt;
+    for (case,sites) in [(FailureCaseV2::DurableResume,&[S::A0ReadyRead,S::A0ReadyValidate,S::WriterExpiryWait,S::A2ReadyRead,S::A2CompletionRead,S::A2FinalVerify,S::PublicReceipt][..]),
+        (FailureCaseV2::DurableStarted,&[S::BReadyRead,S::BReadyValidate,S::BReadyReread,S::BCompletionRead,S::BFinalVerify,S::PublicReceipt][..])] {
+        for &site in sites {
+            let mut bytes=Vec::new();let returned=failure_boundary_v2(case,&mut bytes,|r|{
+                r.enter(site,FailureReasonV2::Verification);let workflow=Err::<(),_>(io::Error::from_raw_os_error(libc::EINVAL));
+                r.capture(&workflow);r.closed(TemporaryRootCleanupV1::ClosedAndAbsenceVerified);workflow
+            }).unwrap_err();assert_eq!(returned.raw_os_error(),Some(libc::EINVAL));
+            let wire=failure_test_record_v2(&bytes);assert_eq!(wire["callsite"],serde_json::to_value(site).unwrap());assert!(wire["stage"].is_null());
+        }
+    }
+    let diagnostic=D::PrivateFixedDiagnosticV1{schema:1,primary:D::PrivateDiagnosticPrimaryV1{
+        operation:D::PrivateDiagnosticOperationV1::Checkpoint,site:D::PrivateDiagnosticSiteV1::WorkspaceLoad,
+        engine_code:D::PrivateDiagnosticEngineCodeV1::NotApplicable,family:D::PrivateDiagnosticFamilyV1::Host,cause:D::PrivateDiagnosticCauseV1::Invalid,
+    },evidence:None,worker:None,stage:None};assert!(diagnostic.canonical_json().is_some());
+    let mut delivery=safe_diagnostics_v1::DeliveryFailureCapture::default();
+    delivery.capture_complete_line(b"[JOINED_DIAGNOSTIC DeliveryAdmissionRetainedBinding HostInvalid]",4096);assert!(delivery.value().is_some());
+    for mode in 0..5 {
+        let mut stage=failure_test_stage_v2(127,std::process::ExitStatus::from_raw(libc::SIGKILL));
+        stage.outcome=Err(invalid());stage.delivery_first_failure=delivery.value();
+        let expected=match mode {
+            0=>"unavailable",
+            1=>{stage.private_fixed_diagnostic=Some(diagnostic.clone());"validated"},
+            2=>{stage.private_fixed_diagnostic=Some(diagnostic.clone());stage.diagnostic_withheld=true;"withheld"},
+            3=>{let mut bad=diagnostic.clone();bad.schema=2;stage.private_fixed_diagnostic=Some(bad);"withheld"},
+            _=>{stage.private_fixed_diagnostic=Some(diagnostic.clone());stage.process.group_absence=owned_test_process_group_v1::GroupAbsenceV1::Unverified;"withheld"},
+        };
+        let mut bytes=Vec::new();assert!(failure_boundary_v2(FailureCaseV2::DurableResume,&mut bytes,|r|r.check_stage(S::A0Producer,&stage,ExpectedProcessV2::Sigkill,||panic!("must short circuit"))).is_err());
+        let wire=failure_test_record_v2(&bytes);assert_eq!(wire["stage"]["diagnostic_state"],expected);
+        assert_eq!(wire["stage"]["private_fixed_primary"].is_null(),expected!="validated");
+        if expected=="validated"{assert_eq!(wire["stage"]["private_fixed_primary"],serde_json::to_value(&diagnostic.primary).unwrap());}
+        assert_eq!(wire["stage"]["delivery_first_failure"].is_null(),mode==4);
+    }
 }

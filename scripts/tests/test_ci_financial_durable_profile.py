@@ -5,6 +5,8 @@ These are codec and source-recipe assertions, not native authority, process-deat
 cleanup, or financial-success evidence. Legacy oracle hashes predate this profile.
 """
 import copy
+import ast
+import io
 import contextlib
 import hashlib
 import importlib.util
@@ -13,7 +15,7 @@ import pathlib
 import re
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 def load(name):
@@ -41,6 +43,18 @@ SAFE = tuple(PREFIX + tail for tail in (
     'host::financial::private_financial_v2::qualification_fault_v2::tests::intake_ack_fault_latch_is_one_shot_exact_and_rejects_elapsed_arm',
     'host::financial::durable_financial_commands_v2::tests::exact_two_owner_command_keys_are_disjoint_and_profile_specific',
     'host::financial::durable_financial_commands_v2::tests::versioned_command_selector_rejects_unknown_fields')
+NEW_LEAF_SAFE = tuple(PREFIX + tail for tail in (
+    'durable_failure_v2_preserves_setup_and_tls_errors_without_private_text',
+    'durable_failure_v2_projects_each_returned_stage_rejection_and_healthy_status',
+    'durable_failure_v2_preserves_first_failure_through_all_cleanup_modes',
+    'durable_failure_v2_covers_all_final_boundaries_and_diagnostic_states'))
+NEW_COLLECTOR_SAFE = tuple('host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::rolling_transcript_v1::delivery_first_failure_tests::' + tail for tail in (
+    'delivery_first_failure_survives_more_than_64_later_diagnostics',
+    'delivery_first_failure_requires_complete_exact_finite_marker',
+    'delivery_first_failure_is_opt_in_and_isolated_per_child',
+    'delivery_first_failure_insufficient_capture_budget_is_sticky'))
+LEGACY_SAFE = SAFE
+SAFE = SAFE + NEW_LEAF_SAFE + NEW_COLLECTOR_SAFE
 SUMMARY = b'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.01s'
 LEGACY_GOLDEN = {
     'coordinated-financial-external-pre-v3-witness-v1': '31bdd6c62252ef49e14b301be720406f17b5099bf0966a37ce20afb86dc71ac7',
@@ -64,16 +78,22 @@ class DurableRecipeTests(unittest.TestCase):
     def test_safe_selectors_have_exact_owning_source_declarations(self):
         leaves = [(SAFE[:4], 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/durable_proposal_v1/durable_result_lifecycle_v2.rs'),
                   (SAFE[4:5], 'crates/wholepact-native-host/src/host/financial/private_financial_v2/qualification_fault_v2.rs'),
-                  (SAFE[5:], 'crates/wholepact-native-host/src/host/financial/durable_financial_commands_v2.rs')]
+                  (SAFE[5:7], 'crates/wholepact-native-host/src/host/financial/durable_financial_commands_v2.rs'),
+                  (NEW_LEAF_SAFE, 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/durable_proposal_v1/durable_result_lifecycle_v2.rs'),
+                  (NEW_COLLECTOR_SAFE, 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/rolling_transcript_v1.rs')]
         for selectors,path in leaves:
             text=(ROOT.parent/path).read_text()
             for selector in selectors:
                 name=selector.rsplit('::',1)[1]
                 self.assertEqual(len(re.findall(r'#\[test\]\s*fn '+re.escape(name)+r'\(',text)),1,selector)
+                if selector in NEW_COLLECTOR_SAFE:
+                    self.assertIn('::rolling_transcript_v1::delivery_first_failure_tests::',selector)
+                    self.assertGreater(text.index('fn '+name+'('),text.index('mod delivery_first_failure_tests {'))
 
     def test_closed_recipe_and_selector_inventory(self):
         self.assertEqual(D.PROFILE, PROFILE); self.assertEqual(D.ROLE, ROLE)
         self.assertEqual(D.CASES, CASES); self.assertEqual(D.SAFE_TESTS, SAFE)
+        self.assertEqual(D.SAFE_TESTS[:7],LEGACY_SAFE);self.assertEqual(len(D.SAFE_TESTS),15)
         self.assertEqual(len(SAFE), len(set(SAFE))); self.assertFalse(set(SAFE) & set(CASES.values()))
         self.assertEqual(D.recipe(), dict(build_recipe_version=4, qualification_profile=PROFILE,
             execution='native-owner-durable-correctness-selective-optimization', toolchain='1.99.0',
@@ -387,5 +407,225 @@ class DurableSelectionTests(unittest.TestCase):
             with self.assertRaises(S.Failure):S.select_artifact(b'',ROLE,target,PROFILE)
             for role in (*A.NAMES,'unknown'):
                 with self.assertRaises(S.Failure):S.select_artifact(raw(row),role,target,PROFILE)
+
+
+
+QUALIFICATION = ROOT.parent/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification.rs'
+LEAF = QUALIFICATION.with_suffix('')/'durable_proposal_v1/durable_result_lifecycle_v2.rs'
+SAFE_SOURCE = QUALIFICATION.with_suffix('')/'safe_diagnostics_v1.rs'
+
+def inert_failure(case, site=None, stage=True):
+    site=site or ('a0_producer' if case=='durable-resume' else 'b_producer')
+    reason=('stage_outcome_error' if stage else 'stage_call_error' if site in D.FAILURE_STAGE_EXPECTATIONS else
+            'verification' if site in D.FAILURE_VERIFICATION_SITES else 'cleanup_unverified' if site=='temporary_cleanup' else 'io_error')
+    value=dict(schema=1,case=case,callsite=site,reason=reason,
+               io_kind='other',stage=None,cleanup='closed_absent')
+    if stage:
+        expected,mode=D.FAILURE_STAGE_EXPECTATIONS[site]
+        value['stage']=dict(failure_reason='ChildExit',next=0,expected=expected,expected_process=mode,
+            group_signal='SentWhileLeaderOwned',group_absence='OriginalGroupAbsentObserved',direct_child='Reaped',
+            status_kind='exit',status_value=1,diagnostic_state='validated',
+            private_fixed_primary=dict(operation='Checkpoint',site='HostCheckpointEntry',engine_code='NotApplicable',family='Host',cause='Permission'),
+            delivery_first_failure=dict(boundary='PrivateWorkspaceCapture',outcome='BridgePermission'))
+    return value
+
+class DurableNativeFailureTests(unittest.TestCase):
+    def test_exact_schema_case_sites_stage_counts_and_types(self):
+        for case in CASES:
+            for site in D.FAILURE_COMMON_SITES|D.FAILURE_CASE_SITES[case]:
+                value=inert_failure(case,site,False)
+                self.assertEqual(D.native_failure(case,raw(value)),value)
+                for wrong in D.FAILURE_REASONS-{value['reason']}:
+                    with self.assertRaises(D.Rejected):D.native_failure(case,raw({**value,'reason':wrong}))
+            for site in set(D.FAILURE_STAGE_EXPECTATIONS)&D.FAILURE_CASE_SITES[case]:
+                value=inert_failure(case,site)
+                self.assertEqual(D.native_failure(case,raw(value)),value)
+                expected=value['stage']['expected']
+                deadline=copy.deepcopy(value);deadline['reason']='stage_deadline'
+                if site in ('a2_reader','b_reader'):
+                    deadline['stage']['status_value']=0
+                    D.native_failure(case,raw(deadline))
+                else:
+                    with self.assertRaises(D.Rejected):D.native_failure(case,raw(deadline))
+                for next_value in (0,expected):
+                    copy_value=copy.deepcopy(value);copy_value['stage']['next']=next_value
+                    D.native_failure(case,raw(copy_value))
+                for field,bad in [('next',-1),('next',True),('next',expected+1),('expected',expected+1),
+                    ('expected',True),('expected_process','unknown'),('failure_reason','private text')]:
+                    changed=copy.deepcopy(value);changed['stage'][field]=bad
+                    with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+                for field in value['stage']:
+                    changed=copy.deepcopy(value);del changed['stage'][field]
+                    with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+            value=inert_failure(case)
+            other=next(c for c in CASES if c!=case)
+            mutants=[{**value,k:v} for k,v in [('schema',True),('schema',2),('case',other),('callsite','private text'),
+                ('callsite','b_producer' if case=='durable-resume' else 'a0_producer'),('reason','private error'),
+                ('io_kind','private error'),('cleanup','private path')]]
+            mutants += [{k:v for k,v in value.items() if k!=key} for key in value]
+            mutants += [{**value,'extra':0},{**value,'stage':None}, {**value,'callsite':'tls_prepare'}]
+            for changed in mutants:
+                with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+            for bad in (b'null',b'[]',b'NaN',b'\xff',raw(value)+b'{}',raw(value).replace(b'{',b'{"schema":1,',1)):
+                with self.assertRaises(D.Rejected):D.native_failure(case,bad)
+
+    def test_process_shapes_and_diagnostic_custody_are_not_independent(self):
+        for case in CASES:
+            value=inert_failure(case)
+            for kind,status in [('exit',0),('exit',255),('signal',1),('signal',64),('other',None)]:
+                changed=copy.deepcopy(value);changed['stage'].update(status_kind=kind,status_value=status)
+                D.native_failure(case,raw(changed))
+            for kind,status in [('exit',None),('exit',True),('exit',-1),('exit',256),('signal',0),('signal',65),('signal',False),('absent',0),('other',1),('private',None)]:
+                changed=copy.deepcopy(value);changed['stage'].update(status_kind=kind,status_value=status)
+                with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+            for key,bad in [('group_signal','Unverified'),('group_absence','Unverified'),('direct_child','Unverified'),('status_kind','absent')]:
+                changed=copy.deepcopy(value);changed['stage'][key]=bad
+                if key=='status_kind':changed['stage']['status_value']=None
+                with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+                changed['stage'].update(diagnostic_state='withheld',private_fixed_primary=None,delivery_first_failure=None)
+                D.native_failure(case,raw(changed))
+            for reason in ('process_cleanup_unverified','expected_process_status','stage_deadline'):
+                changed=copy.deepcopy(value);changed['reason']=reason
+                if reason=='expected_process_status':D.native_failure(case,raw(changed))
+                else:
+                    with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+                if reason=='process_cleanup_unverified':
+                    changed['stage'].update(group_signal='Unverified',diagnostic_state='withheld',private_fixed_primary=None,delivery_first_failure=None)
+                    D.native_failure(case,raw(changed))
+                if reason=='expected_process_status':
+                    changed['stage'].update(status_kind='signal',status_value=9)
+                    with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+                changed['io_kind']='timed_out'
+                with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+            for state in ('withheld','unavailable'):
+                changed=copy.deepcopy(value);changed['stage']['diagnostic_state']=state
+                with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+                changed['stage']['private_fixed_primary']=None
+                D.native_failure(case,raw(changed))
+            changed=copy.deepcopy(value);changed['stage']['private_fixed_primary']=None
+            with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+            for key in value['stage']['private_fixed_primary']:
+                changed=copy.deepcopy(value);changed['stage']['private_fixed_primary'][key]='private arbitrary'
+                with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+            for delivery in ({'boundary':'unknown','outcome':'BridgePermission'},{'boundary':'PrivateWorkspaceCapture','outcome':'Begin'},
+                             {'boundary':'PrivateWorkspaceCapture','outcome':'Complete'},{'boundary':'PrivateWorkspaceCapture','outcome':'BridgePermission','secret':0}):
+                changed=copy.deepcopy(value);changed['stage']['delivery_first_failure']=delivery
+                with self.assertRaises(D.Rejected):D.native_failure(case,raw(changed))
+
+    def test_marker_preserved_before_failed_summary_never_promotes_success(self):
+        for case in CASES:
+            failure=inert_failure(case);line=D.NATIVE_FAILURE_MARKER+raw(failure)
+            for coalesced in (False,True):
+                output=D.TestOutput(case)
+                output.line((b'test '+CASES[case].encode()+b' ... ' if coalesced else b'')+line)
+                if not coalesced:output.line(b'test '+CASES[case].encode()+b' ... FAILED')
+                output.line(D.NATIVE_MARKERS[case]+raw(inert_receipt(case)))
+                with self.assertRaises(D.Rejected):output.line(SUMMARY.replace(b'1 passed; 0 failed',b'0 passed; 1 failed').replace(b'ok.',b'FAILED.'))
+                self.assertEqual(output.native_failure,failure)
+                with self.assertRaises(D.Rejected):output.line(line)
+            output=D.TestOutput(case)
+            for item in [line,*native_lines(case)]:output.line(item)
+            with self.assertRaises(D.Rejected):output.finish(0)
+            outer=dict(schema=1,profile=PROFILE,case=case,code='native_assertion',native_receipt=inert_receipt(case),cleanup_unverified=True,native_failure=failure)
+            records=D.RuntimeRecords(case,SOURCE);records(b'CI_FINANCIAL_DURABLE_FAILURE '+raw(outer))
+            self.assertEqual(records.failure,outer)
+            for status in (0,1):
+                with self.assertRaises(D.Rejected):records.finish(status)
+            other=next(c for c in CASES if c!=case)
+            for bad in (None,{},inert_failure(other),{**failure,'extra':True}):
+                with self.assertRaises(D.Rejected):D.RuntimeRecords(case,SOURCE)(b'CI_FINANCIAL_DURABLE_FAILURE '+raw({**outer,'native_failure':bad}))
+            forged=D.candidate(case,SOURCE,inert_receipt(case));forged['native_failure']=failure
+            with self.assertRaises(D.Rejected):D.validate_candidate(forged,case,SOURCE)
+
+    def test_actual_wrapper_keeps_first_failure_when_cleanup_also_fails(self):
+        case='durable-resume';failure=inert_failure(case)
+        data=b'\n'.join([b'test '+CASES[case].encode()+b' ... '+D.NATIVE_FAILURE_MARKER+raw(failure),
+            D.NATIVE_MARKERS[case]+raw(inert_receipt(case)),
+            SUMMARY.replace(b'1 passed; 0 failed',b'0 passed; 1 failed').replace(b'ok.',b'FAILED.')])+b'\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            path_type=pathlib.Path;root=path_type(tmp)
+            process=Mock(pid=123,returncode=None);process.stdout=Mock()
+            def wait(**kwargs):process.returncode=1;return 1
+            process.wait.side_effect=wait
+            selector=Mock();selector.__enter__=Mock(return_value=selector);selector.__exit__=Mock(return_value=False)
+            selector.select.return_value=[object()]
+            output=io.StringIO()
+            with patch.object(D.pathlib,'Path',side_effect=lambda value:root if value=='/ci-fixture' else path_type(value)), \
+                 patch.object(D.os,'getpid',return_value=1),patch.object(D.os,'getresuid',return_value=(10001,)*3), \
+                 patch.object(D.os,'getresgid',return_value=(10001,)*3),patch.object(D.os,'getgroups',return_value=[]), \
+                 patch.object(D.os,'getpgid',return_value=123),patch.object(D.os,'killpg',side_effect=OSError('private cleanup text')) as kill, \
+                 patch.object(D.os,'read',side_effect=[data,b'']),patch.object(D.subprocess,'Popen',return_value=process), \
+                 patch.object(D.selectors,'DefaultSelector',return_value=selector),contextlib.redirect_stdout(output):
+                status=D.run_case(case,{'profile':PROFILE,'source_commit':SOURCE},D.time.monotonic_ns()+10_000_000_000)
+            self.assertEqual(status,1);kill.assert_called_once()
+            lines=output.getvalue().splitlines();self.assertEqual(len(lines),1)
+            records=D.RuntimeRecords(case,SOURCE);records(lines[0].encode())
+            self.assertEqual(records.failure['code'],'native_assertion');self.assertEqual(records.failure['native_failure'],failure)
+            self.assertTrue(records.failure['cleanup_unverified']);self.assertNotIn('private cleanup text',output.getvalue())
+
+    def test_worst_valid_record_and_failure_line_fit_original_cap(self):
+        lengths=[]
+        for case in CASES:
+            for site in set(D.FAILURE_STAGE_EXPECTATIONS)&D.FAILURE_CASE_SITES[case]:
+                value=inert_failure(case,site);stage=value['stage'];stage['next']=stage['expected']
+                stage.update(failure_reason=max(D.FAILURE_HARNESS_REASONS,key=len),group_signal='AlreadyAbsentWhileLeaderOwned',status_value=255)
+                family=max(D.PRIVATE_FIXED_FAMILIES,key=lambda f:len(f)+max(map(len,D.PRIVATE_FIXED_FAMILIES[f])))
+                stage['private_fixed_primary']=dict(operation=max(D.PRIVATE_FIXED_OPERATIONS,key=len),site=max(D.PRIVATE_FIXED_SITES,key=len),
+                    engine_code=max(D.PRIVATE_FIXED_ENGINE_CODES,key=len),family=family,cause=max(D.PRIVATE_FIXED_FAMILIES[family],key=len))
+                stage['delivery_first_failure']=dict(boundary=max(D.FAILURE_DELIVERY_BOUNDARIES,key=len),outcome=max(D.FAILURE_DELIVERY_OUTCOMES,key=len))
+                value.update(reason='stage_outcome_error',io_kind=max(D.FAILURE_IO_KINDS,key=len),cleanup=max(D.FAILURE_CLEANUP,key=len))
+                D.native_failure(case,raw(value))
+                lengths.append(len(D.NATIVE_FAILURE_MARKER+raw(value)))
+                outer=dict(schema=1,profile=PROFILE,case=case,code=max(D.FAILURES,key=len),native_receipt=inert_receipt(case),cleanup_unverified=True,native_failure=value)
+                encoded=b'CI_FINANCIAL_DURABLE_FAILURE '+raw(outer)
+                D.RuntimeRecords(case,SOURCE)(encoded);lengths.append(len(encoded))
+        self.assertLessEqual(max(lengths),8192);self.assertEqual(D.MAX_LINE,8192)
+
+    def test_closed_domains_match_actual_native_and_existing_primary_validator(self):
+        existing=load('ci-synthetic-output')
+        for name in ('PRIVATE_FIXED_PRIMARY_FIELDS','PRIVATE_FIXED_OPERATIONS','PRIVATE_FIXED_SITES','PRIVATE_FIXED_ENGINE_CODES'):
+            self.assertEqual(getattr(D,name),getattr(existing,name))
+        self.assertEqual({k:set(v) for k,v in D.PRIVATE_FIXED_FAMILIES.items()}, {k:set(v) for k,v in existing.PRIVATE_FIXED_FAMILIES.items()})
+        native=SAFE_SOURCE.read_text()
+        boundaries=native.split('pub(super) const DELIVERY_BOUNDARIES: &[&str] = &[',1)[1].split('];',1)[0]
+        self.assertEqual(D.FAILURE_DELIVERY_BOUNDARIES,set(re.findall(r'"([A-Za-z0-9_]+)"',boundaries)))
+        outcomes=re.search(r'labels!\s*\{\s*Outcome\s*\{(.*?)\}\s*\}',native,re.S).group(1)
+        self.assertEqual(D.FAILURE_DELIVERY_OUTCOMES,{x.strip() for x in outcomes.split(',') if x.strip()}-{'Begin','Complete'})
+        shared=QUALIFICATION.read_text()
+        reasons=re.search(r'enum HarnessFailureReason\s*\{(.*?)\}',shared,re.S).group(1)
+        self.assertEqual(D.FAILURE_HARNESS_REASONS,{x.strip() for x in reasons.split(',') if x.strip()})
+        process=(QUALIFICATION.with_suffix('')/'owned_test_process_group_v1.rs').read_text()
+        for name,labels in [('GroupSignalV1',D.FAILURE_GROUP_SIGNALS),('GroupAbsenceV1',D.FAILURE_GROUP_ABSENCE),('DirectChildV1',D.FAILURE_DIRECT_CHILD)]:
+            body=re.search(r'enum '+name+r'\s*\{(.*?)\}',process,re.S).group(1)
+            self.assertEqual(labels,{x.strip() for x in body.split(',') if x.strip()})
+        leaf=LEAF.read_text()
+        count_sources={'a0_producer':('producer_inputs_v2',127),'a1_intake':('intake_inputs_v2',23),
+                       'a2_reader':('reader_inputs_v2',147),'b_producer':('started_producer_inputs_v2',118)}
+        for site,(function,count) in count_sources.items():
+            self.assertEqual(D.FAILURE_STAGE_EXPECTATIONS[site][0],count)
+            self.assertIn(f'assert_eq!({function}().len(),{count});',leaf)
+        self.assertEqual(D.FAILURE_STAGE_EXPECTATIONS['b_reader'],(0,'success'))
+        self.assertIn('PrivateWorkspaceStageV1::DurableResultStartedReader,&[],deadline,cutoff',leaf)
+        self.assertIn('FailureSiteV2::BReader,ExpectedProcessV2::Success,0)',leaf)
+        def snake(name):return re.sub(r'(?<!^)(?=[A-Z])','_',name).lower()
+        actual_validation={snake(x) for x in re.findall(r'report\.enter\(FailureSiteV2::([A-Za-z0-9]+),FailureReasonV2::Verification\)',leaf)}
+        self.assertEqual(D.FAILURE_VERIFICATION_SITES,actual_validation)
+        for enum,labels in [('FailureSiteV2',D.FAILURE_COMMON_SITES|set().union(*D.FAILURE_CASE_SITES.values())),('FailureReasonV2',D.FAILURE_REASONS),('FailureCleanupV2',D.FAILURE_CLEANUP)]:
+            body=re.search(r'enum '+enum+r'\s*\{(.*?)\}',leaf,re.S).group(1)
+            self.assertEqual(labels,{snake(x.strip()) for x in body.split(',') if x.strip()})
+        body=leaf.split('fn failure_io_kind_v2(',1)[1].split('fn harness_reason_v2',1)[0]
+        self.assertEqual(D.FAILURE_IO_KINDS,set(re.findall(r'=>"([a-z_]+)"',body)))
+
+    def test_actual_delivery_route_is_additive_without_financial_progress(self):
+        source=QUALIFICATION.read_text().split('fn private_workspace_stage_v1(',1)[1]
+        block=source.split('transcript.enable_delivery_first_failure();',1)[0].rsplit('if matches!(',1)[1]
+        names=re.findall(r'PrivateWorkspaceStageV1::([A-Za-z0-9]+)',block)
+        self.assertEqual(names,['DeliveryProducer','DeliveryReader','FinancialProducer','FinancialReader',
+            'DurableResultProducer','DurableResultIntake','DurableResultReader','DurableResultStartedProducer','DurableResultStartedReader'])
+        for variant,call in [('FinancialProducer','transcript.enable_financial_v2('),('FinancialReader','transcript.enable_financial_v2(Instant::now(), true)')]:
+            match='if matches!(stage, PrivateWorkspaceStageV1::'+variant+') {'
+            self.assertEqual(source.count(match),1)
+            self.assertIn(call,source.split(match,1)[1].split('\n    }',1)[0])
+        self.assertEqual(source.count('transcript.enable_financial_v2('),2)
 
 if __name__ == '__main__': unittest.main()

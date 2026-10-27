@@ -1414,6 +1414,11 @@ fn private_workspace_stage_v1(
             | PrivateWorkspaceStageV1::DeliveryReader
             | PrivateWorkspaceStageV1::FinancialProducer
             | PrivateWorkspaceStageV1::FinancialReader
+            | PrivateWorkspaceStageV1::DurableResultProducer
+            | PrivateWorkspaceStageV1::DurableResultIntake
+            | PrivateWorkspaceStageV1::DurableResultReader
+            | PrivateWorkspaceStageV1::DurableResultStartedProducer
+            | PrivateWorkspaceStageV1::DurableResultStartedReader
     ) {
         transcript.enable_delivery_first_failure();
     }

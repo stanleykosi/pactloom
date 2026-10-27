@@ -317,8 +317,18 @@ class PublicOutputTests(unittest.TestCase):
         return '[JOINED_FAILURE exit=Some(101) signal=None core_dumped=false inputs=1/2 reason='+reason+' static_boundaries='+summary+']'
 
     def test_harness_failure_reasons_match_exact_rust_enum(self):
-        source=(ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification.rs').read_text()
+        source=(ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification.rs').read_bytes().decode('utf-8')
+        self.assertEqual(hashlib.sha256(source.encode()).hexdigest(),'568f6664921c1acef59390b5a7a56a77b77ac4fb5306463c5944977f18332f7e')
         body=re.search(r'enum HarnessFailureReason \{([^}]+)\}',source).group(1)
+        # Current financial-only reasons do not enlarge the legacy public parser.
+        current_variants=set(re.findall(r'^    ([A-Za-z0-9]+),$',body,re.M))
+        self.assertEqual(current_variants,output.HARNESS_FAILURE_REASONS|{'FinancialPhaseDeadline','FinancialProgressInvalid'})
+        self.assertEqual(len(current_variants),19)
+        self.assertEqual(hashlib.sha256(body.encode()).hexdigest(),'253b23aab9b2965f052b631e06334e2343c786ed3911e9af83da723a470b3124')
+        financial_suffix='    FinancialPhaseDeadline,\n    FinancialProgressInvalid,\n'
+        self.assertEqual(body.count(financial_suffix),1)
+        body=body.replace(financial_suffix,'',1)
+        self.assertEqual(hashlib.sha256(body.encode()).hexdigest(),'e4e3a35e3dca780b34f689591be3bfbb17a2d5239ee5b57b8eb3092182b2a153')
         variants=set(re.findall(r'^    ([A-Za-z0-9]+),$',body,re.M))
         self.assertEqual(variants,output.HARNESS_FAILURE_REASONS)
         self.assertEqual(len(variants),17)
@@ -625,7 +635,53 @@ class PublicOutputTests(unittest.TestCase):
 
     def test_rolling_preflight_preserves_ten_original_plus_twelve_optional_cases(self):
         base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2'
-        source=(base/'sequential_construction_v3_qualification/rolling_transcript_v1.rs').read_text()
+        source=(base/'sequential_construction_v3_qualification/rolling_transcript_v1.rs').read_bytes().decode('utf-8')
+        self.assertEqual(hashlib.sha256(source.encode()).hexdigest(),'fae96946c71cfb0bf2d59c272f2b066e7468a770a86a8210d7dcf5f2db9d92d0')
+        # This later file-level test is not a ninth delivery-collector case.
+        self.assertEqual(source.count('fn financial_progress_fragmented_lines_and_legacy_disabled() {'),1)
+        progress_test_suffix=r'''
+#[cfg(all(
+    test,
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
+#[test]
+fn financial_progress_fragmented_lines_and_legacy_disabled() {
+    use super::financial_progress_v1::{Phase, Reason};
+    let line =
+        b"[FINANCIAL_PROGRESS_V1 {\"kind\":\"Begin\",\"owner\":1,\"phase\":\"SourceOpen\"}]\r\n";
+    for split in 0..line.len() {
+        let mut transcript = Transcript::new(std::iter::empty::<&str>()).unwrap();
+        transcript.enable_financial_progress();
+        transcript
+            .append(&line[..split], Path::new("/tmp/owned"))
+            .unwrap();
+        assert!(transcript.financial_progress_failure().is_none());
+        transcript
+            .append(&line[split..], Path::new("/tmp/owned"))
+            .unwrap();
+        let failure = transcript
+            .financial_progress_check(
+                std::time::Instant::now() + std::time::Duration::from_secs(121),
+            )
+            .unwrap();
+        assert_eq!(failure.reason, Reason::PhaseDeadline);
+        assert_eq!(failure.last.unwrap().phase, Phase::SourceOpen);
+    }
+    let mut transcript = Transcript::new(std::iter::empty::<&str>()).unwrap();
+    transcript.append(line, Path::new("/tmp/owned")).unwrap();
+    assert!(transcript
+        .financial_progress_check(std::time::Instant::now() + std::time::Duration::from_secs(901))
+        .is_none());
+    transcript.financial_progress_global_deadline();
+    assert!(transcript.financial_progress_failure().is_none());
+}
+'''
+        self.assertEqual(source.count(progress_test_suffix),1)
+        self.assertTrue(source.endswith(progress_test_suffix))
+        source=source.replace(progress_test_suffix,'',1)
+        # Exact scoped historical view, not a claim about an old complete file.
+        self.assertEqual(hashlib.sha256(source.encode()).hexdigest(),'327476ccca3363142115135a652f15e06de6cc8c22449ca62e28282197191abe')
         original,delivery=source.split('mod delivery_first_failure_tests {')
         names=re.findall(r'#\[test\]\s+(?:#\[cfg\(feature = "synthetic-born-joined-qualification"\)\]\s+)?fn (\w+)\(',original)
         delivery_names=re.findall(r'#\[test\]\s+fn (\w+)\(',delivery)
