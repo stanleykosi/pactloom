@@ -1408,8 +1408,9 @@ class ReviewViewportTests(unittest.TestCase):
         flow.scroll=lambda s,b,o:events.append('scroll:'+b) or True
         flow.review(base|dict(widgets=[dict(tag='ReviewAcknowledgement',owner='Signer1',enabled=True)]),'ReturnRead','Signer1')
         flow.review(base|dict(widgets=[dict(tag='ReturnRead',owner='Signer1',enabled=False),dict(tag='ReviewBody',owner='Signer1',enabled=True)]),'ReturnRead','Signer1')
+        flow.review(base|dict(widgets=[dict(tag='ReviewBody',owner='Signer1',enabled=True)]),'ReturnRead','Signer1')
         flow.review(base|dict(widgets=[dict(tag='ReturnRead',owner='Signer1',enabled=True)]),'ReturnRead','Signer1')
-        self.assertEqual(events,['ReviewAcknowledgement','scroll:ReviewBody','ReturnRead'])
+        self.assertEqual(events,['ReviewAcknowledgement','scroll:ReviewBody','scroll:ReviewBody','ReturnRead'])
 
 
 class SemanticHostObserverTests(unittest.TestCase):
@@ -3677,11 +3678,11 @@ def admit_navigation_model(required):
 class AdmitReviewNavigationTests(unittest.TestCase):
  def test_complete_25_inner_reads_reach_exactly_one_enabled_arm(self):
   r=admit_navigation_model(25)
-  self.assertEqual((r['outcome'],r['actual_inner_scrolls'],r['ack'],r['arm']),('armed_only_after_native_enabled',25,1,1))
-  self.assertEqual((r['outer_up'],r['outer_down'],r['outer_noop_gestures']),(25,25,0))
+  self.assertEqual((r['outcome'],r['actual_inner_scrolls'],r['ack'],r['arm']),('armed_only_after_native_enabled',26,1,1))
+  self.assertEqual((r['outer_up'],r['outer_down'],r['outer_noop_gestures']),(13,13,0))
  def test_moderate_review_has_no_wrong_direction_wheel_sweep(self):
   r=admit_navigation_model(3)
-  self.assertEqual((r['actual_inner_scrolls'],r['outer_up'],r['outer_down'],r['outer_noop_gestures']),(3,3,3,0))
+  self.assertEqual((r['actual_inner_scrolls'],r['outer_up'],r['outer_down'],r['outer_noop_gestures']),(4,2,2,0))
   self.assertEqual(r['arm'],1)
  def test_direction_order_is_bound_to_actual_native_layout_and_enable_predicate(self):
   source=(ROOT.parent/'crates/wholepact-financial-coordinator/src/financial_source_ui.rs').read_text()
@@ -3845,7 +3846,9 @@ class SameBatchValidationTests(unittest.TestCase):
     with self.assertRaises(O.C.Rejected):o.read()
     native.assert_not_called();join.assert_not_called();self.assertIsNone(o._semantic_active)
 
-def single_review_navigation_model(phase,required=25,confirm=False,owner='Signer1'):
+class ReviewModelStopped(Exception):pass
+
+def single_review_navigation_model(phase,required=25,confirm=False,owner='Signer1',control=None):
  state=dict(phase=phase,outer=0,inner=0,generation=0,ack=False,done=False,events=[],wrong=0)
  class Observer:
   expected_profile=F.C.SEMANTIC_PROFILE;host_view=mock.Mock()
@@ -3878,20 +3881,145 @@ def single_review_navigation_model(phase,required=25,confirm=False,owner='Signer
    else:state['done']=True
   else:raise AssertionError('invented click')
  c.scroll_up.side_effect=lambda x,y:wheel(-1,x,y);c.scroll_down.side_effect=lambda x,y:wheel(1,x,y);c.click.side_effect=click
+ if control is not None:control(f,c,state)
  try:f.run()
+ except ReviewModelStopped:outcome='model_stopped'
  except Finished:outcome='native_enabled_action_once'
  except F.C.Rejected as e:outcome=e.code
  return dict(outcome=outcome,events=state['events'],wrong=state['wrong'],inner=state['events'].count('body'),diagnostic=f.review_diagnostic())
 
+class ReviewBurstSchedulingTests(unittest.TestCase):
+ def test_actual_navigation_counts_and_original_limits(self):
+  # Before this change N=25 used 25 body + 50 outer wheels, 181 snapshots
+  # and 129 progress calls. The extra odd-N body wheel is a bounded tradeoff,
+  # not read-completion evidence or a claim about real-run elapsed savings.
+  expected={1:(2,1,14,10),2:(2,1,14,10),3:(4,2,22,16),
+            25:(26,13,110,82),127:(128,64,518,388),128:(128,64,518,388)}
+  for required,(body,outer,frames,waits) in expected.items():
+   with self.subTest(required=required):
+    r=admit_navigation_model(required)
+    self.assertEqual((r['actual_inner_scrolls'],r['outer_up'],r['outer_down'],r['frames'],r['wait_progress']),(body,outer,outer,frames,waits))
+    self.assertEqual((r['outcome'],r['ack'],r['arm'],r['outer_noop_gestures']),('armed_only_after_native_enabled',1,1,0))
+  r=admit_navigation_model(129)
+  self.assertEqual((r['outcome'],r['actual_inner_scrolls'],r['outer_up'],r['outer_down'],r['arm']),('input_widget',128,64,64,0))
+ def test_each_body_wheel_reenters_fresh_main_loop_and_host_priority(self):
+  frames=[];pumps=[]
+  def control(f,c,state):
+   original_pump=f.pump_host;original_wheel=c.scroll_down.side_effect
+   def pump(s):pumps.append(s['view_generation']);return original_pump(s)
+   def wheel(x,y):
+    if x<1000 and state['outer']==0:
+     self.assertEqual(pumps[-1],state['generation'])
+     if frames:self.assertGreater(state['generation'],frames[-1])
+     frames.append(state['generation'])
+    return original_wheel(x,y)
+   f.pump_host=pump;c.scroll_down.side_effect=wheel
+  r=single_review_navigation_model('V3AdmitReview',3,control=control)
+  self.assertEqual((r['outcome'],r['inner']),('native_enabled_action_once',4))
+  self.assertEqual(len(frames),4);self.assertEqual(r['events'].count('ArmV3Admit'),1)
+ def test_between_wheels_actual_run_preserves_protection_and_host_priority(self):
+  for case in ('HostWriting','pending_host','host_prepared','focus','secret','phase','subphase','owner','disabled_body','missing_body'):
+   with self.subTest(case=case):
+    observed={}
+    def control(f,c,state):
+     original_next=f.native.next_snapshot;original_pump=f.pump_host
+     old_pending=('V3AdmitReview','None','review-scroll-pending','ArmV3Admit','Signer1','ReviewBody')
+     def next_snapshot(deadline):
+      if state['inner']==1:
+       if observed.get('changed'):raise ReviewModelStopped()
+       observed['changed']=True
+       s=original_next(deadline)
+       if case=='HostWriting':s['host_input']=True;s['host_observation']['entry']='Writing'
+       elif case=='pending_host':f.pending_host=('public','not_consumed');f.pending_occurrence=(0,0,19)
+       elif case=='host_prepared':f.host_prepared=((0,0,19),('public','not_consumed'))
+       elif case=='focus':s['focused']=False
+       elif case=='secret':s['secret_input']=True
+       elif case=='phase':s['phase']='V3AuditReview'
+       elif case=='subphase':s['subphase']='SetupNeeded'
+       elif case=='owner':
+        s['owner']='Signer2'
+        for w in s['widgets']:
+         if w['owner']=='Signer1':w['owner']='Signer2'
+       elif case=='disabled_body':
+        for w in s['widgets']:
+         if w['tag']=='ReviewBody':w['enabled']=False
+       elif case=='missing_body':s['widgets']=[w for w in s['widgets'] if w['tag']!='ReviewBody']
+       return s
+      return original_next(deadline)
+     def pump(s):
+      if observed.get('changed'):
+       observed['pending_before_pump']=f.scrolls.get(old_pending)
+       observed['events_before_pump']=list(state['events'])
+      result=original_pump(s)
+      if observed.get('changed'):observed['pump_result']=result
+      return result
+     f.native.next_snapshot=next_snapshot;f.pump_host=pump
+    r=single_review_navigation_model('V3AdmitReview',3,control=control)
+    self.assertTrue(observed['changed']);self.assertEqual(r['inner'],1)
+    self.assertNotIn('ArmV3Admit',r['events'])
+    if case in ('focus','secret'):self.assertEqual(r['outcome'],'input_phase')
+    else:self.assertEqual(r['outcome'],'model_stopped')
+    if case in ('phase','subphase','owner'):self.assertIsNone(observed['pending_before_pump'])
+    if case in ('HostWriting','pending_host'):self.assertTrue(observed['pump_result'])
+ def test_between_wheels_original_body_budget_deadline_and_failure_stop(self):
+  for case in ('body_budget','deadline','wheel_failure'):
+   with self.subTest(case=case):
+    def control(f,c,state):
+     original=c.scroll_down.side_effect
+     def wheel(x,y):
+      result=original(x,y)
+      if x<1000 and state['outer']==0 and state['inner']==1:
+       if case=='body_budget':f.scrolls[('V3AdmitReview','None','ReviewBody','Signer1','down')]=128
+       elif case=='deadline':f.fixture.deadline_ns=time.monotonic_ns()-1
+       else:raise F.C.Rejected('observer_failure')
+      return result
+     c.scroll_down.side_effect=wheel
+    r=single_review_navigation_model('V3AdmitReview',3,control=control)
+    self.assertEqual(r['inner'],1);self.assertNotIn('ArmV3Admit',r['events'])
+    self.assertEqual(r['outcome'],{'body_budget':'input_budget','deadline':'deadline','wheel_failure':'observer_failure'}[case])
+ def test_enabled_main_loop_widget_is_rechecked_by_actual_stable_press(self):
+  changed=[]
+  def control(f,c,state):
+   original=f.native.next_snapshot
+   def next_snapshot(deadline):
+    s=original(deadline)
+    if state['inner']==2 and state['outer']==1:
+     changed.append(s['view_generation'])
+     if len(changed)>1:
+      for w in s['widgets']:
+       if w['tag']=='ArmV3Admit':w['enabled']=False
+    return s
+   f.native.next_snapshot=next_snapshot
+  r=single_review_navigation_model('V3AdmitReview',2,control=control)
+  self.assertEqual((r['outcome'],r['inner']),('input_disabled',2))
+  self.assertEqual(len(changed),3);self.assertNotIn('ArmV3Admit',r['events'])
+ def test_exact_route_only_and_missing_or_disabled_body_never_consumes_count(self):
+  for phase,subphase,action,ack,expected in (
+      ('V3AdmitReview','None','ArmV3Admit','ReviewAcknowledgement',2),
+      ('V3AdmitReview','SetupReview','ArmV3Admit','ReviewAcknowledgement',1),
+      ('V3AdmitReview','None','ArmV3Admit',None,1),
+      ('WriterFlow','ReadReview','WriterAction','ReviewAcknowledgement',1)):
+   f,c,state,s=ReviewFailureObservationTests().flow()
+   s.update(phase=phase,subphase=subphase)
+   s['widgets']=[dict(tag=action,owner='Signer1',enabled=False,rect=[20,660,500,690])]
+   if ack:f.done.add(f.key(s,ack,'Signer1')+(None,))
+   f.review_seek=mock.Mock(return_value=False)
+   f.review(s,action,'Signer1',ack=ack)
+   pending=(phase,subphase,'review-scroll-pending',action,'Signer1','ReviewBody')
+   self.assertEqual(f.scrolls[pending],expected);c.scroll_down.assert_not_called();c.click.assert_not_called()
+   s['widgets']=[dict(tag='ReviewBody',owner='Signer1',enabled=False,rect=[20,200,800,590])]
+   f.review(s,action,'Signer1',ack=ack)
+   self.assertEqual(f.scrolls[pending],expected);c.scroll_down.assert_not_called();c.click.assert_not_called()
+
 class SingleReviewOrderTests(unittest.TestCase):
  def test_actual_readonly_to_confirmation_reaches_each_enabled_action_once(self):
   r=single_review_navigation_model('EntryReview',25,True)
-  self.assertEqual(r['outcome'],'native_enabled_action_once');self.assertEqual(r['inner'],25);self.assertEqual(r['wrong'],0)
+  self.assertEqual(r['outcome'],'native_enabled_action_once');self.assertEqual(r['inner'],26);self.assertEqual(r['wrong'],0)
   self.assertEqual([x for x in r['events'] if x not in ('body','up','down')],['EntryConfirm','ack','EnterPassword'])
   d=F.C.validate_review_diagnostic(r['diagnostic']);self.assertEqual(d['phase'],'EntryConfirm');self.assertEqual(d['attempted'],[True,True]);self.assertEqual(d['operation'],'ActionPress')
  def test_actual_ordinary_review_and_owner_none_normal_finish_keep_native_gates(self):
   for phase,owner in [('V3AuditReview','Signer1'),('NormalFinishReview',None),('NormalFinishReview','Signer2')]:
-   r=single_review_navigation_model(phase,25,owner=owner);self.assertEqual(r['outcome'],'native_enabled_action_once');self.assertEqual(r['wrong'],0);self.assertEqual(r['inner'],25)
+   r=single_review_navigation_model(phase,25,owner=owner);self.assertEqual(r['outcome'],'native_enabled_action_once');self.assertEqual(r['wrong'],0);self.assertEqual(r['inner'],26)
    self.assertEqual(r['events'].count('ack'),1);self.assertEqual(r['events'].count(F.REVIEW[phase]),1);self.assertEqual(F.C.validate_review_diagnostic(r['diagnostic'])['owner'],owner)
  def test_closed_route_guards_original_budgets_and_nonreview_fallback(self):
   for change in ({'phase':'Waiting'},{'owner':'Signer2'},{'subphase':'SetupNeeded'},{'focused':False},{'secret_input':True},{'host_input':True},{'host_observation':dict(revision=2,nonws_end=1,context_valid=True,entry='Idle',editor=None,view=None)}):

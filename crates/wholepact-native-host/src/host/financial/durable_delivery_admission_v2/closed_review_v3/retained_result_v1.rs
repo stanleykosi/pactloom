@@ -15,7 +15,14 @@ impl HostMaterialDeliveryRestrictionV1 {
     /// Only for the sealed no-effect interstage wait. This cached clock check
     /// cannot authorize source/TTY/network work or bypass ordinary park denial.
     pub(super) fn check_parked_wait_bounds(&self) -> Result<()> {
-        self.bounds.check()
+        let result = self.bounds.check();
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if let Err(error) = &result {
+            crate::financial_ci_host_failure::native(
+                crate::financial_ci_host_failure::Stage::ParkedMaterialBounds, error,
+            );
+        }
+        result
     }
 
     // Called once only from actual source-backed V3 recipient preparation,

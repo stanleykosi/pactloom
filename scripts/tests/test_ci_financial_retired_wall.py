@@ -129,6 +129,11 @@ class RetiredWallSourceTests(unittest.TestCase):
 
     def test_preflight_runs_exact_retired_wall_trace_after_compiler_and_preserves_all_p89_gates(self):
         workflow=(ROOT/'.github/workflows/deadline-preflight.yml').read_bytes().decode('utf-8')
+        p91_command="          print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-parked-material-ordering-trace.py', '--source', str(repo), '--out', str(root/'parked-material-ordering-traces'), '--run'], env=env, timeout=180))\n"
+        self.assertEqual(workflow.count(p91_command),1)
+        self.assertEqual(workflow.count('parked-material-review-preflight-p91'),4)
+        self.assertEqual(workflow.count('name: Parked material review preflight only\n'),1)
+        workflow=workflow.replace(p91_command,'',1).replace('name: Parked material review preflight only\n','name: Retained signing wall preflight only\n',1).replace('parked-material-review-preflight-p91','retained-signing-wall-preflight-p90')
         command="          print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-retired-wall-trace.py', '--source', str(repo), '--out', str(root/'retired-wall-traces'), '--run'], env=env, timeout=180))\n"
         self.assertEqual(workflow.count(command),1)
         self.assertEqual(workflow.count('scripts/ci-financial-retired-wall-trace.py'),1)

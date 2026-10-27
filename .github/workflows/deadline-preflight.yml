@@ -1,14 +1,14 @@
-name: Retained signing wall preflight only
+name: Parked material review preflight only
 on:
   push:
-    branches: [checkpoint/retained-signing-wall-preflight-p90]
+    branches: [checkpoint/parked-material-review-preflight-p91]
 permissions: {}
 concurrency:
-  group: retained-signing-wall-preflight-p90
+  group: parked-material-review-preflight-p91
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/retained-signing-wall-preflight-p90' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/parked-material-review-preflight-p91' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -130,6 +130,7 @@ jobs:
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-postimport-frame-trace.py', '--source', str(repo), '--out', str(root/'postimport-frame-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-service-lifetime-trace.py', '--source', str(repo), '--out', str(root/'service-lifetime-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-retired-wall-trace.py', '--source', str(repo), '--out', str(root/'retired-wall-traces'), '--run'], env=env, timeout=180))
+          print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-parked-material-ordering-trace.py', '--source', str(repo), '--out', str(root/'parked-material-ordering-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-admit-read-trace.py', '--source', str(repo), '--out', str(root/'admit-read-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-transport-identity-trace.py', '--source', str(repo), '--out', str(root/'transport-identity-traces'), '--run'], env=env, timeout=180))
           print(run(rustup+['python3', '-I', '-B', 'scripts/ci-financial-ready-deadline-trace.py', '--source', str(repo), '--out', str(root/'ready-deadline-traces'), '--run'], env=env, timeout=180))
@@ -215,7 +216,7 @@ jobs:
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B scripts/ci-financial-downstream-projection-audit.py --source "$PWD"
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/retained-signing-wall-preflight-p90' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/parked-material-review-preflight-p91' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

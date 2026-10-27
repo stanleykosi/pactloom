@@ -651,15 +651,21 @@ class FullFlow:
             if button is not None and button['enabled']:
                 self.press(s,action,owner);return True
             if button is None:return not self.review_seek(s,action,owner,action,ack,body)
-            self.scrolls[pending]=1
+            # Two ordinary body wheels amortize a clipped action/body round
+            # trip only on these exact native routes. This is navigation work,
+            # never a read-completion receipt or permission to press an action.
+            self.scrolls[pending]=2 if (s['subphase']=='None' and
+                C.REVIEW_ROUTES.get(s['phase'])==(body,ack,action)) else 1
             self.note_review_observation(s)
-        # Remember only an owed ordinary wheel gesture, not read completion.
+        # Remember only owed ordinary wheel gestures, not read completion.
         # The disabled action and review body may occupy disjoint viewports.
-        # Re-seek the action only after the actual body scroll has completed.
+        # One wheel per turn: the next still passes through the original fresh
+        # main-loop observation, Host priority and unchanged input/deadline caps.
         observed_body=self.find(s,body,owner)
         if observed_body is not None and not observed_body['enabled']:return False
         if self.scroll(s,body,owner):
-            del self.scrolls[pending]
+            self.scrolls[pending]-=1
+            if not self.scrolls[pending]:del self.scrolls[pending]
             self.note_review_observation(s)
             return True
         return not self.review_seek(s,body,owner,action,ack,body)
