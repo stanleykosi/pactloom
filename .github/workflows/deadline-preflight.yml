@@ -1,14 +1,14 @@
-name: Retained signing check preflight only
+name: Durable result lifecycle preflight only
 on:
   push:
-    branches: [checkpoint/retained-signing-check-preflight-p92]
+    branches: [checkpoint/durable-result-lifecycle-preflight-p93]
 permissions: {}
 concurrency:
-  group: retained-signing-check-preflight-p92
+  group: durable-result-lifecycle-preflight-p93
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/retained-signing-check-preflight-p92' && github.event_name == 'push'
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/durable-result-lifecycle-preflight-p93' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -220,7 +220,7 @@ jobs:
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/preflight-home" python3 -I -B scripts/ci-financial-downstream-projection-audit.py --source "$PWD"
   affected-contexts:
     needs: preflight
-    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/retained-signing-check-preflight-p92' && github.event_name == 'push'
+    if: success() && github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/checkpoint/durable-result-lifecycle-preflight-p93' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

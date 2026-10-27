@@ -4678,6 +4678,7 @@ pub(in crate::native_ui) struct FinancialNativeFixtureV1 {
     inner:DurableDeliveryNativeFixtureV2,
     provider:std::cell::RefCell<Option<wholepact_signer_origin::InstalledSignerProvider>>,
     deadline:Instant,
+    reopened: Option<ReopenedFinancialCustodyV2>,
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq,serde::Serialize,serde::Deserialize)]
 pub enum FinancialQualificationPhaseV1 { Opening,ReadReview,ContinueReview,AwaitingAdmission,AdmitReview,AcquireReview,ActivateReview,WalletReview,SignReview,AwaitingReturn,ReturnReview,Working,Complete,Aborted }
@@ -4697,7 +4698,7 @@ impl ClosedDeliveryNativeFixtureV3 {
         self.inner.runtime.password=Zeroizing::new(crate::native_ui::birth_workspace::born_roster_v3::SYNTHETIC_PENDING_PASSWORD.into());
         self.inner.runtime.wallet_setup=Zeroizing::new(wallet_setup_json);
         self.inner.runtime.begin_financial_original_v1(true,EPOCH,terms)?;
-        Ok(FinancialNativeFixtureV1{inner:self.inner,provider:std::cell::RefCell::new(Some(provider)),deadline})
+        Ok(FinancialNativeFixtureV1{inner:self.inner,provider:std::cell::RefCell::new(Some(provider)),deadline,reopened:None})
     }
 }
 impl FinancialNativeFixtureV1 {
@@ -4729,5 +4730,482 @@ impl FinancialNativeFixtureV1 {
         let original=self.inner.original.take().ok_or(Error::Unavailable)?;
         if let Some(directory)=Arc::into_inner(original.temporary){let kept=directory.keep();if !self.inner.root.starts_with(&kept)||self.inner.root==kept{return Err(Error::ReviewMismatch);}selector.original_directory_preserved=true;}
         drop(original.credentials);Ok(selector)
+    }
+}
+
+/// Additive result-only fixture. Reuses actual native entry/clicks, never a
+/// data-to-authority conversion. This owner alone proves thread/native-owner
+/// reopening; a separate process fixture must prove OS-process death.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DurableResultQualificationPhaseV2 {
+    Opening, AwaitingRequest, ReadReview, Preparing, ReturnReview, Returning, Complete, Aborted,
+}
+pub(in crate::native_ui) struct DurableResultNativeFixtureV2 {
+    runtime: NativeRuntime,
+    preserved_pair: Option<Arc<PreservedDurablePairV2>>,
+    selector: DurableDeliveryReopenSelectorV2,
+    inventory: BTreeSet<OsString>,
+    // Exact authenticated source Instant; poll budget only, never permission.
+    original_deadline: Instant,
+    provider: std::cell::RefCell<Option<InstalledSignerProvider>>,
+}
+impl DurableResultNativeFixtureV2 {
+    pub(in crate::native_ui) fn open_existing(selector: DurableDeliveryReopenSelectorV2) -> Result<Self> {
+        Self::open_existing_inner(selector, None)
+    }
+    fn open_existing_inner(selector: DurableDeliveryReopenSelectorV2, pair: Option<Arc<PreservedDurablePairV2>>) -> Result<Self> {
+        if let Some(pair) = &pair { pair.check_progression(&selector, true)?; }
+        if selector.version != 20 || !selector.root.is_absolute() || selector.aggregate_budget_zatoshis == 0
+            || (pair.is_none() && !selector.original_directory_preserved)
+        { return Err(Error::ReviewMismatch); }
+        let proposal = Proposal::validate(selector.proposal.clone()).map_err(|_| Error::Verification)?;
+        require_plain_two_owner_manifest(&proposal, &selector.account_id)?;
+        let inventory = original_inventory(&selector.root)?;
+        let mut runtime = NativeRuntime::new(None);
+        runtime.root = selector.root.to_str().ok_or(Error::InvalidData)?.to_owned();
+        runtime.password = Zeroizing::new(crate::native_ui::birth_workspace::born_roster_v3::SYNTHETIC_PENDING_PASSWORD.into());
+        if runtime.begin_durable_result_v2(false, EPOCH).is_ok()
+            || runtime.begin_durable_result_v2(true, 0).is_ok()
+            || runtime.durable_result_phase_for_qualification_v2().is_some()
+        { return Err(Error::ReviewMismatch); }
+        runtime.begin_durable_result_v2(true, EPOCH)?;
+        let opening_deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            if Instant::now() >= opening_deadline { runtime.lock(); return Err(Error::Locked); }
+            runtime.poll(EPOCH);
+            match runtime.durable_result_phase_for_qualification_v2() {
+                Some(super::durable_result_v2::Phase::Opening) => std::thread::sleep(Duration::from_millis(2)),
+                Some(super::durable_result_v2::Phase::AwaitingRequest) => break,
+                _ => { runtime.lock(); return Err(Error::ReviewMismatch); }
+            }
+        }
+        let (request, _, original_deadline) = runtime.durable_result_custody_for_qualification_v2()?;
+        if request.request.account_id != selector.account_id
+            || request.request.fixed.proposal_digest != proposal.proposal_digest()
+            || request.request.fixed.manifest_digest != proposal.manifest_digest()
+        { runtime.lock(); return Err(Error::ReviewMismatch); }
+        // Same existing actual synthetic installed-current-process trust path;
+        // no identity or permission is reconstructed from the saved selector.
+        let provider = InstalledSignerProvider::qualification_current_process().map_err(|_| Error::Authentication)?;
+        Ok(Self { runtime, preserved_pair: pair, selector, inventory, original_deadline, provider: std::cell::RefCell::new(Some(provider)) })
+    }
+    pub(in crate::native_ui) fn provider(&self) -> Result<InstalledSignerProvider> {
+        self.runtime.durable_result_custody_for_qualification_v2()?;
+        self.provider.borrow_mut().take().ok_or(Error::Unavailable)
+    }
+    pub(in crate::native_ui) fn endpoint(&self) -> Result<PathBuf> {
+        Ok(self.runtime.durable_result_custody_for_qualification_v2()?.1)
+    }
+    pub(in crate::native_ui) fn result_request(&self) -> Result<crate::authority_bridge::financial_continuation_v1::DurableFinancialResultRequestV2> {
+        Ok(self.runtime.durable_result_custody_for_qualification_v2()?.0)
+    }
+    pub(in crate::native_ui) fn deadline(&self) -> Result<Instant> {
+        if Instant::now() >= self.original_deadline { return Err(Error::Locked); }
+        Ok(self.original_deadline)
+    }
+    pub(in crate::native_ui) fn poll(&mut self) -> Result<DurableResultQualificationPhaseV2> {
+        self.deadline()?;
+        self.runtime.poll(EPOCH);
+        use DurableResultQualificationPhaseV2 as P;
+        use super::durable_result_v2::Phase as Actual;
+        Ok(match self.runtime.durable_result_phase_for_qualification_v2().ok_or(Error::Unavailable)? {
+            Actual::Opening => P::Opening, Actual::AwaitingRequest => P::AwaitingRequest, Actual::ReadReview => P::ReadReview,
+            Actual::Preparing => P::Preparing, Actual::ReturnReview => P::ReturnReview, Actual::Returning => P::Returning,
+            Actual::Complete => P::Complete, Actual::Aborted => P::Aborted,
+        })
+    }
+    pub(in crate::native_ui) fn approve_current_review(&mut self) -> Result<()> {
+        if !matches!(self.poll()?, DurableResultQualificationPhaseV2::ReadReview | DurableResultQualificationPhaseV2::ReturnReview) {
+            return Err(Error::ReviewMismatch);
+        }
+        approve(&mut self.runtime)
+    }
+    fn drain_close(&mut self) -> Result<()> {
+        self.runtime.lock();
+        while !self.runtime.closing_accounts.is_empty() {
+            if Instant::now() >= self.original_deadline {
+                // Not a successful close. The enclosing owned-process fixture
+                // must reap any surviving cleanup thread within its own bound.
+                return Err(Error::Uncertain);
+            }
+            self.runtime.closing_accounts.retain(|done| !done.load(Ordering::Acquire));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        if self.runtime.durable_result_phase_for_qualification_v2().is_some() || self.runtime.pending.is_some()
+            || self.runtime.open.is_some() || self.runtime.financial_phase_v1().is_some()
+        { return Err(Error::Uncertain); }
+        if original_inventory(&self.selector.root)? != self.inventory { return Err(Error::ReviewMismatch); }
+        if let Some(pair) = &self.preserved_pair { pair.check_progression(&self.selector, true)?; }
+        Ok(())
+    }
+    pub(in crate::native_ui) fn close_preserving_originals(mut self) -> Result<DurableDeliveryReopenSelectorV2> {
+        self.drain_close()?;
+        Ok(self.selector.clone())
+    }
+}
+impl Drop for DurableResultNativeFixtureV2 {
+    fn drop(&mut self) { let _ = self.drain_close(); }
+}
+
+/// Closed qualification correlation only: current directory identities and the
+/// exact pair of original selectors. This is NOT native permission, a restored
+/// grant, authenticated journal contents, or clone-resistant authority.
+pub struct PreservedDurablePairV2 {
+    originals: [DurableDeliveryReopenSelectorV2; 2],
+    container: PathBuf,
+    container_identity: (u64, u64),
+    root_identities: [(u64, u64); 2],
+}
+impl PreservedDurablePairV2 {
+    pub fn verify(originals: [DurableDeliveryReopenSelectorV2; 2]) -> Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        if originals.iter().filter(|s| s.original_directory_preserved).count() != 1
+            || originals[0].account_id == originals[1].account_id
+            || originals[0].root == originals[1].root
+            || originals.iter().any(|s| !matches!(s.version, 2 | 20) || !s.root.is_absolute()
+                || s.root.as_os_str().len() > 4096 || s.aggregate_budget_zatoshis == 0
+                || s.owner_setup_json.is_empty() || s.owner_setup_json.len() > 64 * 1024
+                || !s.root.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_))))
+            || serde_json::to_vec(&originals).map_err(|_| Error::InvalidData)?.len() > 512 * 1024
+        { return Err(Error::ReviewMismatch); }
+        let container = originals[0].root.parent().ok_or(Error::ReviewMismatch)?.to_path_buf();
+        if container.parent().is_none() || originals[1].root.parent() != Some(container.as_path())
+            || std::fs::canonicalize(&container)? != container
+        { return Err(Error::ReviewMismatch); }
+        let metadata = std::fs::symlink_metadata(&container)?;
+        if !metadata.is_dir() { return Err(Error::ReviewMismatch); }
+        let mut root_identities = [(0, 0); 2];
+        for (index, source) in originals.iter().enumerate() {
+            if std::fs::canonicalize(&source.root)? != source.root { return Err(Error::ReviewMismatch); }
+            let metadata = std::fs::symlink_metadata(&source.root)?;
+            if !metadata.is_dir() { return Err(Error::ReviewMismatch); }
+            root_identities[index] = (metadata.dev(), metadata.ino());
+        }
+        let value = Self { originals, container, container_identity: (metadata.dev(), metadata.ino()), root_identities };
+        value.check()?;
+        Ok(value)
+    }
+    fn check(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(&self.container)?;
+        if !metadata.is_dir() || (metadata.dev(), metadata.ino()) != self.container_identity
+            || std::fs::canonicalize(&self.container)? != self.container
+        { return Err(Error::ReviewMismatch); }
+        for (index, source) in self.originals.iter().enumerate() {
+            let metadata = std::fs::symlink_metadata(&source.root)?;
+            if !metadata.is_dir() || (metadata.dev(), metadata.ino()) != self.root_identities[index]
+                || std::fs::canonicalize(&source.root)? != source.root
+            { return Err(Error::ReviewMismatch); }
+        }
+        Ok(())
+    }
+    fn original_for(&self, root: &Path, account: &str) -> Result<DurableDeliveryReopenSelectorV2> {
+        self.check()?;
+        self.originals.iter().find(|s| s.root == root && s.account_id == account).cloned().ok_or(Error::ReviewMismatch)
+    }
+    fn check_progression(&self, selector: &DurableDeliveryReopenSelectorV2, completed: bool) -> Result<()> {
+        let mut expected = self.original_for(&selector.root, &selector.account_id)?;
+        if completed { expected.version = 20; }
+        if serde_json::to_vec(&expected).map_err(|_| Error::InvalidData)?
+            != serde_json::to_vec(selector).map_err(|_| Error::InvalidData)?
+        { return Err(Error::ReviewMismatch); }
+        self.check()
+    }
+}
+struct ReopenedFinancialCustodyV2 {
+    pair: Arc<PreservedDurablePairV2>,
+    selector: DurableDeliveryReopenSelectorV2,
+    // Retain the SAME genuine reopened installation; never rebuild an old born
+    // fixture, native decision or authority from its paths/configuration.
+    _credentials: crate::native_ui::pending_enrollment::born_pending_continuation::EphemeralOwnerCredentials,
+}
+impl ClosedDeliveryNativeFixtureV3 {
+    pub(in crate::native_ui) fn into_financial_continuation_reopened_v2(
+        mut self, wallet_setup_json: String,
+        origin: wholepact_authority::native_witness_owner::EphemeralWitnessOriginV1,
+        pair: Arc<PreservedDurablePairV2>,
+    ) -> Result<FinancialNativeFixtureV1> {
+        if self.inner.original.is_some() { return Err(Error::ReviewMismatch); }
+        pair.check()?;
+        let selector = pair.original_for(&self.inner.root, &self.inner.scope.account_id)?;
+        if selector.version != 2 || selector.proposal != *self.inner.proposal.input()
+            || selector.aggregate_budget_zatoshis != self.inner.budget
+            || selector.owner_setup_json != *self.inner.owner_setup
+        { return Err(Error::ReviewMismatch); }
+        let terms = self.inner.runtime.financial_continuation_terms_v1()?;
+        terms.validate().map_err(|_| Error::ReviewMismatch)?;
+        let descriptor = &terms.scope.witness;
+        if descriptor.account_id != selector.account_id
+            || descriptor.network_profile_id != terms.scope.authorization.identity.network_profile_id
+            || descriptor.endpoint != origin.endpoint || descriptor.server_name != origin.server_name
+            || descriptor.witness_id != origin.witness_id
+            || descriptor.pinned_server_certificate_digest != origin.server_certificate_digest
+            || terms.scope.authorization.writer_certificate_digest != origin.writer_certificate_digest
+        { return Err(Error::ReviewMismatch); }
+        let credentials = crate::native_ui::pending_enrollment::born_pending_continuation::EphemeralOwnerCredentials::from_origin(origin)?;
+        let origin = credentials.origin();
+        let make_setup = |owner: bool| -> Result<String> {
+            serde_json::to_string(&serde_json::json!({
+                "schema_version":1,"endpoint":descriptor.endpoint,"server_name":descriptor.server_name,
+                "witness_id":descriptor.witness_id,"account_id":descriptor.account_id,
+                "network_profile_id":descriptor.network_profile_id,"policy_digest":descriptor.policy_digest,
+                "pinned_server_certificate_digest":descriptor.pinned_server_certificate_digest,
+                "trusted_server_root_der":origin.trusted_server_root_file,
+                "client_certificate_der":if owner { &origin.owner_certificate_file } else { &origin.writer_certificate_file },
+                "client_private_key_pkcs8_der":if owner { &origin.owner_key_file } else { &origin.writer_key_file },
+                "operator_name":"Synthetic reopened original never-funded Witness",
+                "retention_statement":"Same retained original credential installation only"
+            })).map_err(|_| Error::InvalidData)
+        };
+        let owner_setup = make_setup(true)?;
+        let writer_setup = make_setup(false)?;
+        // Maintained parser reads protected original credential files, verifies
+        // real TLS key/certificate correspondence and the exact descriptor.
+        for (setup, certificate) in [(&owner_setup, &origin.owner_certificate_digest), (&writer_setup, &origin.writer_certificate_digest)] {
+            let selected = crate::native_ui::witness_workspace::prepare_selected_witness_configuration(
+                setup, &descriptor.account_id, Some(&descriptor.network_profile_id))?;
+            if selected.client.disclosure_descriptor() != *descriptor || selected.writer_certificate_digest != *certificate {
+                return Err(Error::Authentication);
+            }
+        }
+        // The prior selected owner configuration is metadata only; compare its
+        // actual parsed certificate and descriptor too. Production open then
+        // independently matches owner cert to the retained original enrollment.
+        let prior = crate::native_ui::witness_workspace::prepare_selected_witness_configuration(
+            &self.inner.owner_setup, &descriptor.account_id, Some(&descriptor.network_profile_id))?;
+        if prior.client.disclosure_descriptor() != *descriptor || prior.writer_certificate_digest != origin.owner_certificate_digest {
+            return Err(Error::Authentication);
+        }
+        let provider = self.provider()?;
+        let now = u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| Error::Locked)?.as_millis()).map_err(|_| Error::Locked)?;
+        let deadline = Instant::now().checked_add(Duration::from_millis(terms.valid_until_ms.checked_sub(now).ok_or(Error::Locked)?)).ok_or(Error::InvalidData)?;
+        self.inner.runtime.witness_setup = Zeroizing::new(writer_setup);
+        self.inner.runtime.owner_witness_setup = Zeroizing::new(owner_setup);
+        self.inner.runtime.password = Zeroizing::new(crate::native_ui::birth_workspace::born_roster_v3::SYNTHETIC_PENDING_PASSWORD.into());
+        self.inner.runtime.wallet_setup = Zeroizing::new(wallet_setup_json);
+        pair.check()?;
+        self.inner.runtime.begin_financial_original_v1(true, EPOCH, terms)?;
+        Ok(FinancialNativeFixtureV1 {
+            inner: self.inner, provider: std::cell::RefCell::new(Some(provider)), deadline,
+            reopened: Some(ReopenedFinancialCustodyV2 { pair, selector, _credentials: credentials }),
+        })
+    }
+}
+impl FinancialNativeFixtureV1 {
+    pub(in crate::native_ui) fn close_preserving_reopened_v2(mut self) -> Result<DurableDeliveryReopenSelectorV2> {
+        let custody = self.reopened.take().ok_or(Error::Unavailable)?;
+        custody.pair.check()?;
+        if self.inner.original.is_some() || self.inner.root != custody.selector.root
+            || original_inventory(&self.inner.root)? != self.inner.original_inventory
+        { return Err(Error::ReviewMismatch); }
+        self.inner.drain_close()?;
+        if self.inner.runtime.financial_phase_v1().is_some()
+            || original_inventory(&self.inner.root)? != self.inner.original_inventory
+        { return Err(Error::Uncertain); }
+        let mut selector = custody.selector.clone();
+        selector.version = 20;
+        // No false→true rewrite: the retained pair still owns the original
+        // collective preservation observation and current directory identities.
+        custody.pair.check_progression(&selector, true)?;
+        Ok(selector)
+    }
+}
+impl DurableResultNativeFixtureV2 {
+    pub(in crate::native_ui) fn open_existing_in_pair(
+        selector: DurableDeliveryReopenSelectorV2, pair: Arc<PreservedDurablePairV2>,
+    ) -> Result<Self> {
+        pair.check_progression(&selector, true)?;
+        Self::open_existing_inner(selector, Some(pair))
+    }
+}
+
+pub use super::durable_result_v2::{DurableResultGrantProbeV2, DurableResultGrantProbeOutcomeV2};
+impl DurableResultNativeFixtureV2 {
+    pub(in crate::native_ui) fn probe_grant(
+        &mut self, probe: DurableResultGrantProbeV2,
+        other_stream: Option<std::os::unix::net::UnixStream>, stop: &AtomicBool,
+    ) -> Result<DurableResultGrantProbeOutcomeV2> {
+        let phase = self.poll()?;
+        let read = matches!(probe, DurableResultGrantProbeV2::WrongRequestRead | DurableResultGrantProbeV2::WrongRecipientRead | DurableResultGrantProbeV2::RevokedRead);
+        if phase != if read { DurableResultQualificationPhaseV2::ReadReview } else { DurableResultQualificationPhaseV2::ReturnReview } {
+            return Err(Error::ReviewMismatch);
+        }
+        let mut pending = self.runtime.pending.take().ok_or(Error::Unavailable)?;
+        let expected = if read { super::durable_result_v2::Decision::Read } else { super::durable_result_v2::Decision::Return };
+        if !matches!(&pending.operation, Operation::DurableResultV2(actual) if *actual == expected)
+            || pending.review.display().is_empty() || pending.review.confirming()
+            || pending.review.continue_from_native_click(false, EPOCH).is_ok()
+            || pending.review.continue_from_native_click(true, EPOCH + 1).is_ok()
+        { return Err(Error::ReviewMismatch); }
+        pending.review.continue_from_native_click(true, EPOCH)?;
+        let phrase = Zeroizing::new(format!("AUTHORIZE {}", &pending.review.digest()[..12]));
+        // This is the actual maintained exact review consume, not a decision
+        // DTO, cfg-only issuer, unchecked click, or copied prior permission.
+        let decision = pending.review.consume_native_click(true, EPOCH, &phrase)?;
+        self.runtime.probe_durable_result_grant_v2(probe, decision, other_stream, stop)
+    }
+}
+
+/// Inert pre-Sign custody correlation for a supervisor-owned process-death
+/// experiment. There is deliberately NO preserved flag or authority owner.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartedFinancialCustodyV2 {
+    pub root: PathBuf,
+    pub account_id: String,
+    pub authorization_id: String,
+    pub proposal: ProposalInput,
+    aggregate_budget_zatoshis: u64,
+    owner_setup_json: String,
+    continuation_terms_digest: String,
+    root_identity: [u64; 2],
+    container_identity: [u64; 2],
+    inventory: Vec<String>,
+}
+impl StartedFinancialCustodyV2 {
+    fn identity(path: &Path) -> Result<[u64; 2]> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(path).map_err(|_| Error::InvalidData)?;
+        if !metadata.file_type().is_dir() { return Err(Error::ReviewMismatch); }
+        Ok([metadata.dev(), metadata.ino()])
+    }
+    fn check(&self) -> Result<()> {
+        if !self.root.is_absolute() || self.root.as_os_str().len() > 4096
+            || !self.root.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)))
+            || self.account_id.len() != 64 || self.authorization_id.is_empty() || self.authorization_id.len() > 512
+            || self.continuation_terms_digest.len() != 64 || self.aggregate_budget_zatoshis == 0
+            || self.owner_setup_json.is_empty() || self.owner_setup_json.len() > 65536
+            || self.inventory.is_empty() || self.inventory.len() > 128
+        { return Err(Error::ReviewMismatch); }
+        let canonical = std::fs::canonicalize(&self.root).map_err(|_| Error::InvalidData)?;
+        let parent = self.root.parent().filter(|p| p.parent().is_some()).ok_or(Error::ReviewMismatch)?;
+        if canonical != self.root || Self::identity(&self.root)? != self.root_identity
+            || Self::identity(parent)? != self.container_identity
+        { return Err(Error::ReviewMismatch); }
+        let proposal = Proposal::validate(self.proposal.clone()).map_err(|_| Error::Verification)?;
+        require_plain_two_owner_manifest(&proposal, &self.account_id)?;
+        let actual: Vec<String> = original_inventory(&self.root)?.iter()
+            .map(|name| name.to_str().map(str::to_owned).ok_or(Error::InvalidData)).collect::<Result<_>>()?;
+        if !started_inventory_lifecycle_v2(&self.inventory, &actual) { return Err(Error::ReviewMismatch); }
+        Ok(())
+    }
+    /// The actual owning parent must retain this root and verify old process
+    /// death. This is path correlation, never a substitute for native unlock.
+    pub fn validate_owned_root(&self, owned: &Path) -> Result<()> {
+        self.check()?;
+        let owned = std::fs::canonicalize(owned).map_err(|_| Error::InvalidData)?;
+        let relative = self.root.strip_prefix(&owned).map_err(|_| Error::ReviewMismatch)?;
+        if relative.as_os_str().is_empty() || !relative.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(())
+    }
+}
+impl FinancialNativeFixtureV1 {
+    pub(in crate::native_ui) fn capture_and_arm_started_v2(&mut self, outer_deadline: Instant) -> Result<StartedFinancialCustodyV2> {
+        if self.poll()? != FinancialQualificationPhaseV1::SignReview { return Err(Error::ReviewMismatch); }
+        let (account_id, authorization_id, continuation_terms_digest, source_deadline) = self.inner.runtime.capture_started_identity_for_qualification_v2()?;
+        if account_id != self.inner.scope.account_id || Instant::now() >= outer_deadline.min(source_deadline) { return Err(Error::Locked); }
+        let parent = self.inner.root.parent().ok_or(Error::ReviewMismatch)?;
+        let value = StartedFinancialCustodyV2 {
+            root: self.inner.root.clone(), account_id, authorization_id,
+            proposal: self.inner.proposal.input().clone(), aggregate_budget_zatoshis: self.inner.budget,
+            owner_setup_json: self.inner.owner_setup.to_string(), continuation_terms_digest,
+            root_identity: StartedFinancialCustodyV2::identity(&self.inner.root)?,
+            container_identity: StartedFinancialCustodyV2::identity(parent)?,
+            inventory: original_inventory(&self.inner.root)?.iter()
+                .map(|name| name.to_str().map(str::to_owned).ok_or(Error::InvalidData)).collect::<Result<_>>()?,
+        };
+        value.check()?;
+        crate::authority_bridge::financial_continuation_v1::arm_durable_financial_started_fail_stop_v2(
+            &value.account_id, &value.authorization_id, outer_deadline.min(source_deadline),
+        )?;
+        // The caller separately performs the unchanged real Sign click. The
+        // captured DTO is not a Started claim; only the later hook/audit is.
+        Ok(value)
+    }
+}
+/// Composed exact selection-kernel rejection through a genuine original20
+/// native reopen. Not an end-to-end V2 UI opener or successful Return claim.
+pub fn audit_started_after_restart_v2(custody: StartedFinancialCustodyV2, outer_deadline: Instant) -> Result<String> {
+    custody.check()?;
+    if Instant::now() >= outer_deadline { return Err(Error::Locked); }
+    let mut runtime = NativeRuntime::new(None);
+    runtime.root = custody.root.to_str().ok_or(Error::InvalidData)?.to_owned();
+    runtime.password = Zeroizing::new(crate::native_ui::birth_workspace::born_roster_v3::SYNTHETIC_PENDING_PASSWORD.into());
+    runtime.owner_witness_setup = Zeroizing::new(custody.owner_setup_json.clone());
+    let mut close_deadline = outer_deadline.min(Instant::now() + Duration::from_secs(120));
+    let result = (|| {
+        runtime.begin_financial_result_reopen_v1(true, EPOCH)?;
+        let opening_deadline = outer_deadline.min(Instant::now() + Duration::from_secs(120));
+        loop {
+            if Instant::now() >= opening_deadline { return Err(Error::Locked); }
+            runtime.poll(EPOCH);
+            if let Some(error) = runtime.take_financial_failure_v1() { return Err(error); }
+            match runtime.financial_phase_v1() {
+                Some(super::financial_v1::FinancialPhaseV1::Opening) => std::thread::sleep(Duration::from_millis(2)),
+                Some(super::financial_v1::FinancialPhaseV1::AwaitingReturn) => break,
+                _ => return Err(Error::ReviewMismatch),
+            }
+        }
+        let (audit, original_deadline) = runtime.audit_started_after_reopen_for_qualification_v2(
+            &custody.account_id, &custody.authorization_id, &custody.continuation_terms_digest,
+        )?;
+        close_deadline = outer_deadline.min(original_deadline);
+        custody.check()?;
+        Ok(audit)
+    })();
+    runtime.lock();
+    while !runtime.closing_accounts.is_empty() {
+        if Instant::now() >= close_deadline { return Err(Error::Uncertain); }
+        runtime.closing_accounts.retain(|done| !done.load(Ordering::Acquire));
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    if runtime.financial_phase_v1().is_some() || runtime.durable_result_phase_for_qualification_v2().is_some()
+        || runtime.open.is_some() || runtime.pending.is_some()
+    { return Err(Error::Uncertain); }
+    custody.check()?;
+    result
+}
+
+// Qualification custody correlation only: the actual encrypted journal owner
+// checks every live component. SQLite may checkpoint/remove exactly these two
+// sidecars when its last connection closes; all raw captured names stay in the
+// DTO, while logical Started/result/outbox immutability is audited separately.
+fn started_inventory_lifecycle_v2(before: &[String], after: &[String]) -> bool {
+    let canonical = |names: &[String]| names.iter().any(|name| name == "authority.sqlite")
+        && names.windows(2).all(|pair| pair[0] < pair[1]);
+    if !canonical(before) || !canonical(after) { return false; }
+    let stable = |name: &&String| !matches!(name.as_str(), "authority.sqlite-wal" | "authority.sqlite-shm");
+    before.iter().filter(stable).eq(after.iter().filter(stable))
+}
+#[cfg(test)]
+mod started_custody_inventory_v2_tests {
+    use super::started_inventory_lifecycle_v2;
+    fn names(sidecars: usize) -> Vec<String> {
+        let mut names = vec!["authority.sqlite".into(), "original-record.json".into(), "signer.lock".into()];
+        if sidecars & 1 != 0 { names.push("authority.sqlite-wal".into()); }
+        if sidecars & 2 != 0 { names.push("authority.sqlite-shm".into()); }
+        names.sort(); names
+    }
+    #[test]
+    fn started_custody_inventory_allows_only_exact_sqlite_sidecar_lifecycle() {
+        for before in 0..4 { for after in 0..4 {
+            assert!(started_inventory_lifecycle_v2(&names(before), &names(after)));
+        }}
+        let base = names(3);
+        for index in [0, 3, 4] {
+            let mut missing = base.clone(); missing.remove(index);
+            assert!(!started_inventory_lifecycle_v2(&base, &missing));
+            assert!(!started_inventory_lifecycle_v2(&missing, &base));
+        }
+        for unknown in ["authority.sqlite-journal", "authority.sqlite-wal-extra", "authority.sqlite-shm-extra", "unexpected"] {
+            let mut extra = base.clone(); extra.push(unknown.into()); extra.sort();
+            assert!(!started_inventory_lifecycle_v2(&base, &extra));
+            assert!(!started_inventory_lifecycle_v2(&extra, &base));
+        }
+        let mut duplicate = base.clone(); duplicate.push("authority.sqlite-wal".into()); duplicate.sort();
+        assert!(!started_inventory_lifecycle_v2(&duplicate, &base));
+        assert!(!started_inventory_lifecycle_v2(&base, &duplicate));
     }
 }

@@ -3,6 +3,8 @@
 //! original-file identities remain mandatory after the one-way vault transition.
 mod financial_v1;
 pub(in crate::host) use financial_v1::OriginalFinancialOwnerV1;
+mod financial_v2;
+pub(in crate::host) use financial_v2::OriginalFinancialOwnerV2;
 
 use super::{Host, durable_private_workspace_v1 as workspace};
 use crate::{Error, Result, files::{Directory, DispatcherFileV2}, vault::Secrets,

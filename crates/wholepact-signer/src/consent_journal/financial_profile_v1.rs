@@ -26,6 +26,9 @@ pub(crate) use coordinated_continue::{CoordinatedContinueReviewDataV1, Coordinat
 pub(crate) use coordinated_continue::{PresentedCoordinatedFinancialContinuationV1, CoordinatedContinuationCommitFailureV1};
 #[path = "financial_bridge_storage_v1.rs"]
 mod bridge;
+pub(crate) use bridge::AuditedDurableFinancialResultRowsV2;
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub(crate) use bridge::FinancialStartedOnlyAuditV2;
 #[path = "financial_return_pin_v1.rs"]
 mod return_pin;
 pub(crate) use return_pin::FinancialReturnJournalPinV1;

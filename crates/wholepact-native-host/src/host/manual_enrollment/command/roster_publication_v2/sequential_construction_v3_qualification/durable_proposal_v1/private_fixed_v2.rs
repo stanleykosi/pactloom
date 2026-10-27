@@ -728,6 +728,8 @@ enum CompletedPreparationV2 {
     FixedReopen,
     DeliveryAdmission,
     FinancialContinuation,
+    DurableResultLifecycle,
+    DurableResultStarted,
     CoordinatedPreV3Fixture,
     CoordinatedLivePreV3Fixture,
 }
@@ -751,6 +753,22 @@ pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequentia
         terminal,
         CompletedPreparationV2::FinancialContinuation,
     ))
+}
+
+pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) fn produce_durable_result_child(
+    terminal: crate::terminal::Terminal,
+) -> Result<()> {
+    let _diagnostic_scope = private_diagnostic::begin_private_fixed_diagnostic_scope_v1();
+    super::delivery_admission_v2::durable_financial_dispatch_v1::record_financial_preparation_v1()?;
+    child_result(produce_fixed_inner(terminal, CompletedPreparationV2::DurableResultLifecycle))
+}
+
+pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) fn produce_durable_result_started_child(
+    terminal: crate::terminal::Terminal,
+) -> Result<()> {
+    let _diagnostic_scope = private_diagnostic::begin_private_fixed_diagnostic_scope_v1();
+    super::delivery_admission_v2::durable_financial_dispatch_v1::record_financial_preparation_v1()?;
+    child_result(produce_fixed_inner(terminal, CompletedPreparationV2::DurableResultStarted))
 }
 
 pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) fn produce_coordinated_pre_v3_child(terminal: crate::terminal::Terminal) -> Result<()> {
@@ -879,7 +897,7 @@ fn produce_fixed_inner(
     let host = at(B::PrivateWorkspaceInitialize, || {
         Host::open_private_workspace_registered_v1(terminal.clone(), &profile, &workspace, true)
     })?;
-    let runtime = if matches!(continuation, CompletedPreparationV2::FinancialContinuation | CompletedPreparationV2::CoordinatedPreV3Fixture | CompletedPreparationV2::CoordinatedLivePreV3Fixture) {
+    let runtime = if matches!(continuation, CompletedPreparationV2::FinancialContinuation | CompletedPreparationV2::DurableResultLifecycle | CompletedPreparationV2::DurableResultStarted | CompletedPreparationV2::CoordinatedPreV3Fixture | CompletedPreparationV2::CoordinatedLivePreV3Fixture) {
         // The same finite provider must remain runnable while independent native
         // signing workers perform their fresh wallet reads outside block_on.
         tokio::runtime::Builder::new_multi_thread()
@@ -962,7 +980,7 @@ fn produce_fixed_inner(
         host.private_fixed_session_v2(&workspace, FIX_KEY, request, &cache)
     })?;
     let transport_diagnostics = wholepact_chain::TransportDiagnostics::default();
-    if matches!(continuation, CompletedPreparationV2::FinancialContinuation | CompletedPreparationV2::CoordinatedPreV3Fixture | CompletedPreparationV2::CoordinatedLivePreV3Fixture) {
+    if matches!(continuation, CompletedPreparationV2::FinancialContinuation | CompletedPreparationV2::DurableResultLifecycle | CompletedPreparationV2::DurableResultStarted | CompletedPreparationV2::CoordinatedPreV3Fixture | CompletedPreparationV2::CoordinatedLivePreV3Fixture) {
         session.set_transport_diagnostics_v1(transport_diagnostics.clone())?;
     }
     let accounts = session.reviewer_account_ids();
@@ -1130,7 +1148,7 @@ fn produce_fixed_inner(
             },
         ))?;
         if matches!(continuation, CompletedPreparationV2::DeliveryAdmission)
-            || matches!(continuation, CompletedPreparationV2::FinancialContinuation | CompletedPreparationV2::CoordinatedPreV3Fixture | CompletedPreparationV2::CoordinatedLivePreV3Fixture)
+            || matches!(continuation, CompletedPreparationV2::FinancialContinuation | CompletedPreparationV2::DurableResultLifecycle | CompletedPreparationV2::DurableResultStarted | CompletedPreparationV2::CoordinatedPreV3Fixture | CompletedPreparationV2::CoordinatedLivePreV3Fixture)
         {
             delivery_original_disclosures.push(super::delivery_admission_v2::OriginalDisclosureV2 {
                 account_id: account.account_id.clone(),
@@ -1167,7 +1185,7 @@ fn produce_fixed_inner(
     let fixed = match runtime.block_on(session.finish_fixed_v2()) {
         Ok(fixed) => fixed,
         Err(error) => {
-            if matches!(continuation, CompletedPreparationV2::FinancialContinuation | CompletedPreparationV2::CoordinatedPreV3Fixture | CompletedPreparationV2::CoordinatedLivePreV3Fixture) {
+            if matches!(continuation, CompletedPreparationV2::FinancialContinuation | CompletedPreparationV2::DurableResultLifecycle | CompletedPreparationV2::DurableResultStarted | CompletedPreparationV2::CoordinatedPreV3Fixture | CompletedPreparationV2::CoordinatedLivePreV3Fixture) {
                 // Recording must never replace the actual failure or retry work.
                 let _ = super::delivery_admission_v2::durable_financial_dispatch_v1::record_financial_transport_failure_v1(
                     transport_diagnostics.snapshot(), provider.diagnostics_snapshot_v1(),
@@ -1177,7 +1195,7 @@ fn produce_fixed_inner(
         }
     };
     if matches!(continuation, CompletedPreparationV2::DeliveryAdmission)
-        || matches!(continuation, CompletedPreparationV2::FinancialContinuation | CompletedPreparationV2::CoordinatedPreV3Fixture | CompletedPreparationV2::CoordinatedLivePreV3Fixture)
+        || matches!(continuation, CompletedPreparationV2::FinancialContinuation | CompletedPreparationV2::DurableResultLifecycle | CompletedPreparationV2::DurableResultStarted | CompletedPreparationV2::CoordinatedPreV3Fixture | CompletedPreparationV2::CoordinatedLivePreV3Fixture)
     {
         // ONLY the new branch releases this successfully completed session.
         // Its proof/cache workers have finished; the old branch below retains
@@ -1186,7 +1204,7 @@ fn produce_fixed_inner(
         drop(session);
         let financial_wallet_setup = if matches!(
             continuation,
-            CompletedPreparationV2::FinancialContinuation | CompletedPreparationV2::CoordinatedPreV3Fixture | CompletedPreparationV2::CoordinatedLivePreV3Fixture
+            CompletedPreparationV2::FinancialContinuation | CompletedPreparationV2::DurableResultLifecycle | CompletedPreparationV2::DurableResultStarted | CompletedPreparationV2::CoordinatedPreV3Fixture | CompletedPreparationV2::CoordinatedLivePreV3Fixture
         ) {
             Some(serde_json::to_string(&serde_json::json!({
                 "schema_version": 1, "purpose": "fresh_born_ephemeral_viewing_wallet_v1",
@@ -1217,6 +1235,11 @@ fn produce_fixed_inner(
             financial_wallet_setup,
             matches!(continuation, CompletedPreparationV2::CoordinatedPreV3Fixture | CompletedPreparationV2::CoordinatedLivePreV3Fixture),
             matches!(continuation, CompletedPreparationV2::CoordinatedLivePreV3Fixture),
+            match continuation {
+                CompletedPreparationV2::DurableResultLifecycle => Some(super::delivery_admission_v2::DurableResultPreparationV2::Lifecycle),
+                CompletedPreparationV2::DurableResultStarted => Some(super::delivery_admission_v2::DurableResultPreparationV2::StartedOnly),
+                _ => None,
+            },
         );
     }
     let expected = at(B::PrivateWorkspaceIdentityCompare, || {

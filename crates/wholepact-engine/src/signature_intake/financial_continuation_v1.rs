@@ -2,12 +2,12 @@
 //! caller-owned account association can construct this source.
 use super::*;
 use wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1;
-use wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialResultLeaseV1;
+use wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialResultEvidenceV2;
 
 pub(crate) fn retention_inputs(
     checkpoint: &VerifiedCheckpoint,
     fixed: &FixedProposalIdentityV1,
-    actual: &AuthenticatedFinancialResultLeaseV1,
+    actual: &impl AuthenticatedFinancialResultEvidenceV2,
 ) -> Result<(SignedCandidateContext, Vec<ExternalSignature>)> {
     use sha2::{Digest, Sha256};
     actual.check_current().map_err(|_| association_missing())?;

@@ -24,6 +24,7 @@ def load(name):
     module=importlib.util.module_from_spec(spec);sys.modules[key]=module;spec.loader.exec_module(module);return module
 B=load('ci-ui-image');O=load('ci-financial-ocr-image')
 BASE_IMAGE=B.BASE_IMAGE
+D=load('ci-financial-durable')
 ARTIFACT_FILES=('coordinator-production','coordinator-observed','pristine-setup')
 MODULE_SOURCE='ci-financial-weston-module.c'
 MODULE_BINARY='ci-financial-weston-module.so'
@@ -35,14 +36,21 @@ def literal(path,name):
             return ast.literal_eval(node.value)
     raise B.Rejected('manifest')
 
+def artifact_files(selected=None):
+    selected=profile() if selected is None else selected
+    B._require(selected in (D.PROFILE,literal(ROOT/'ci-financial-contract.py','EXTERNAL_PROFILE'),literal(ROOT/'ci-financial-contract.py','SEMANTIC_PROFILE')),'qualification_gate')
+    return D.ARTIFACTS if selected==D.PROFILE else ARTIFACT_FILES
+
 def runtime_files():
     names=literal(ROOT/'ci-financial-container.py','RUNTIME_FILES')
+    if profile()==D.PROFILE:names=names+('ci-financial-durable.py',)
     B._require(type(names) is tuple and MODULE_BINARY in names and len(names)==len(set(names)),'input_allowlist')
     B._require(all(type(n) is str and re.fullmatch(r'ci-financial-[a-z-]+\.(py|so)',n) for n in names),'input_allowlist')
     return tuple(n for n in names if n!=MODULE_BINARY)
 
 def profile():
     gate=(ROOT/'qualification-gate-mode').read_bytes()
+    if gate==D.GATE:return D.PROFILE
     B._require(gate in (b'financial-ui\n',b'financial-semantic\n'),'qualification_gate')
     return literal(ROOT/'ci-financial-contract.py',
         'SEMANTIC_PROFILE' if gate==b'financial-semantic\n' else 'EXTERNAL_PROFILE')
@@ -51,7 +59,7 @@ def pin(raw):return {'size':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}
 
 def metadata(base,ocr,pins,source_commit):
     B._require(re.fullmatch('[0-9a-f]{40}',source_commit) is not None,'source_commit')
-    B._require(set(pins)==set(runtime_files())|set(ARTIFACT_FILES)|{MODULE_SOURCE},'input_allowlist')
+    B._require(set(pins)==set(runtime_files())|set(artifact_files())|{MODULE_SOURCE},'input_allowlist')
     packages={r['name']:r for r in base['packages']}
     packages.update({r['name']:r for r in ocr['additional_packages']})
     runtime=set(base['closures']['runtime'])|set(ocr['ocr_closure'])
@@ -74,6 +82,9 @@ def installer():
     # themselves are copied only in the terminal runtime stage.
     script=script.replace("need({p.name for p in pathlib.Path('/ci-inputs').iterdir()} == set(meta['inputs']), 'input_set')", "need({p.name for p in pathlib.Path('/ci-inputs').iterdir()} == set(RUNTIME_FILES) | {'ci-financial-weston-module.c'}, 'input_set')")
     script=script.replace("for name, pin in meta['inputs'].items():\n        verify(pathlib.Path('/ci-inputs') / name, pin)","for name in (*RUNTIME_FILES, 'ci-financial-weston-module.c'):\n        verify(pathlib.Path('/ci-inputs') / name, meta['inputs'][name])")
+    if profile()==D.PROFILE:
+        script=re.sub(r'^ARTIFACT_FILES = .*$', 'ARTIFACT_FILES = '+repr(D.ARTIFACTS),script,flags=re.M)
+        script=script.replace("10001 if name == 'pristine-setup' else 0", "10001 if name == 'durable-lifecycle-qualification' else 0")
     return script
 
 _FINALIZE=r'''def finalize(meta):
@@ -120,7 +131,7 @@ _FINALIZE=r'''def finalize(meta):
 
 def dockerfile():
     scripts='\n'.join(f'COPY --chown=0:0 --chmod=0444 inputs/{n} {IMAGE_ROOT}/{n}' for n in runtime_files())
-    artifacts='\n'.join(f'COPY --chown={"10001:10001" if n=="pristine-setup" else "0:0"} --chmod=0555 artifacts/{n} {IMAGE_ROOT}/{n}' for n in ARTIFACT_FILES)
+    artifacts='\n'.join(f'COPY --chown={"10001:10001" if n in ("pristine-setup",D.ROLE) else "0:0"} --chmod=0555 artifacts/{n} {IMAGE_ROOT}/{n}' for n in artifact_files())
     mounts='--mount=type=bind,source=packages,target=/ci-packages,readonly --mount=type=bind,source=image-build,target=/ci-build,readonly --mount=type=bind,source=headers,target=/ci-headers,readonly --mount=type=bind,source=inputs,target=/ci-inputs,readonly'
     return f'''# Offline exact-source financial qualification only; no floating frontend.
 FROM --platform=linux/amd64 {BASE_IMAGE} AS module-build
@@ -144,7 +155,7 @@ CMD []
 def build_context(target,source_commit,artifacts):
     base=B.validate_manifest((ROOT/'ci-ui-packages.json').read_bytes())
     ocr,_=O.validate_manifest((ROOT/'ci-financial-ocr-packages.json').read_bytes(),(ROOT/'ci-ui-packages.json').read_bytes())
-    B._require(set(artifacts)==set(ARTIFACT_FILES),'input_allowlist')
+    B._require(set(artifacts)==set(artifact_files()),'input_allowlist')
     B._require(re.fullmatch('[0-9a-f]{40}',source_commit) is not None,'source_commit')
     target=pathlib.Path(target);B._fresh_directory(target)
     deadline=time.monotonic()+B.MAX_STAGE_SECONDS
@@ -156,18 +167,18 @@ def build_context(target,source_commit,artifacts):
     B.stage_private_headers(target/'headers',deadline=deadline)
     (target/'inputs').mkdir(mode=0o700);(target/'artifacts').mkdir(mode=0o700);(target/'image-build').mkdir(mode=0o700)
     pins={}
-    for name,path in [(n,ROOT/n) for n in (*runtime_files(),MODULE_SOURCE)]+[(n,pathlib.Path(artifacts[n])) for n in ARTIFACT_FILES]:
+    for name,path in [(n,ROOT/n) for n in (*runtime_files(),MODULE_SOURCE)]+[(n,pathlib.Path(artifacts[n])) for n in artifact_files()]:
         info=path.stat(follow_symlinks=False)
         B._require(stat.S_ISREG(info.st_mode) and 0<info.st_size<=512*1024*1024,'input_file')
         raw=path.read_bytes();B._require(len(raw)==info.st_size,'input_file');pins[name]=pin(raw)
-        B._write_file(target/('artifacts' if name in ARTIFACT_FILES else 'inputs')/name,raw)
+        B._write_file(target/('artifacts' if name in artifact_files() else 'inputs')/name,raw)
     meta=metadata(base,ocr,pins,source_commit)
     B._write_file(target/'image-build/metadata.json',B._canonical(meta)+b'\n')
     program=installer();compile(program,'financial-image-install','exec')
     B._write_file(target/'image-build/install.py',program.encode('ascii'))
     B._write_file(target/'Dockerfile',dockerfile().encode('ascii'))
     allowed=['Dockerfile','.dockerignore','image-build/','image-build/metadata.json','image-build/install.py','inputs/','artifacts/','packages/','headers/','headers/libweston/','headers/libweston/backend-drm/']
-    allowed+=['inputs/'+n for n in (*runtime_files(),MODULE_SOURCE)]+['artifacts/'+n for n in ARTIFACT_FILES]
+    allowed+=['inputs/'+n for n in (*runtime_files(),MODULE_SOURCE)]+['artifacts/'+n for n in artifact_files()]
     allowed+=['packages/'+r['filename'] for r in (*B.download_plan(base),*O.download_plan(ocr))]
     allowed+=['headers/'+n for n in B.PRIVATE_HEADERS]
     B._write_file(target/'.dockerignore',('**\n'+''.join('!'+n+'\n' for n in allowed)).encode('ascii'))
@@ -176,9 +187,9 @@ def build_context(target,source_commit,artifacts):
 def main():
     parser=argparse.ArgumentParser(description='Stage pinned offline financial image context; no Docker execution.')
     parser.add_argument('--output',required=True);parser.add_argument('--source-commit',required=True)
-    for name in ARTIFACT_FILES:parser.add_argument('--'+name,required=True)
+    for name in artifact_files():parser.add_argument('--'+name,required=True)
     args=parser.parse_args()
-    build_context(args.output,args.source_commit,{name:getattr(args,name.replace('-','_')) for name in ARTIFACT_FILES})
+    build_context(args.output,args.source_commit,{name:getattr(args,name.replace('-','_')) for name in artifact_files()})
     print('{"financial_image_context_staged":true,"image_built":false}',flush=True)
 
 if __name__=='__main__':

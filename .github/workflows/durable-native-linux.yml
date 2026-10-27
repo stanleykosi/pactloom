@@ -36,11 +36,11 @@ jobs:
         run: |
           set -euo pipefail
           mode="$(cat scripts/qualification-gate-mode)"
-          [[ "$mode" == origin || "$mode" == full || "$mode" == financial || "$mode" == bootstrap || "$mode" == ui || "$mode" == financial-ui || "$mode" == financial-semantic || "$mode" == financial-semantic-reuse || "$mode" == financial-preparation-diagnostic ]]
+          [[ "$mode" == origin || "$mode" == full || "$mode" == financial || "$mode" == bootstrap || "$mode" == ui || "$mode" == financial-ui || "$mode" == financial-semantic || "$mode" == financial-semantic-reuse || "$mode" == financial-preparation-diagnostic || "$mode" == financial-durable-v2 ]]
           [[ "$(wc -l < scripts/qualification-gate-mode)" -eq 1 ]]
           printf 'gate=%s\n' "$mode" >> "$GITHUB_OUTPUT"
       - name: Minimal real production origin integration (not full qualification)
-        if: steps.mode.outputs.gate != 'bootstrap' && steps.mode.outputs.gate != 'ui' && steps.mode.outputs.gate != 'financial-ui' && steps.mode.outputs.gate != 'financial-semantic' && steps.mode.outputs.gate != 'financial-semantic-reuse' && steps.mode.outputs.gate != 'financial-preparation-diagnostic'
+        if: steps.mode.outputs.gate != 'bootstrap' && steps.mode.outputs.gate != 'ui' && steps.mode.outputs.gate != 'financial-ui' && steps.mode.outputs.gate != 'financial-semantic' && steps.mode.outputs.gate != 'financial-semantic-reuse' && steps.mode.outputs.gate != 'financial-preparation-diagnostic' && steps.mode.outputs.gate != 'financial-durable-v2'
         shell: bash
         working-directory: source
         run: bash scripts/ci-origin-integration-linux.sh
@@ -193,6 +193,75 @@ jobs:
         shell: bash
         run: |
           echo 'Fresh coordinated-financial-rendered-host-semantic-v1 synthetic two-signer qualification passed using read-only same-rendered-Host-text observation. All native authority, full proof, retirements, Returns, normal close and cleanup checks remain required. This is NOT pixel-only UI qualification; the original financial-ui gate remains separately callable and is not upgraded. No dispatch, public-chain settlement, deployment or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Durable V2 recipe and projection gates (no build or fixture)
+        if: steps.mode.outputs.gate == 'financial-durable-v2'
+        timeout-minutes: 200
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          python3 -I -B scripts/ci-financial-launch-tests.py
+          python3 -I -B -m unittest discover -s scripts/tests -p 'test*financial*.py'
+      - name: Fresh exact-source selective durable V2 build (no runtime fixture)
+        id: financial_durable_build
+        if: steps.mode.outputs.gate == 'financial-durable-v2'
+        timeout-minutes: 200
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          python3 -I -B scripts/ci-financial-supervisor.py build
+      - name: Preserve exact credential-free selective durable V2 bundle
+        if: success() && steps.mode.outputs.gate == 'financial-durable-v2' && steps.financial_durable_build.outcome == 'success' && steps.financial_durable_build.outputs.artifact_bundle_ready == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: financial-durable-build-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/wholepact-financial-build-${{ github.run_id }}-${{ github.run_attempt }}/build.tar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 1
+          overwrite: false
+          include-hidden-files: false
+      - name: Isolated durable V2 native recovery (verified same-job fresh bundle)
+        id: financial_durable
+        if: success() && steps.mode.outputs.gate == 'financial-durable-v2' && steps.financial_durable_build.outcome == 'success'
+        timeout-minutes: 200
+        shell: bash
+        working-directory: source
+        env:
+          FINANCIAL_BUILD_READY: ${{ steps.financial_durable_build.outputs.artifact_bundle_ready }}
+          FINANCIAL_BUILD_SHA256: ${{ steps.financial_durable_build.outputs.artifact_bundle_sha256 }}
+          FINANCIAL_BUILD_SIZE: ${{ steps.financial_durable_build.outputs.artifact_bundle_size }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          test "$FINANCIAL_BUILD_READY" = true
+          python3 -I -B scripts/ci-financial-supervisor.py run-built
+      - name: Verify durable V2 containers, temporary images and build cache removed
+        if: always() && steps.mode.outputs.gate == 'financial-durable-v2'
+        timeout-minutes: 5
+        shell: bash
+        working-directory: source
+        run: python3 -I -B scripts/ci-financial-supervisor.py cleanup
+      - name: Remove exact same-job credential-free durable V2 bundle
+        if: always() && steps.mode.outputs.gate == 'financial-durable-v2'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,5}$ ]]
+          directory="$RUNNER_TEMP/wholepact-financial-build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test ! -L "$directory"
+          rm -rf -- "$directory"
+      - name: Distinct selective-build durable V2 evidence boundary
+        if: success() && steps.financial_durable.outcome == 'success' && steps.mode.outputs.gate == 'financial-durable-v2'
+        shell: bash
+        run: |
+          echo 'Fresh financial-durable-result-lifecycle-selective-v2 native functional qualification passed: exact per-owner durable results, fresh scoped Return/intake, original writer expiry, owned process deaths/restarts, committed-intake ACK loss, Started-only uncertainty, scoped denials, two-owner extraction and approved economic-output verification. The explicitly pinned Signer/Engine selective-optimization build is not standard fully optimized release or performance qualification. This is not the legacy coordinated 21/21, Host 8, normal 4 UI path. No intended-payee receipt, broadcast, chain inclusion, live funds, deployment or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
       - name: Fetch exact independent producer P and reviewed harness H without credentials
         if: steps.mode.outputs.gate == 'financial-semantic-reuse' || steps.mode.outputs.gate == 'financial-preparation-diagnostic'
         shell: bash

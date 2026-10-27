@@ -6,6 +6,7 @@ use crate::{AuthorityHead, OwnerControl, OwnerControlRequest};
 mod pristine_audit_v1;
 #[path = "coordinated_pre_v3_preserve_v1.rs"]
 mod coordinated_pre_v3_preserve_v1;
+pub use coordinated_pre_v3_preserve_v1::EphemeralPartialFinancialWitnessV2;
 const PREPARE: &str = "Prepare original TLS listener and exact delivery scope for review";
 #[derive(Default)]
 pub(super) struct FixturePhaseV2 {

@@ -626,6 +626,13 @@ class HeldSelectionNavigationPreflightTests(unittest.TestCase):
   for token in ('+HELD_SELECTION_TESTS','--no-run','--bin','--list','--exact','--test-threads=1','1 passed; 0 failed; 0 ignored;','deadline=time.monotonic()+60','run_provider_tls_probe(root,selected,raw)'):self.assertIn(token,runner)
   self.assertLess(runner.index('coordinator_test_executable(raw,'),runner.index('for name in names:'))
   workflow=(root/'.github/workflows/deadline-preflight.yml').read_text()
+  # P93 changes only this exact preflight identity; restore all prior owning checks.
+  import hashlib
+  self.assertEqual(hashlib.sha256(workflow.encode()).hexdigest(),'51965fa1d26a81490a8cbb1fccb9498f7aedf1b98c2bf378dc8c070e192be686')
+  self.assertEqual(workflow.count('name: Durable result lifecycle preflight only\n'),1)
+  self.assertEqual(workflow.count('durable-result-lifecycle-preflight-p93'),4)
+  workflow=workflow.replace('name: Durable result lifecycle preflight only\n','name: Retained signing check preflight only\n',1).replace('durable-result-lifecycle-preflight-p93','retained-signing-check-preflight-p92')
+  self.assertEqual(hashlib.sha256(workflow.encode()).hexdigest(),'962ebf0b81831706896cc3ad46f882afed1e532966abb06a23322d2174ac48ff')
   self.assertEqual(workflow.count('retained-signing-check-preflight-p92'),4)
   spec=importlib.util.spec_from_file_location('p81_ui_inverse',P.parent/'ci-financial-admit-read-source-audit.py');audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
   self.assertEqual(hashlib.sha256(audit.restore_held_selection_ui(source).encode()).hexdigest(),'22659883eb0eaf88c75e453cbd1272bb6ce8493c75a8f5ddf562f5c78c835a6a')

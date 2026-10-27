@@ -7,6 +7,7 @@ credentials or runtime fixture files belong here. This helper only exports and
 verifies the exact pre-credential compiler-selected binaries.
 """
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -53,7 +54,26 @@ RECIPE = dict(build_recipe_version=3, qualification_profile=PIXEL_PROFILE,
         'pristine-setup':['durable-proposal','financial-runtime','manual-admission',
             'synthetic-born-joined-qualification']})
 
+DURABLE_PROFILE='financial-durable-result-lifecycle-selective-v2'
+
+def durable_contract():
+    spec=importlib.util.spec_from_file_location('financial_durable_contract',pathlib.Path(__file__).with_name('ci-financial-durable.py'))
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    need(module.PROFILE==DURABLE_PROFILE,'qualification_profile')
+    return module
+
+def bundle_names(profile):
+    if profile==DURABLE_PROFILE:return durable_contract().ARTIFACTS
+    need(profile in (PIXEL_PROFILE,SEMANTIC_PROFILE),'qualification_profile')
+    return NAMES
+
+def manifest_version(profile):
+    if profile==DURABLE_PROFILE:return durable_contract().MANIFEST_VERSION
+    need(profile in (PIXEL_PROFILE,SEMANTIC_PROFILE),'qualification_profile')
+    return MANIFEST_VERSION
+
 def recipe(profile):
+    if profile==DURABLE_PROFILE:return durable_contract().recipe()
     need(profile in (PIXEL_PROFILE,SEMANTIC_PROFILE),'qualification_profile')
     value=json.loads(json.dumps(RECIPE))
     if profile==SEMANTIC_PROFILE:
@@ -116,12 +136,12 @@ def file_pin(path):
 
 def validate_manifest(value, expected_identity, expected_closure,profile=PIXEL_PROFILE):
     need(type(value) is dict and set(value) == {'version', 'identity', 'closure', 'recipe', 'files'}, 'manifest')
-    need(type(value['version']) is int and value['version'] == MANIFEST_VERSION, 'version')
+    need(type(value['version']) is int and value['version'] == manifest_version(profile), 'version')
     need(identity(value['identity']) == identity(expected_identity), 'provenance')
     need(closure(value['closure']) == closure(expected_closure), 'closure_mismatch')
     need(set(BUILD_SCRIPTS) <= set(value['closure']), 'build_script_closure')
     need(type(value['recipe']) is dict and canonical(value['recipe']) == canonical(recipe(profile)), 'recipe')
-    need(type(value['files']) is dict and set(value['files']) == set(NAMES), 'file_set')
+    need(type(value['files']) is dict and set(value['files']) == set(bundle_names(profile)), 'file_set')
     total = 0
     for row in value['files'].values():
         need(type(row) is dict and set(row) == {'size', 'sha256'}, 'file_pin')
@@ -135,9 +155,10 @@ def validate_manifest(value, expected_identity, expected_closure,profile=PIXEL_P
 def export_bundle(artifacts, destination, producer, inputs,profile=PIXEL_PROFILE):
     """Called before any fixture exists; exclusive output, exact four entries."""
     artifacts, destination = pathlib.Path(artifacts), pathlib.Path(destination)
-    need({p.name for p in artifacts.iterdir()} == set(NAMES), 'file_set')
-    value = dict(version=MANIFEST_VERSION, identity=identity(producer), closure=closure(inputs), recipe=recipe(profile),
-                 files={name: file_pin(artifacts / name) for name in NAMES})
+    names=bundle_names(profile)
+    need({p.name for p in artifacts.iterdir()} == set(names), 'file_set')
+    value = dict(version=manifest_version(profile), identity=identity(producer), closure=closure(inputs), recipe=recipe(profile),
+                 files={name: file_pin(artifacts / name) for name in names})
     validate_manifest(value, producer, inputs,profile)
     raw = canonical(value)
     need(len(raw) <= MAX_MANIFEST, 'manifest_size')
@@ -145,7 +166,7 @@ def export_bundle(artifacts, destination, producer, inputs,profile=PIXEL_PROFILE
         with tarfile.open(fileobj=output, mode='w', format=tarfile.USTAR_FORMAT) as archive:
             item = tarfile.TarInfo('manifest.json'); item.size = len(raw); item.mode = 0o444
             archive.addfile(item, io.BytesIO(raw))
-            for name in NAMES:
+            for name in names:
                 path = artifacts / name
                 need(file_pin(path) == value['files'][name], 'changed_file')
                 item = tarfile.TarInfo(name); item.size = value['files'][name]['size']; item.mode = 0o555
@@ -165,7 +186,7 @@ def verify_bundle(bundle, expected_identity, expected_closure,profile=PIXEL_PROF
          0 < meta.st_size <= MAX_TOTAL + MAX_MANIFEST + 65536, 'bundle_file')
     with path.open('rb') as stream:
         value = None
-        for index, name in enumerate(('manifest.json', *NAMES)):
+        for index, name in enumerate(('manifest.json', *bundle_names(profile))):
             header = stream.read(512)
             need(len(header) == 512, 'archive_header')
             try:

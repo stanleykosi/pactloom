@@ -99,6 +99,13 @@ class RestrictionReturnContractTests(unittest.TestCase):
         self.assertEqual(len(stage.split(',')),237)
     def test_hosted_actual_compiler_profiles_precede_generated_traces_and_python(self):
         workflow=(ROOT/'.github/workflows/deadline-preflight.yml').read_text()
+        # P93 changes only this exact preflight identity; restore all prior owning checks.
+        import hashlib
+        self.assertEqual(hashlib.sha256(workflow.encode()).hexdigest(),'51965fa1d26a81490a8cbb1fccb9498f7aedf1b98c2bf378dc8c070e192be686')
+        self.assertEqual(workflow.count('name: Durable result lifecycle preflight only\n'),1)
+        self.assertEqual(workflow.count('durable-result-lifecycle-preflight-p93'),4)
+        workflow=workflow.replace('name: Durable result lifecycle preflight only\n','name: Retained signing check preflight only\n',1).replace('durable-result-lifecycle-preflight-p93','retained-signing-check-preflight-p92')
+        self.assertEqual(hashlib.sha256(workflow.encode()).hexdigest(),'962ebf0b81831706896cc3ad46f882afed1e532966abb06a23322d2174ac48ff')
         self.assertEqual(workflow.count('retained-signing-check-preflight-p92'),4)
         self.assertIn("for profile in ['minimal', 'production', 'observed-pixel', 'observed-semantic']:",workflow)
         self.assertIn("['cargo', 'check', '--locked', '-p', package, '--lib', '--no-default-features'",workflow)

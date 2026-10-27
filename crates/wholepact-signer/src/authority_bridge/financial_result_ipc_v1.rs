@@ -519,30 +519,35 @@ impl ApprovedFinancialReturnV1 {
 // Adding a coordinated arm must retain its genuine Final, source pin and peer.
 enum FinancialReturnSenderV1 {
     Native(ApprovedFinancialReturnV1),
+    Durable(durable_result_v2::ApprovedDurableFinancialReturnV2),
     #[cfg(feature = "coordinated-financial-workflow-v1")]
     Coordinated(coordinated_return_v1::ApprovedCoordinatedFinancialReturnV1),
 }
 impl FinancialReturnSenderV1 {
     fn check(&self) -> Result<()> {
         match self { Self::Native(v) => v.check(),
+            Self::Durable(v) => v.check(),
             #[cfg(feature = "coordinated-financial-workflow-v1")]
             Self::Coordinated(v) => v.check(),
         }
     }
     fn peer(&self) -> &PeerProcess {
         match self { Self::Native(v) => &v.prepared.peer,
+            Self::Durable(v) => v.peer(),
             #[cfg(feature = "coordinated-financial-workflow-v1")]
             Self::Coordinated(v) => v.peer(),
         }
     }
     fn evidence(&self) -> &Evidence {
         match self { Self::Native(v) => &v.prepared.evidence,
+            Self::Durable(v) => v.evidence(),
             #[cfg(feature = "coordinated-financial-workflow-v1")]
             Self::Coordinated(v) => v.evidence(),
         }
     }
     fn deadline(&self) -> Result<Instant> {
         match self {
+            Self::Durable(v) => v.deadline(),
             Self::Native(v) => Ok(v.action.binding().bounded_deadline()
                 .map_err(|_| BridgeError::Permission)?
                 .min(v.prepared.source.original_deadline())),
@@ -553,6 +558,7 @@ impl FinancialReturnSenderV1 {
     fn finish(self) -> Result<()> {
         match self {
             Self::Native(_) => Ok(()),
+            Self::Durable(v) => v.check(),
             #[cfg(feature = "coordinated-financial-workflow-v1")]
             Self::Coordinated(v) => v.finish(),
         }
@@ -1190,3 +1196,10 @@ mod diagnostic_tests {
 // Test-only access to pure data projections; no authority constructors.
 #[cfg(all(test, feature = "coordinated-financial-workflow-v1", feature = "durable-proposal", feature = "pending-birth-owner-signing", feature = "native-ui", target_os = "linux"))]
 pub(crate) use coordinated_return_v1::project_return_display;
+
+#[path = "financial_result_ipc_v1/durable_result_v2.rs"]
+mod durable_result_v2;
+pub use durable_result_v2::{DurableFinancialResultRequestV2, DURABLE_RESULT_REQUEST_MAX_BYTES_V2,
+    PreparedDurableFinancialResultReceiverV2, AuthenticatedDurableFinancialResultLeaseV2,
+    AuthenticatedFinancialResultEvidenceV2};
+pub(crate) use durable_result_v2::{audited_signature_set_digest_v2, PreparedDurableFinancialReturnV2};

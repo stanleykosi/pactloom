@@ -3,6 +3,7 @@
 import contextlib
 import importlib.util
 import io
+import hashlib
 import json
 import pathlib
 import tempfile
@@ -14,6 +15,22 @@ spec=importlib.util.spec_from_file_location('financial_launch_under_test', HERE/
 S=importlib.util.module_from_spec(spec);spec.loader.exec_module(S)
 
 class LaunchTests(unittest.TestCase):
+    def setUp(self):
+        # These remain exact legacy-profile regressions, not V2 assertions.
+        selected=patch.object(S.I,'profile',return_value=S.A.SEMANTIC_PROFILE)
+        selected.start();self.addCleanup(selected.stop)
+
+    def legacy_workflow(self):
+        # New V2 job steps have their own strict owning tests. Preserve these
+        # original legacy assertions against the exact remaining workflow.
+        workflow=(HERE.parent/'.github/workflows/durable-native-linux.yml').read_text()
+        start='      - name: Durable V2 recipe and projection gates (no build or fixture)\n'
+        end='      - name: Fetch exact independent producer P and reviewed harness H without credentials\n'
+        self.assertEqual(workflow.count(start),1);self.assertEqual(workflow.count(end),1)
+        first=workflow.index(start);last=workflow.index(end,first)
+        self.assertEqual(hashlib.sha256(workflow[first:last].encode()).hexdigest(),'00c31d2fab55d11b4a229527fe0c7bfef3acb84100dac8112a3e152d46f6e3c9')
+        return workflow[:first]+workflow[last:]
+
     def test_pinned_package_preflight(self):
         S.package_preflight()
 
@@ -44,7 +61,8 @@ class LaunchTests(unittest.TestCase):
                 if '--list' in args:
                     return (S.LIVE_FIXTURE_TEST+': test\n\n1 test, 0 benchmarks\n').encode()
                 return b''
-            def artifact(raw,name,target):
+            def artifact(raw,name,target,profile):
+                self.assertEqual(profile,S.I.profile())
                 p=target/name;p.write_bytes(('executable-'+name).encode());return p
             def checked(args,stage,**kwargs):
                 return (S.B.RUSTC+'\n').encode() if '--version' in args else b''
@@ -180,7 +198,7 @@ class LaunchTests(unittest.TestCase):
         self.assertLess(launcher.index(discovery),launcher.index('exec python3'))
         self.assertIn('set -euo pipefail',launcher)
         self.assertNotIn('|| true',launcher)
-        workflow=(HERE.parent/'.github/workflows/durable-native-linux.yml').read_text()
+        workflow=self.legacy_workflow()
         self.assertEqual(workflow.count(discovery),1)
         self.assertLess(workflow.index(discovery),workflow.index('scripts/ci-financial-supervisor.py build'))
 
@@ -242,7 +260,7 @@ class LaunchTests(unittest.TestCase):
             self.assertFalse(S.cache_empty(raw))
 
     def test_workflow_is_distinct_and_always_cleans(self):
-        workflow=(HERE.parent/'.github/workflows/durable-native-linux.yml').read_text()
+        workflow=self.legacy_workflow()
         self.assertIn('"$mode" == financial-ui',workflow)
         self.assertIn("steps.mode.outputs.gate != 'financial-ui'",workflow)
         self.assertIn("always() && (steps.mode.outputs.gate == 'financial-ui' || steps.mode.outputs.gate == 'financial-semantic')",workflow)

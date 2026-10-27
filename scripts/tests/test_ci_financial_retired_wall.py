@@ -176,6 +176,13 @@ class RetiredWallSourceTests(unittest.TestCase):
 
     def test_preflight_runs_exact_retired_wall_trace_after_compiler_and_preserves_all_p89_gates(self):
         workflow=(ROOT/'.github/workflows/deadline-preflight.yml').read_bytes().decode('utf-8')
+        # P93 changes only this exact preflight identity; restore all prior owning checks.
+        import hashlib
+        self.assertEqual(hashlib.sha256(workflow.encode()).hexdigest(),'51965fa1d26a81490a8cbb1fccb9498f7aedf1b98c2bf378dc8c070e192be686')
+        self.assertEqual(workflow.count('name: Durable result lifecycle preflight only\n'),1)
+        self.assertEqual(workflow.count('durable-result-lifecycle-preflight-p93'),4)
+        workflow=workflow.replace('name: Durable result lifecycle preflight only\n','name: Retained signing check preflight only\n',1).replace('durable-result-lifecycle-preflight-p93','retained-signing-check-preflight-p92')
+        self.assertEqual(hashlib.sha256(workflow.encode()).hexdigest(),'962ebf0b81831706896cc3ad46f882afed1e532966abb06a23322d2174ac48ff')
         additions = ''.join("              'financial_ci_actor_diagnostics::tests::"+name+"',\n" for name in (
             'signed_result_minimum_masks_keep_atomic_detail_and_legacy_shape',
             'signed_result_driver_rejects_invalid_bits_masks_roles_and_pids',

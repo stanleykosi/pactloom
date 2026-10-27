@@ -4,6 +4,47 @@
 use super::*;
 use crate::signature_intake::LocalSignedRetention;
 
+/// Observe the actual encrypted immutable rows, not a cached status counter.
+/// Digests include the complete request scope/provenance, signature set and
+/// signed bytes. This Engine journal is not the Signer's authorization/outbox
+/// or the independent Witness exposure ledger; those require separate tests.
+fn retained_row_fingerprints(
+    path: &Path,
+    key: &DatabaseKey,
+) -> (BTreeMap<String, [u8; 32]>, BTreeMap<String, [u8; 32]>) {
+    let connection = open_encrypted(path, key).unwrap();
+    let snapshot = |sql: &str, columns: usize| {
+        connection
+            .connection()
+            .prepare(sql)
+            .unwrap()
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                let mut digest = Sha256::new();
+                digest.update(b"durable-acceptance-immutable-row-v1\0");
+                for index in 0..columns {
+                    let value: Vec<u8> = row.get(index + 1)?;
+                    digest.update((value.len() as u64).to_le_bytes());
+                    digest.update(&value);
+                }
+                Ok((id, <[u8; 32]>::from(digest.finalize())))
+            })
+            .unwrap()
+            .collect::<std::result::Result<BTreeMap<_, _>, _>>()
+            .unwrap()
+    };
+    (
+        snapshot(
+            "SELECT result_id,CAST(result_id AS BLOB),CAST(principal_id AS BLOB),CAST(idem_key AS BLOB),CAST(request_digest AS BLOB),scope,signatures FROM signed_intents ORDER BY result_id",
+            6,
+        ),
+        snapshot(
+            "SELECT result_id,CAST(result_id AS BLOB),bytes,CAST(digest AS BLOB) FROM signed_results ORDER BY result_id",
+            3,
+        ),
+    )
+}
+
 fn owner_return(
     owner: usize,
     checkpoint: &wholepact_proof_jobs::VerifiedCheckpoint,
@@ -379,6 +420,39 @@ fn durable_proposals_two_owners_restart_and_exact_submission_unknown_recovery() 
         .unwrap();
     assert_eq!(not_admitted.retained_owner_count, 0);
     assert_eq!(not_admitted.verified_real_inputs, 0);
+    let first_rows = retained_row_fingerprints(&signed_path, secrets.key(83));
+    assert_eq!((first_rows.0.len(), first_rows.1.len()), (1, 1));
+    // The original TRANSPORT admission has expired. It cannot create a new
+    // intake, even though its completed signature bytes remain useful history.
+    // The existing-intent reconciliation immediately below remains supported.
+    let expired = engine
+        .intake_durable_signature_v1(
+            &access,
+            "durable-expired-new-intake",
+            &candidate_id,
+            frozen.agreement.revision,
+            LocalProofJob {
+                job_id: &job_id,
+                jobs: &jobs,
+                consent: &privacy,
+            },
+            LocalSignedRetention {
+                journal: &signed,
+                consent: &privacy,
+            },
+            AuthenticatedSignatureDelivery {
+                artifact: &artifact,
+                association: Some(&association),
+            },
+            &timestamp(NOW + 120),
+        )
+        .unwrap_err();
+    assert_eq!(expired.code, "SIGNATURE_INTAKE_REJECTED");
+    assert_eq!(
+        engine.get(&access, AGREEMENT).unwrap().revision,
+        frozen.agreement.revision
+    );
+    assert!(retained_row_fingerprints(&signed_path, secrets.key(83)) == first_rows);
     let first = engine
         .reconcile_durable_signature_v1(
             &access,
@@ -430,6 +504,7 @@ fn durable_proposals_two_owners_restart_and_exact_submission_unknown_recovery() 
         original_after.signed_candidate_digest,
         original.signed_candidate_digest
     );
+    assert!(retained_row_fingerprints(&signed_path, secrets.key(83)) == first_rows);
     drop(signatures);
     let partial = engine
         .durable_proposal_status_v1(
@@ -494,6 +569,7 @@ fn durable_proposals_two_owners_restart_and_exact_submission_unknown_recovery() 
         journal: &signed,
         consent: &privacy,
     };
+    assert!(retained_row_fingerprints(&signed_path, secrets.key(83)) == first_rows);
     assert_eq!(
         engine
             .load_durable_proposal_for_local_review_v1(&access, &candidate_id, local())
@@ -507,6 +583,7 @@ fn durable_proposals_two_owners_restart_and_exact_submission_unknown_recovery() 
             .durable_proposal_status_v1(&access, &candidate_id, local(), retention())
             .is_err()
     );
+    assert!(retained_row_fingerprints(&signed_path, secrets.key(83)) == first_rows);
     privacy.allowed.store(true, Ordering::SeqCst);
     // Two hours later the first transport admission is expired. No expired
     // admission is reused: only its completed immutable intake evidence remains.
@@ -516,6 +593,31 @@ fn durable_proposals_two_owners_restart_and_exact_submission_unknown_recovery() 
         .unwrap();
     let (artifact, association) = owner_return(1, &checkpoint, &secrets, later, &mut ledger);
     let before_second = engine.get(&access, AGREEMENT).unwrap().revision;
+    // Restart must not let the completed first owner's request key acquire a
+    // different, genuinely signed second-owner intent. Keep the original
+    // request's expected revision, so this is not merely a revision mismatch.
+    // Reject before any new immutable row or intake receipt is committed.
+    let conflict = engine
+        .intake_durable_signature_v1(
+            &access,
+            "durable-owner-0-intake",
+            &candidate_id,
+            frozen.agreement.revision,
+            local(),
+            retention(),
+            AuthenticatedSignatureDelivery {
+                artifact: &artifact,
+                association: Some(&association),
+            },
+            &timestamp(later),
+        )
+        .unwrap_err();
+    assert_eq!(conflict.code, "IDEMPOTENCY_CONFLICT");
+    assert_eq!(
+        engine.get(&access, AGREEMENT).unwrap().revision,
+        before_second
+    );
+    assert!(retained_row_fingerprints(&signed_path, secrets.key(83)) == first_rows);
     assert!(
         engine
             .reconcile_durable_signature_v1(
@@ -548,6 +650,14 @@ fn durable_proposals_two_owners_restart_and_exact_submission_unknown_recovery() 
             &timestamp(later),
         )
         .unwrap();
+    let both_rows = retained_row_fingerprints(&signed_path, secrets.key(83));
+    assert_eq!((both_rows.0.len(), both_rows.1.len()), (2, 2));
+    for (id, fingerprint) in &first_rows.0 {
+        assert!(both_rows.0.get(id) == Some(fingerprint));
+    }
+    for (id, fingerprint) in &first_rows.1 {
+        assert!(both_rows.1.get(id) == Some(fingerprint));
+    }
     let duplicate = engine
         .intake_durable_signature_v1(
             &access,
@@ -564,6 +674,7 @@ fn durable_proposals_two_owners_restart_and_exact_submission_unknown_recovery() 
         )
         .unwrap();
     assert!(duplicate.replayed);
+    assert!(retained_row_fingerprints(&signed_path, secrets.key(83)) == both_rows);
     drop(association);
     drop(artifact);
     drop(checkpoint);
@@ -588,6 +699,14 @@ fn durable_proposals_two_owners_restart_and_exact_submission_unknown_recovery() 
         )
         .unwrap();
     assert_eq!(assembled.agreement.progress, "ready_for_submission");
+    let union_rows = retained_row_fingerprints(&signed_path, secrets.key(83));
+    assert_eq!((union_rows.0.len(), union_rows.1.len()), (3, 3));
+    for (id, fingerprint) in &both_rows.0 {
+        assert!(union_rows.0.get(id) == Some(fingerprint));
+    }
+    for (id, fingerprint) in &both_rows.1 {
+        assert!(union_rows.1.get(id) == Some(fingerprint));
+    }
     let transactions = TransactionCheckpointJournal::from_encrypted_connection(
         create_encrypted(&transaction_path, secrets.key(84)).unwrap(),
     )
@@ -616,6 +735,7 @@ fn durable_proposals_two_owners_restart_and_exact_submission_unknown_recovery() 
         .unwrap();
     assert!(repeated.exact_replay);
     assert_eq!(extracted.transaction_digest, repeated.transaction_digest);
+    assert!(retained_row_fingerprints(&signed_path, secrets.key(83)) == union_rows);
     // Fresh synthetic chain context is separate from the two-hour human wait.
     // This fixture does not claim real expiry survival or live input spendability.
     let chain_context = chain::synthetic_wallet_chain_context_for_qualification(later).unwrap();
@@ -697,6 +817,7 @@ fn durable_proposals_two_owners_restart_and_exact_submission_unknown_recovery() 
     assert_eq!(backend.calls.len(), 2);
     assert_eq!(backend.calls[0], backend.calls[1]);
     assert!(!acknowledged.clears_authorization_exposure && !acknowledged.permits_replacement);
+    assert!(retained_row_fingerprints(&signed_path, secrets.key(83)) == union_rows);
     assert_eq!(
         engine
             .load_durable_proposal_for_local_review_v1(&access, &candidate_id, local())

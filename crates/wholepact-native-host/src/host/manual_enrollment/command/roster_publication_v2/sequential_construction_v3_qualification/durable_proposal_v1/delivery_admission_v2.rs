@@ -1196,6 +1196,7 @@ fn require_reader_only_v3(host: &Host, workspace: &Path, recipient: &RecipientIn
 
 /// Inert correlation copied only from the successful actual original capture.
 /// This cannot open a source or authorize a current recipient.
+#[derive(Serialize, Deserialize)]
 pub(super) struct OriginalDisclosureV2 {
     pub account_id: String,
     pub history: DurableConstructionHistoryRequestV1,
@@ -1208,6 +1209,9 @@ pub(super) struct OriginalDisclosureV2 {
 
 /// This continuation consumes only the actual completed predecessor's owners.
 /// No successful fixture, receipt DTO or replacement proof can enter here.
+#[derive(Clone, Copy)]
+pub(super) enum DurableResultPreparationV2 { Lifecycle, StartedOnly }
+
 pub(super) fn continue_completed_original(
     terminal: crate::terminal::Terminal,
     host: Host,
@@ -1224,6 +1228,7 @@ pub(super) fn continue_completed_original(
     financial_wallet_setup: Option<String>,
     coordinated_pre_v3_fixture: bool,
     live_external_witness: bool,
+    durable_result_lifecycle: Option<DurableResultPreparationV2>,
 ) -> Result<()> {
     crate::host::financial::durable_delivery_admission_v2::with_delivery_observer_v2(
         observe_delivery,
@@ -1340,6 +1345,19 @@ pub(super) fn continue_completed_original(
             route:wholepact_authority::durable_delivery_scope_v2::DurableDeliveryRouteV2::Direct {},
             minimum_expiry_margin_blocks:1,maximum_fresh_admission_lifetime_ms:120_000,maximum_explicitly_approved_attempts:if financial_wallet_setup.is_some(){3}else{1},
         };
+            if let Some(mode) = durable_result_lifecycle {
+                if coordinated_pre_v3_fixture || live_external_witness { return Err(Error::Authentication); }
+                let (runtime, provider) = retained_provider.ok_or(Error::Authentication)?;
+                let continue_original = match mode {
+                    DurableResultPreparationV2::Lifecycle => durable_result_lifecycle_v2::continue_original_preexport,
+                    DurableResultPreparationV2::StartedOnly => durable_result_lifecycle_v2::continue_original_preexport_started,
+                };
+                return continue_original(
+                    terminal, host, original, proposal, runtime, provider, profile, workspace,
+                    financial, disclosures, identity, choices,
+                    financial_wallet_setup.ok_or(Error::Authentication)?,
+                );
+            }
             if coordinated_pre_v3_fixture {
                 let (runtime, provider) = retained_provider.ok_or(Error::Authentication)?;
                 return super::coordinated_full_fixture_v1::preserve_completed_originals(
@@ -2664,3 +2682,6 @@ mod tests {
 
 #[path = "durable_financial_dispatch_v1.rs"]
 pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) mod durable_financial_dispatch_v1;
+
+#[path = "durable_result_lifecycle_v2.rs"]
+pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) mod durable_result_lifecycle_v2;

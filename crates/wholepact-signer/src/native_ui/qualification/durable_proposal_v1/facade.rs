@@ -577,3 +577,57 @@ impl EphemeralFinancialContinuationNativeV1 {
 pub use crate::native_ui::runtime::financial_v1::diagnostics::{FinancialAuthorityCallV1, FinancialAuthorityCostV1, FinancialAuthorityStageV1, FinancialAuthorityCheckSiteV1, FinancialAuthorityCheckpointV1, FinancialAuthoritySelectedLimitV1};
 
 pub use crate::native_ui::runtime::financial_v1::diagnostics::{FinancialNativeProgressObserverV1,FinancialNativeProgressV1};
+
+pub use crate::native_ui::runtime::durable_proposal_qualification_v1::DurableResultQualificationPhaseV2;
+/// Existing synthetic worker entry, with genuine result-only production UI.
+/// This is not by itself an OS-process-restart or complete two-owner proof.
+pub struct EphemeralDurableResultNativeV2 {
+    inner: crate::native_ui::runtime::durable_proposal_qualification_v1::DurableResultNativeFixtureV2,
+}
+impl EphemeralDurableResultNativeV2 {
+    pub fn open_existing(selector: DurableDeliveryReopenSelectorV2) -> Result<Self> {
+        Ok(Self { inner: crate::native_ui::runtime::durable_proposal_qualification_v1::DurableResultNativeFixtureV2::open_existing(selector)? })
+    }
+    pub fn provider(&self) -> Result<wholepact_signer_origin::InstalledSignerProvider> { self.inner.provider() }
+    pub fn endpoint(&self) -> Result<std::path::PathBuf> { self.inner.endpoint() }
+    pub fn deadline(&self) -> Result<Instant> { self.inner.deadline() }
+    pub fn result_request(&self) -> Result<crate::authority_bridge::financial_continuation_v1::DurableFinancialResultRequestV2> { self.inner.result_request() }
+    pub fn poll(&mut self) -> Result<DurableResultQualificationPhaseV2> { self.inner.poll() }
+    pub fn approve_current_review(&mut self) -> Result<()> { self.inner.approve_current_review() }
+    pub fn close_preserving_originals(self) -> Result<DurableDeliveryReopenSelectorV2> { self.inner.close_preserving_originals() }
+}
+
+pub use crate::native_ui::runtime::durable_proposal_qualification_v1::PreservedDurablePairV2;
+impl EphemeralClosedDeliveryNativeV3 {
+    pub fn into_financial_continuation_reopened_v2(
+        self, wallet_setup_json: String,
+        origin: wholepact_authority::native_witness_owner::EphemeralWitnessOriginV1,
+        pair: std::sync::Arc<PreservedDurablePairV2>,
+    ) -> Result<EphemeralFinancialContinuationNativeV1> {
+        Ok(EphemeralFinancialContinuationNativeV1 { inner: self.inner.into_financial_continuation_reopened_v2(wallet_setup_json, origin, pair)? })
+    }
+}
+impl EphemeralFinancialContinuationNativeV1 {
+    pub fn close_preserving_reopened_v2(self) -> Result<DurableDeliveryReopenSelectorV2> {
+        self.inner.close_preserving_reopened_v2()
+    }
+}
+impl EphemeralDurableResultNativeV2 {
+    pub fn open_existing_in_pair(selector: DurableDeliveryReopenSelectorV2, pair: std::sync::Arc<PreservedDurablePairV2>) -> Result<Self> {
+        Ok(Self { inner: crate::native_ui::runtime::durable_proposal_qualification_v1::DurableResultNativeFixtureV2::open_existing_in_pair(selector, pair)? })
+    }
+}
+
+pub use crate::native_ui::runtime::durable_proposal_qualification_v1::{DurableResultGrantProbeV2, DurableResultGrantProbeOutcomeV2};
+impl EphemeralDurableResultNativeV2 {
+    pub fn probe_grant(&mut self, probe: DurableResultGrantProbeV2, other_stream: Option<std::os::unix::net::UnixStream>, stop: &std::sync::atomic::AtomicBool) -> Result<DurableResultGrantProbeOutcomeV2> {
+        self.inner.probe_grant(probe, other_stream, stop)
+    }
+}
+
+pub use crate::native_ui::runtime::durable_proposal_qualification_v1::{StartedFinancialCustodyV2, audit_started_after_restart_v2};
+impl EphemeralFinancialContinuationNativeV1 {
+    pub fn capture_and_arm_started_v2(&mut self, outer_deadline: std::time::Instant) -> Result<StartedFinancialCustodyV2> {
+        self.inner.capture_and_arm_started_v2(outer_deadline)
+    }
+}

@@ -36,6 +36,7 @@ pub use window::ephemeral_fixture_v1::{
     EphemeralConstructionClientScopeV1, EphemeralDurableAcquireReplyLossObservationV1,
     EphemeralDurableAcquireReplyLossReportV1, EphemeralHistoryServerV1, EphemeralNativeWitnessV1,
     EphemeralRosterAttemptV2, EphemeralWitnessOriginV1, EphemeralCoordinatedHistoryLifetimeV1,
+    EphemeralPartialFinancialWitnessV2,
 };
 
 #[cfg(all(

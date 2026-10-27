@@ -2,6 +2,10 @@
 //! Ordinary original paths and audited birth metadata, never a source factory.
 use super::*;
 
+#[path = "partial_financial_preserve_v2.rs"]
+mod partial_financial_preserve_v2;
+pub use partial_financial_preserve_v2::EphemeralPartialFinancialWitnessV2;
+
 #[derive(serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct PreservedPreV3V1 {

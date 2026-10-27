@@ -77,6 +77,11 @@ enum Envelope {
         schema_version: u32,
         request: crate::authority_bridge::financial_continuation_v1::FinancialResultRequestV1,
     },
+    #[cfg(all(feature="durable-proposal", feature="pending-birth-owner-signing", feature="native-ui"))]
+    DurableFinancialResultV2 {
+        schema_version: u32,
+        request: crate::authority_bridge::financial_continuation_v1::DurableFinancialResultRequestV2,
+    },
     #[cfg(feature = "durable-proposal")]
     ClosedRecipientV3 {
         schema_version: u32,
@@ -922,6 +927,8 @@ impl PendingPairing {
 }
 pub(crate) enum LocalEvent {
     #[cfg(all(feature="durable-proposal", feature="pending-birth-owner-signing", feature="native-ui"))]
+    DurableFinancialResultV2 {peer:PeerProcess,stream:UnixStream,request:crate::authority_bridge::financial_continuation_v1::DurableFinancialResultRequestV2},
+    #[cfg(all(feature="durable-proposal", feature="pending-birth-owner-signing", feature="native-ui"))]
     FinancialResultV1 {peer:PeerProcess,stream:UnixStream,request:crate::authority_bridge::financial_continuation_v1::FinancialResultRequestV1},
     #[cfg(feature = "durable-proposal")]
     DurableDeliveryHistoryV3 { peer: AuthenticatedPeer, stream: UnixStream, request: Box<crate::authority_bridge::durable_delivery_admission_ipc_v3::DurableDeliveryHistoryRequestV3> },
@@ -1649,6 +1656,27 @@ fn serve(
                     #[cfg(feature = "synthetic-born-joined-qualification")]
                     let _scoped_admission = scoped_v3.begin_admission()?;
                     match &mut envelope {
+                        #[cfg(all(feature="durable-proposal", feature="pending-birth-owner-signing", feature="native-ui"))]
+                        Envelope::DurableFinancialResultV2 { schema_version, request } => {
+                            if *schema_version != 2 || !matches!(mode, IpcMode::Ordinary) {
+                                return Err(Error::Authentication);
+                            }
+                            // Strict parse for this new profile only: no duplicate,
+                            // unknown or alternate-version fallback interpretation.
+                            let strict: Envelope = wholepact_core::strict_json::parse_typed_json_with_byte_limit(
+                                &frame, crate::authority_bridge::financial_continuation_v1::DURABLE_RESULT_REQUEST_MAX_BYTES_V2 + 256,
+                            ).map_err(|_| Error::InvalidData)?;
+                            if !matches!(strict, Envelope::DurableFinancialResultV2 { schema_version: 2, .. }) {
+                                return Err(Error::Authentication);
+                            }
+                            request.validate().map_err(|_| Error::InvalidData)?;
+                            peer.check_alive()?;
+                            let actual = PeerProcess::observe(&stream)?;
+                            peer.same_live_process(&actual)?;
+                            sender.try_send(LocalEvent::DurableFinancialResultV2 {
+                                peer, stream: stream.try_clone()?, request: request.clone(),
+                            }).map_err(|_| Error::Unavailable)?;
+                        }
                         #[cfg(all(
                             feature = "durable-proposal",
                             feature = "pending-birth-owner-signing",

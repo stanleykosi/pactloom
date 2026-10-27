@@ -27,6 +27,8 @@ use wholepact_transport::Timestamp;
 
 #[cfg(all(feature = "manual-admission", target_os = "linux"))]
 pub(crate) mod private_financial_v1;
+#[cfg(all(feature = "manual-admission", target_os = "linux"))]
+pub(crate) mod private_financial_v2;
 pub mod submission_verification_v1;
 
 const MAX_ACTIONS: usize = 8;
@@ -90,6 +92,8 @@ struct Stored {
         deserialize_with = "deserialize_financial_binding_v1"
     )]
     financial_binding_v1: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_financial_binding_v1")]
+    financial_binding_v2: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     financial_dispatch_v1: BTreeMap<u32, serde_json::Value>,
 }
@@ -144,14 +148,32 @@ pub(crate) fn validate_stored(envelope: &Envelope) -> Result<()> {
         {
             return Err(damaged());
         }
-        if (stored.financial_binding_v1.is_some() || !stored.financial_dispatch_v1.is_empty())
+        if (stored.financial_binding_v1.is_some() || stored.financial_binding_v2.is_some() || !stored.financial_dispatch_v1.is_empty())
             && envelope.private_workspace_origin_v1.is_none()
         {
             return Err(damaged());
         }
         if !stored.financial_dispatch_v1.is_empty() {
             #[cfg(all(feature = "manual-admission", target_os = "linux"))]
-            private_financial_v1::validate_dispatch_history(&stored)?;
+            {
+                if stored.financial_binding_v2.is_some() {
+                    private_financial_v2::validate_dispatch_history(&stored)?;
+                } else {
+                    private_financial_v1::validate_dispatch_history(&stored)?;
+                }
+            }
+            #[cfg(not(all(feature = "manual-admission", target_os = "linux")))]
+            return Err(damaged());
+        }
+        if stored.financial_binding_v1.is_some() && stored.financial_binding_v2.is_some() {
+            return Err(damaged());
+        }
+        if let Some(binding) = &stored.financial_binding_v2 {
+            #[cfg(all(feature = "manual-admission", target_os = "linux"))]
+            {
+                private_financial_v2::decode_binding(binding)?.validate(&stored.identity)?;
+                private_financial_v2::validate_financial_intakes(&stored)?;
+            }
             #[cfg(not(all(feature = "manual-admission", target_os = "linux")))]
             return Err(damaged());
         }
@@ -166,7 +188,7 @@ pub(crate) fn validate_stored(envelope: &Envelope) -> Result<()> {
         }
         let mut actions = BTreeSet::new();
         for (account, intake) in &stored.intakes {
-            if stored.financial_binding_v1.is_none() && intake.financial_result_v1.is_some() {
+            if stored.financial_binding_v1.is_none() && stored.financial_binding_v2.is_none() && intake.financial_result_v1.is_some() {
                 return Err(damaged());
             }
             let participant = candidate
@@ -266,6 +288,7 @@ impl Engine {
             intakes: BTreeMap::new(),
             union: None,
             financial_binding_v1: None,
+            financial_binding_v2: None,
             financial_dispatch_v1: BTreeMap::new(),
         };
         put(&mut envelope, candidate_id, &stored)?;
@@ -1040,6 +1063,7 @@ pub(crate) fn validate_private_fixed_v2(envelope: &Envelope) -> Result<()> {
         if !stored.intakes.is_empty()
             || stored.union.is_some()
             || stored.financial_binding_v1.is_some()
+            || stored.financial_binding_v2.is_some()
             || !stored.financial_dispatch_v1.is_empty()
         {
             return Err(damaged());
@@ -1102,6 +1126,7 @@ fn freeze_private_fixed_kernel_v2(
         intakes: BTreeMap::new(),
         union: None,
         financial_binding_v1: None,
+            financial_binding_v2: None,
         financial_dispatch_v1: BTreeMap::new(),
     };
     put(envelope, &id, &stored)?;
@@ -1157,6 +1182,7 @@ fn read_private_fixed_kernel_v2(
         || !stored.intakes.is_empty()
         || stored.union.is_some()
         || stored.financial_binding_v1.is_some()
+            || stored.financial_binding_v2.is_some()
         || !stored.financial_dispatch_v1.is_empty()
         || serde_json::to_value(&stored.mappings).map_err(|_| damaged())?
             != serde_json::to_value(&mappings).map_err(|_| damaged())?

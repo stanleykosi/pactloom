@@ -118,6 +118,10 @@ pub(crate) use storage::financial_profile_v1::{FinancialConsentJournalV1, Financ
 pub(crate) use storage::financial_profile_v1::{CoordinatedContinueReviewDataV1, CoordinatedContinueSignerRoleV1, PreparedCoordinatedFinancialContinuationV1};
 #[cfg(all(feature = "coordinated-signer-continue", target_os = "linux"))]
 pub(crate) use storage::financial_profile_v1::{PresentedCoordinatedFinancialContinuationV1, CoordinatedContinuationCommitFailureV1, OriginalFinancialJournalSelectionV1};
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing", target_os = "linux"))]
+pub(crate) use storage::financial_profile_v1::AuditedDurableFinancialResultRowsV2;
+#[cfg(all(feature = "synthetic-born-joined-qualification", feature = "durable-proposal", feature = "pending-birth-owner-signing", target_os = "linux"))]
+pub(crate) use storage::financial_profile_v1::FinancialStartedOnlyAuditV2;
 pub use offline_history::{
     OfflineHistoryInventory, OfflineLocalAdmissionHistory, OfflineLocalKeyUseHistory,
     OfflineMinimalAdmissionHistoryStatement, OfflineNativeConsentHistoryReceipt,

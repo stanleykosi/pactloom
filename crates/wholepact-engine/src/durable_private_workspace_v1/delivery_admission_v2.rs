@@ -45,6 +45,7 @@ fn audit_coordinated_export_v1(before: &Envelope, after: &Envelope, access: &Acc
     { let _ = (before, after, access); Err(damaged()) }
 }
 pub(super) mod financial_v1;
+pub(super) mod financial_v2;
 pub use closed_review_v3::{
     ClosedPrivateDurableAdmissionReviewV3, PreparedPrivateDurableAdmissionDeliveryV3,
     PrivateDurableAdmissionDeliveryV3, PrivateDurableAdmissionStatusV3,
@@ -3221,6 +3222,9 @@ mod tests {
 
 #[cfg(all(test, feature = "synthetic-qualification"))]
 mod request_history_tests {
+    mod durable_financial_v2_state_tests {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/durable_proposals_v1/private_financial_v2_tests.rs"));
+    }
     // Inert mathematical/source-row components only. No marked original,
     // native approval, sealed recipient, proof or coordinator is manufactured.
     use super::*;

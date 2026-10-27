@@ -468,3 +468,6 @@ pub(in crate::host) fn read_original_status_v3(terminal: Terminal, profile: &Pat
     validate_closed_status_v3(export, &status)?;
     host.display_original_admission_status_v3(workspace, export, &status)
 }
+
+mod financial_partial_v2;
+pub(in crate::host) use financial_partial_v2::admit_original_financial_borrowed_v2;

@@ -1090,6 +1090,14 @@ pub(crate) struct FinancialIntakeSetupApprovalV1 {
 }
 #[cfg(all(feature = "durable-proposal", target_os = "linux"))]
 impl FinancialIntakeSetupApprovalV1 {
+    /// Same original finite setup custody, available to the versioned durable
+    /// return channel without requiring the legacy coordinated runtime profile.
+    pub(crate) fn durable_restriction_bounds_v2(&self, source: (u64, u64)) -> Result<OriginalPromptBoundsV1> {
+        self.check()?;
+        OriginalPromptBoundsV1::new(self.deadline, source)?.narrow_until(
+            self.wall_until.checked_mul(1000).ok_or(Error::Permission)?,
+        )
+    }
     #[cfg(feature = "coordinated-financial-workflow-v1")]
     pub(crate) fn original_restriction_bounds(&self, source: (u64, u64)) -> Result<OriginalPromptBoundsV1> {
         self.check()?;

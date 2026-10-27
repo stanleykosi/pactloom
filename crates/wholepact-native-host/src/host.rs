@@ -217,6 +217,14 @@ enum Command {
         #[arg(long)] profile: PathBuf,
         #[arg(long)] workspace: PathBuf,
     },
+    /// Resume exact durable two-owner progress with fresh per-action native permission.
+    #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    DurableFinancialSessionV2 {
+        #[arg(long)] profile: PathBuf,
+        #[arg(long)] workspace: PathBuf,
+        /// Reconcile this already intaken owner's exact lost acknowledgement; never re-sign.
+        #[arg(long)] reconcile_account: Option<String>,
+    },
     /// Inspect only an already completed original transaction; never sign, extract or repair.
     #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
     DurableFinancialInspectV1 {
@@ -461,6 +469,8 @@ fn dispatch(terminal: Terminal, command: Command) -> Result<()> {
     match command {
 #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
         Command::DurableFinancialSessionV1 { profile, workspace } => financial::durable_financial_commands_v1::session_v1(terminal, &profile, &workspace),
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+        Command::DurableFinancialSessionV2 { profile, workspace, reconcile_account } => financial::durable_financial_commands_v2::session_v2(terminal, &profile, &workspace, reconcile_account.as_deref()),
 #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
         Command::DurableFinancialInspectV1 { profile, workspace } => financial::durable_financial_commands_v1::inspect_v1(terminal, &profile, &workspace),
 #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]

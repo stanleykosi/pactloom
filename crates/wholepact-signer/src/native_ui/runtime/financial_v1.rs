@@ -114,6 +114,7 @@ impl NativeRuntime {
             || epoch == 0
             || self.open.is_some()
             || self.financial_v1.is_some()
+            || self.durable_result_v2.is_some()
             || self.pending.is_some()
             || self.signing_job.is_some()
             || !self.closing_accounts.is_empty()
@@ -133,6 +134,7 @@ impl NativeRuntime {
             || self.open.is_some()
             || self.closed_delivery_v3.is_some()
             || self.financial_v1.is_some()
+            || self.durable_result_v2.is_some()
             || self.pending.is_some()
             || self.signing_job.is_some()
             || !self.closing_accounts.is_empty()
@@ -648,3 +650,44 @@ mod coordinated_v3_delivery;
 pub(crate) use coordinated_continue::project_continue_presentation;
 #[cfg(all(test, feature = "coordinated-financial-workflow-v1", feature = "durable-proposal", feature = "pending-birth-owner-signing", feature = "native-ui", target_os = "linux"))]
 pub(crate) use coordinated_admit::coordinated_writer_read::coordinated_financial_activate_v1::coordinated_financial_wallet_v1::coordinated_financial_sign_v1::coordinated_financial_return_v1::{project_return_read_facts, project_return_exact_facts};
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl NativeRuntime {
+    pub(in crate::native_ui) fn capture_started_identity_for_qualification_v2(
+        &self,
+    ) -> Result<(String, String, String, Instant)> {
+        let state = self.financial_v1.as_ref().ok_or(Error::Unavailable)?;
+        if state.phase != FinancialPhaseV1::SignReview || state.job.is_some() {
+            return Err(Error::ReviewMismatch);
+        }
+        let context = state.context.as_ref().ok_or(Error::Unavailable)?;
+        context.source.check_custody()?;
+        let identity = (
+            context.terms.scope.authorization.identity.account_id.clone(),
+            context.terms.scope.authorization.authorization_id.clone(),
+            context.terms.intent_terms_digest().map_err(|_| Error::ReviewMismatch)?,
+            context.source.original_deadline(),
+        );
+        context.source.check_custody()?;
+        Ok(identity)
+    }
+    pub(in crate::native_ui) fn audit_started_after_reopen_for_qualification_v2(
+        &self, account: &str, authorization: &str, terms_digest: &str,
+    ) -> Result<(String, Instant)> {
+        let state = self.financial_v1.as_ref().ok_or(Error::Unavailable)?;
+        let context = state.context.as_ref().ok_or(Error::Unavailable)?;
+        if state.phase != FinancialPhaseV1::AwaitingReturn || state.job.is_some()
+            || context.next != Next::Return || context.writer.is_some() || context.material.is_some()
+            || context.wallet.is_some() || context.prepared_wallet.is_some() || context.prepared_spend.is_some()
+            || context.active.is_some() || context.history.is_some()
+            || context.terms.scope.authorization.identity.account_id != account
+            || context.terms.scope.authorization.authorization_id != authorization
+            || context.terms.intent_terms_digest().map_err(|_| Error::ReviewMismatch)? != terms_digest
+        { return Err(Error::ReviewMismatch); }
+        let audit = context.source.audit_started_only_for_qualification_v2(account, authorization)?;
+        // Inert serialized audit only. No source, old decision, writer or result
+        // owner is returned. The exact new selection kernel rejects Uncertain;
+        // this does not claim a full new V2 UI opener attempt.
+        Ok((serde_json::to_string(&audit).map_err(|_| Error::InvalidData)?, context.source.original_deadline()))
+    }
+}

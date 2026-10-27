@@ -194,7 +194,33 @@ class FixtureProviderTrustTests(unittest.TestCase):
         self.assertEqual(self.target.read_bytes(),self.ca)
 
     def test_source_bound_install_before_drop_and_native_environment_unchanged(self):
-        source=(ROOT/'ci-financial-container.py').read_text();main=source[source.index('def main():'):]
+        import hashlib
+        current=(ROOT/'ci-financial-container.py').read_bytes()
+        self.assertEqual(hashlib.sha256(current).hexdigest(),'a32958eccd9b77879b245e8dcad4520dc2782fa44093918b50ffaa22e96b35c8')
+        actual=current.decode('utf-8');actual_main=actual[actual.index('def main():'):]
+        # V2 owns separate child TLS material; the legacy NativeSession trust
+        # installation and empty-environment claim are not transferred to V2.
+        branch=actual_main[actual_main.index('        if expected_profile==DURABLE_PROFILE:'):actual_main.index("        C.require(not sys.argv[1:],'contract')")]
+        self.assertEqual(branch.count('os.setresuid(UID,UID,UID)'),1)
+        self.assertEqual(branch.count('return durable.run_case(sys.argv[1],manifest,original)'),1)
+        self.assertLess(branch.index('os.setresuid(UID,UID,UID)'),branch.index('return durable.run_case(sys.argv[1],manifest,original)'))
+        # Exact once-only full-source inverse, not an ignored region or a
+        # weakened order assertion. All original legacy assertions follow.
+        inverse=[
+            (b"if __name__=='__main__':raise SystemExit(main())\n",b"if __name__=='__main__':main()\n"),
+            (b"        if expected_profile==DURABLE_PROFILE:\n            print('CI_FINANCIAL_DURABLE_FAILURE '+json.dumps({'schema':1,'profile':DURABLE_PROFILE,\n                'case':sys.argv[1] if len(sys.argv)==2 and sys.argv[1] in DURABLE_CASES else 'invalid',\n                'code':'context','native_receipt':None,'cleanup_unverified':True},separators=(',',':')),flush=True)\n            raise SystemExit(1) from None\n",b''),
+            (b"        base,expected_profile=root_setup()\n        if expected_profile==DURABLE_PROFILE:\n            C.require(len(sys.argv)==2 and sys.argv[1] in DURABLE_CASES,'contract')\n            durable=load('ci-financial-durable')\n            C.require(durable.PROFILE==expected_profile,'contract')\n            raw,_=secure_file(ROOT/'manifest.json',0,0o444,32768)\n            manifest=C.loads(raw,32768)\n            os.setgroups([]);os.setresgid(UID,UID,UID);os.setresuid(UID,UID,UID);K.harden_process()\n            return durable.run_case(sys.argv[1],manifest,original)\n        C.require(not sys.argv[1:],'contract')\n        parent=FixtureParent(original)\n",b'        base,expected_profile=root_setup();parent=FixtureParent(original)\n'),
+            (b"    C.require(not sys.argv[1:] or (len(sys.argv)==2 and sys.argv[1] in DURABLE_CASES),'contract')\n",b"    C.require(not sys.argv[1:],'contract')\n"),
+            (b"    if not durable:\n        meta,digest=observed\n        pin={'schema_version':1,'profile':'financial-coordinator-common-image-linux-v1',\n             'executable_device':meta.st_dev,'executable_inode':meta.st_ino,\n             'executable_size':meta.st_size,'executable_sha256':digest}\n        write_new(pathlib.Path('/etc/wholepact/financial-coordinator-common-image-v1.json'),json.dumps(pin).encode(),0o444)\n",b"    meta,digest=observed\n    pin={'schema_version':1,'profile':'financial-coordinator-common-image-linux-v1',\n         'executable_device':meta.st_dev,'executable_inode':meta.st_ino,\n         'executable_size':meta.st_size,'executable_sha256':digest}\n    write_new(pathlib.Path('/etc/wholepact/financial-coordinator-common-image-v1.json'),json.dumps(pin).encode(),0o444)\n"),
+            (b"        mode=0o555 if name in artifacts else 0o444\n        raw,meta=secure_file(ROOT/name,UID if name in ('pristine-setup','durable-lifecycle-qualification') else 0,mode,512*1024*1024)\n",b"        mode=0o555 if name in ARTIFACTS else 0o444\n        raw,meta=secure_file(ROOT/name,UID if name=='pristine-setup' else 0,mode,512*1024*1024)\n"),
+            (b"              set(manifest['files'])==set(runtime_files+artifacts),'contract')\n",b"              set(manifest['files'])==set(RUNTIME_FILES+ARTIFACTS),'contract')\n"),
+            (b"    durable=manifest['profile']==DURABLE_PROFILE\n    artifacts=('durable-lifecycle-qualification',) if durable else ARTIFACTS\n    runtime_files=RUNTIME_FILES+('ci-financial-durable.py',) if durable else RUNTIME_FILES\n    C.require(manifest['schema']==1 and manifest['profile'] in (C.EXTERNAL_PROFILE,C.SEMANTIC_PROFILE,DURABLE_PROFILE) and\n",b"    C.require(manifest['schema']==1 and manifest['profile'] in (C.EXTERNAL_PROFILE,C.SEMANTIC_PROFILE) and\n"),
+            (b"DURABLE_PROFILE='financial-durable-result-lifecycle-selective-v2'\nDURABLE_CASES=('durable-resume','durable-started')\n",b''),
+        ]
+        for remove,restore in inverse:
+            self.assertEqual(current.count(remove),1);current=current.replace(remove,restore,1)
+        self.assertEqual(hashlib.sha256(current).hexdigest(),'3b030ae61e24b7d8d36a4a32cb1c71d3c88fa2c43fa90420a66cce663fa11be2')
+        source=current.decode('utf-8');main=source[source.index('def main():'):]
         self.assertLess(main.index('install_fixture_provider_ca(parent.path,parent.deadline)'),main.index('os.setresuid(UID,UID,UID)'))
         self.assertLess(main.index('os.setresuid(UID,UID,UID)'),main.index('session=NativeSession'))
         self.assertIn("env={'XDG_RUNTIME_DIR':str(WAYLAND),'WAYLAND_DISPLAY':'wayland-financial'}",source)

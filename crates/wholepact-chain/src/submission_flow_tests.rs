@@ -517,6 +517,90 @@ fn profile_expiry_and_attempt_resource_bounds_fail_closed() {
         128
     );
 }
+
+/// Actual encrypted recovery/dispatch kernels with the existing parseable empty
+/// wire fixture and a modeled, validated provider context. This is not a real
+/// payment, native grant, consensus observation or exposure-resolution proof.
+#[tokio::test]
+async fn expired_retained_unknown_submission_refuses_retry_after_reopen() {
+    let (_dir, path, key, mut journal) = setup();
+    let plan = plan();
+    let mut backend = Backend::new(vec![Err(ChainError::Timeout)]);
+    let first = submit_plan(
+        &mut journal,
+        &plan,
+        &mut backend,
+        &mut Authority::default(),
+        &Clock(NOW),
+        SubmissionPolicy::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.historical_provider_state, SubmissionState::SubmissionUnknown);
+    assert!(!first.clears_authorization_exposure && !first.permits_replacement);
+    assert_eq!(backend.calls.len(), 1);
+    let original_attempts = journal
+        .submission_attempts(&plan.descriptor.operation_id)
+        .unwrap();
+    assert_eq!(original_attempts.len(), 1);
+    drop(journal);
+
+    let mut journal =
+        EncryptedSubmissionJournal::from_encrypted_connection(open_encrypted(&path, &key).unwrap())
+            .unwrap();
+    let changes_after_reopen = journal.connection.total_changes();
+    // Cross the original minimum send margin, then the actual expiry height.
+    // Fresh provider data and an otherwise permissive fresh test authority do
+    // not renew the saved transaction or turn UNKNOWN into a safe replacement.
+    for height in [plan.descriptor.expiry_height - 2, plan.descriptor.expiry_height] {
+        let (identity, policy, mut info, mut tip, mut block) = crate::tests::fixture();
+        info.block_height = u64::from(height);
+        info.estimated_height = u64::from(height);
+        tip.height = u64::from(height);
+        block.height = u64::from(height);
+        backend.context = crate::validate_context(
+            &identity, &policy, &info, &tip, &block, &tip, NOW, NOW + 1,
+        )
+        .unwrap();
+        let mut fresh_authority = Authority::default();
+        assert!(matches!(
+            retry_retained_submission(
+                &mut journal,
+                &plan.descriptor.operation_id,
+                &mut backend,
+                &mut fresh_authority,
+                &Clock(NOW + 1),
+                SubmissionPolicy::default(),
+            )
+            .await,
+            Err(ChainError::SubmissionExpiryMargin)
+        ));
+        assert_eq!(fresh_authority.checks.get(), 0);
+        assert_eq!(backend.calls.len(), 1);
+        assert_eq!(journal.connection.total_changes(), changes_after_reopen);
+        assert!(journal
+            .retained_submission_descriptor(&plan.descriptor.operation_id)
+            .unwrap()
+            .as_ref() == Some(&plan.descriptor));
+        let (retained, state) = journal
+            .recover_exact_intent(&plan.descriptor.operation_id)
+            .unwrap()
+            .unwrap();
+        assert!(retained.exact_bytes() == plan.intent.exact_bytes());
+        assert_eq!(retained.bytes_sha256(), plan.descriptor.bytes_sha256);
+        assert_eq!(state, SubmissionState::SubmissionUnknown);
+        assert!(journal
+            .submission_attempts(&plan.descriptor.operation_id)
+            .unwrap() == original_attempts);
+        let counts: (u64, u64) = journal.connection.query_row(
+            "SELECT (SELECT count(*) FROM submission_intents),(SELECT count(*) FROM submission_bindings)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(counts, (1, 1));
+    }
+}
+
 #[test]
 fn version_one_migration_preserves_unknown_exact_intent_without_inventing_authority() {
     let (_dir, path, key, mut journal) = setup();

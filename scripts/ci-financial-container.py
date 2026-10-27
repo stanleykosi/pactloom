@@ -73,6 +73,8 @@ RUNTIME_FILES=('ci-financial-container.py','ci-financial-flow.py','ci-financial-
  'ci-financial-observer.py','ci-financial-output.py','ci-financial-external-output.py',
  'ci-financial-external-operator.py','ci-financial-weston-module.so')
 ARTIFACTS=('coordinator-observed','coordinator-production','pristine-setup')
+DURABLE_PROFILE='financial-durable-result-lifecycle-selective-v2'
+DURABLE_CASES=('durable-resume','durable-started')
 
 
 def secure_file(path,owner,mode,limit):
@@ -116,14 +118,17 @@ def root_setup():
     os.environ.clear()
     raw,_=secure_file(ROOT/'manifest.json',0,0o444,32768);manifest=C.loads(raw,32768)
     C.exact(manifest,('schema','profile','source_commit','files'))
-    C.require(manifest['schema']==1 and manifest['profile'] in (C.EXTERNAL_PROFILE,C.SEMANTIC_PROFILE) and
+    durable=manifest['profile']==DURABLE_PROFILE
+    artifacts=('durable-lifecycle-qualification',) if durable else ARTIFACTS
+    runtime_files=RUNTIME_FILES+('ci-financial-durable.py',) if durable else RUNTIME_FILES
+    C.require(manifest['schema']==1 and manifest['profile'] in (C.EXTERNAL_PROFILE,C.SEMANTIC_PROFILE,DURABLE_PROFILE) and
               type(manifest['source_commit']) is str and len(manifest['source_commit'])==40 and
-              set(manifest['files'])==set(RUNTIME_FILES+ARTIFACTS),'contract')
+              set(manifest['files'])==set(runtime_files+artifacts),'contract')
     observed=None
     for name,pin in manifest['files'].items():
         C.exact(pin,('size','sha256'))
-        mode=0o555 if name in ARTIFACTS else 0o444
-        raw,meta=secure_file(ROOT/name,UID if name=='pristine-setup' else 0,mode,512*1024*1024)
+        mode=0o555 if name in artifacts else 0o444
+        raw,meta=secure_file(ROOT/name,UID if name in ('pristine-setup','durable-lifecycle-qualification') else 0,mode,512*1024*1024)
         C.require(len(raw)==pin['size'] and hashlib.sha256(raw).hexdigest()==pin['sha256'],'contract')
         if name=='coordinator-observed':observed=(meta,pin['sha256'])
     with fixture_effective_identity():
@@ -133,11 +138,12 @@ def root_setup():
                       stat.S_IMODE(m.st_mode)==0o700 and not list(path.iterdir()),'fixture_path')
     # Root writes only the fixed common-image pin and public account metadata.
     # It never opens either synthetic password file.
-    meta,digest=observed
-    pin={'schema_version':1,'profile':'financial-coordinator-common-image-linux-v1',
-         'executable_device':meta.st_dev,'executable_inode':meta.st_ino,
-         'executable_size':meta.st_size,'executable_sha256':digest}
-    write_new(pathlib.Path('/etc/wholepact/financial-coordinator-common-image-v1.json'),json.dumps(pin).encode(),0o444)
+    if not durable:
+        meta,digest=observed
+        pin={'schema_version':1,'profile':'financial-coordinator-common-image-linux-v1',
+             'executable_device':meta.st_dev,'executable_inode':meta.st_ino,
+             'executable_size':meta.st_size,'executable_sha256':digest}
+        write_new(pathlib.Path('/etc/wholepact/financial-coordinator-common-image-v1.json'),json.dumps(pin).encode(),0o444)
     base,_=secure_file(ROOT/'base-passwd',0,0o444,65536)
     write_account(base,'/nonexistent',initial=True)
     return base,manifest['profile']
@@ -437,12 +443,22 @@ def emit_snapshot_failure(error):
 
 def main():
     if sys.argv[1:]==['fixture-child']:fixture_child();return
-    C.require(not sys.argv[1:],'contract')
+    C.require(not sys.argv[1:] or (len(sys.argv)==2 and sys.argv[1] in DURABLE_CASES),'contract')
     original=time.monotonic_ns()+C.ORIGINAL_NS
     parent=session=None
     expected_profile=C.EXTERNAL_PROFILE
     try:
-        base,expected_profile=root_setup();parent=FixtureParent(original)
+        base,expected_profile=root_setup()
+        if expected_profile==DURABLE_PROFILE:
+            C.require(len(sys.argv)==2 and sys.argv[1] in DURABLE_CASES,'contract')
+            durable=load('ci-financial-durable')
+            C.require(durable.PROFILE==expected_profile,'contract')
+            raw,_=secure_file(ROOT/'manifest.json',0,0o444,32768)
+            manifest=C.loads(raw,32768)
+            os.setgroups([]);os.setresgid(UID,UID,UID);os.setresuid(UID,UID,UID);K.harden_process()
+            return durable.run_case(sys.argv[1],manifest,original)
+        C.require(not sys.argv[1:],'contract')
+        parent=FixtureParent(original)
         install_fixture_provider_ca(parent.path,parent.deadline)
         write_account(base,str(parent.home))
         os.setgroups([]);os.setresgid(UID,UID,UID);os.setresuid(UID,UID,UID);K.harden_process()
@@ -460,6 +476,11 @@ def main():
               'native_oracle_verified':True,'fixture_cleaned':True,'display_cleaned':True,
               'public_chain_verified':False,'dispatch_attempted':False},separators=(',',':')),flush=True)
     except BaseException as error:
+        if expected_profile==DURABLE_PROFILE:
+            print('CI_FINANCIAL_DURABLE_FAILURE '+json.dumps({'schema':1,'profile':DURABLE_PROFILE,
+                'case':sys.argv[1] if len(sys.argv)==2 and sys.argv[1] in DURABLE_CASES else 'invalid',
+                'code':'context','native_receipt':None,'cleanup_unverified':True},separators=(',',':')),flush=True)
+            raise SystemExit(1) from None
         code=getattr(error,'code','process')
         flow=getattr(session,'flow',None)
         # LOCATION is the last validated main-loop nonterminal checkpoint only; omit it
@@ -481,4 +502,4 @@ def main():
         print('CI_FINANCIAL_RESULT '+json.dumps(OUT.failure(code,expected_profile),separators=(',',':')),flush=True)
         raise SystemExit(1) from None
 
-if __name__=='__main__':main()
+if __name__=='__main__':raise SystemExit(main())

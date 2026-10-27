@@ -12,6 +12,11 @@ pub(super) struct OriginalResultRestrictionsV1 {
     intake: Option<Box<dyn FinancialResultRestrictionV1>>,
 }
 impl OriginalResultRestrictionsV1 {
+    /// Closed construction for sibling nominal receivers. Intake is always
+    /// absent initially; check() still denies until the one-shot binder runs.
+    pub(super) fn awaiting_intake(original: Box<dyn FinancialResultRestrictionV1>) -> Self {
+        Self { original, intake: None }
+    }
     pub(super) fn check(&self) -> Result<()> {
         self.original.check_before_io()?;
         self.intake

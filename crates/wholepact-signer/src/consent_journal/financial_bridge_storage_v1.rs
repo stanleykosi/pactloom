@@ -5,6 +5,11 @@ use super::*;
 #[cfg(feature="coordinated-financial-workflow-v1")]
 #[path="financial_bridge_storage_v1/coordinated_return_v1.rs"]
 mod coordinated_return_v1;
+#[path = "financial_bridge_storage_v1/durable_result_v2.rs"]
+mod durable_result_v2;
+pub(crate) use durable_result_v2::AuditedDurableFinancialResultRowsV2;
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub(crate) use durable_result_v2::FinancialStartedOnlyAuditV2;
 use crate::authority_bridge::{BridgeError, Result as BridgeResult};
 use crate::authority_bridge::protocol::{RetainedAuthorizationRequest, RetainedAuthorizationResult, RetainedWitnessPermit};
 use crate::authority_bridge::financial_continuation_v1::request_from_financial_original_v1;

@@ -38,11 +38,21 @@ B = load('financial_bootstrap_supervisor', 'ci-bootstrap-supervisor.py')
 I = load('financial_image', 'ci-financial-image.py')
 P = load('financial_output', 'ci-financial-external-output.py')
 A = load('financial_artifacts', 'ci-financial-artifacts.py')
+D = load('financial_durable', 'ci-financial-durable.py')
 OCR = load('financial_ocr_preflight', 'ci-financial-ocr-image.py')
 BASE = I.BASE_IMAGE
 LABEL = 'org.wholepact.financial-run'
 SOURCE_LABEL = 'org.wholepact.financial-source'
 MODES = ('external',)
+_DURABLE_DOCKER_DEADLINE = None
+
+def runtime_modes():
+    return tuple(D.CASES) if I.profile()==D.PROFILE else MODES
+
+def expected_features(profile):
+    if profile==D.PROFILE:return {D.ROLE:list(D.FEATURES)}
+    require(profile in (A.PIXEL_PROFILE,A.SEMANTIC_PROFILE),'compile','artifact_profile')
+    return FEATURES
 FEATURE = 'coordinated-financial-runtime'
 FEATURES = {
     'coordinator-production': ['common-image-bootstrap', FEATURE, 'coordinated-financial-source-ui', 'coordinator-transient-password-input'],
@@ -258,7 +268,7 @@ def exact_source(sha):
             'source', 'source_commit')
     require(checked(['git', 'status', '--porcelain', '--untracked-files=all'], 'source', limit=65536) == b'',
             'source', 'dirty_source')
-    require((HERE / 'qualification-gate-mode').read_bytes() in (b'financial-ui\n',b'financial-semantic\n'), 'source', 'gate_mode')
+    require((HERE / 'qualification-gate-mode').read_bytes() in (b'financial-ui\n',b'financial-semantic\n',D.GATE), 'source', 'gate_mode')
 
 
 BUILD_LOG_LIMIT = 64 * 1024
@@ -269,6 +279,7 @@ BUILD_ENV_KEYS = frozenset(('PATH', 'HOME', 'CARGO_HOME', 'CARGO_TARGET_DIR', 'C
     'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_TERMINAL_PROMPT'))
 BUILD_PACKAGES = {name: 'wholepact-native-host' if name == 'pristine-setup'
     else 'wholepact-financial-coordinator' for name in I.ARTIFACT_FILES}
+BUILD_PACKAGES[D.ROLE] = 'wholepact-native-host'
 BUILD_PACKAGES['encrypted-storage-prerequisites'] = 'sqlcipher-4.19.0+openssl-3.5.9'
 BUILD_TOOLS = ('curl', 'sha256sum', 'tar', 'make', 'gcc', 'perl', 'tclsh', 'pkg-config')
 
@@ -372,9 +383,12 @@ def encrypted_build_environment(root, environment):
     return selected
 
 
-def select_artifact(raw, name, target):
+def select_artifact(raw, name, target, profile=A.PIXEL_PROFILE):
     """Use only this invocation's compiler report, including the Host LIB test."""
-    setup = name == 'pristine-setup'
+    features=expected_features(profile)
+    durable=profile==D.PROFILE
+    require(name in features,'compile','artifact_profile')
+    setup = name == 'pristine-setup' or (profile==D.PROFILE and name==D.ROLE)
     wanted = 'wholepact_native_host' if setup else 'wholepact-financial-coordinator'
     found = []
     for line in raw.splitlines():
@@ -392,7 +406,8 @@ def select_artifact(raw, name, target):
         profile = row.get('profile', {})
         require(type(profile) is dict and profile.get('test') is setup and profile.get('opt_level') == '3'
                 and profile.get('debug_assertions') is False, 'compile', 'artifact_profile')
-        require(row.get('features') == FEATURES[name], 'compile', 'artifact_features')
+        if durable:require(profile.get('overflow_checks') is False and row.get('manifest_path')==str(REPO/'crates/wholepact-native-host/Cargo.toml'), 'compile','artifact_profile')
+        require(row.get('features') == features[name], 'compile', 'artifact_features')
         executable = row['executable']
         require(type(executable) is str, 'compile', 'artifact_path')
         path = pathlib.Path(executable)
@@ -443,7 +458,13 @@ def package_preflight():
         raise Failure('packages', 'input_file') from None
 
 
-def build_recipe(name):
+def build_recipe(name, profile=A.PIXEL_PROFILE):
+    if profile==D.PROFILE:
+        require(name==D.ROLE,'compile','artifact')
+        args=['rustup','run','1.99.0','cargo','test','--no-run','--locked','--release',
+              '--no-default-features','-p','wholepact-native-host','--lib','--features',D.FEATURE_TEXT]
+        for override in D.OVERRIDES:args+=['--config',override]
+        return args+['--message-format=json']
     require(name in FEATURES, 'compile', 'artifact')
     setup=name=='pristine-setup'
     args=['rustup','run','1.99.0','cargo','test' if setup else 'build']
@@ -457,7 +478,7 @@ def build_recipe(name):
 
 
 def select_build_environment(environment, name, profile):
-    require(name in FEATURES and profile in (A.PIXEL_PROFILE,A.SEMANTIC_PROFILE), 'compile','artifact_profile')
+    require(name in expected_features(profile), 'compile','artifact_profile')
     require(type(environment) is dict and set(environment)<=BUILD_ENV_KEYS
             and all(type(value) is str for value in environment.values()), 'compile','build_environment')
     require(A.MODE_ENV not in environment or environment[A.MODE_ENV] in
@@ -474,7 +495,7 @@ def validate_compiler_cfg(raw, name, target, profile):
     This never trusts filenames or binary inequality as proof of cfg selection.
     Cargo's exact-source custom-build records bind package IDs to script paths.
     """
-    require(name in FEATURES and profile in (A.PIXEL_PROFILE,A.SEMANTIC_PROFILE), 'compile','artifact_profile')
+    require(name in expected_features(profile), 'compile','artifact_profile')
     delivery=A.recipe(profile)['cfg_delivery']
     expected=set(delivery['artifact_script_crates'][name])
     manifests={str(REPO/'crates'/crate/'Cargo.toml'):crate for crate in A.CFG_CRATES}
@@ -526,8 +547,9 @@ def validate_compiler_cfg(raw, name, target, profile):
 def compiled_source_identity(sha):
     """The current recipe's complete tracked content-and-mode input closure."""
     exact_source(sha)
-    require(A.RECIPE['rustc'] == B.RUSTC and A.RECIPE['coordinator_features'] == FEATURE
-            and A.RECIPE['artifact_features'] == FEATURES,
+    selected_recipe=A.recipe(I.profile())
+    require(selected_recipe['rustc'] == B.RUSTC and selected_recipe['artifact_features'] == expected_features(I.profile())
+            and (selected_recipe['host_test_features']==D.FEATURE_TEXT if I.profile()==D.PROFILE else selected_recipe['coordinator_features']==FEATURE),
             'compile', 'artifact_bundle')
     tree = checked(['git', 'rev-parse', 'HEAD^{tree}'], 'source', limit=128).strip().decode('ascii')
     rows = checked(['git', 'ls-tree', '-rz', '--full-tree', 'HEAD'], 'source', limit=16 * 1024 * 1024)
@@ -587,7 +609,7 @@ def export_compiled_artifacts(artifacts, sha):
         pin = dict(sha256=digest.hexdigest(), size=bundle.stat().st_size)
         emit('BUILD_BUNDLE', dict(source=sha, source_tree=producer['source_tree'],profile=I.profile(), run_id=producer['run_id'],
             attempt=producer['attempt'], sha256=digest.hexdigest(), size=bundle.stat().st_size,
-            artifacts=list(A.NAMES), pre_credential=True, reused=False, uploaded=False))
+            artifacts=list(A.bundle_names(I.profile())), pre_credential=True, reused=False, uploaded=False))
         return pin
     except Exception:
         # Never mark an incomplete bundle uploadable. Only this fresh directory.
@@ -609,21 +631,35 @@ def build_inputs(root, sha, *, bundle_only=False):
     require(checked(['rustup','run','1.99.0','rustc','--version'],'toolchain',env=env).decode().strip()==B.RUSTC,
             'toolchain','toolchain_version')
     exact_source(sha);env=encrypted_build_environment(root,env)
-    for name in I.ARTIFACT_FILES:
-        exact_source(sha);selected=select_build_environment(env,name,I.profile());setup=name=='pristine-setup'
-        args=build_recipe(name)
+    for name in I.artifact_files():
+        exact_source(sha);selected=select_build_environment(env,name,I.profile());setup=name=='pristine-setup' or name==D.ROLE
+        args=build_recipe(name,I.profile())
         raw=build_command(name,args,'compile',selected,seconds=1800,limit=32*1024*1024)
         validate_compiler_cfg(raw,name,root/'target',I.profile())
-        artifact=select_artifact(raw,name,root/'target')
+        artifact=select_artifact(raw,name,root/'target',I.profile())
+        if I.profile()==D.PROFILE:
+            try:D.validate_package_profiles(raw,REPO)
+            except D.Rejected:raise Failure('compile','artifact_profile') from None
         shutil.copyfile(artifact,inputs/name);(inputs/name).chmod(0o555)
         if setup:
-            listing=build_command(name,[str(inputs/name),'--list','--exact',LIVE_FIXTURE_TEST],
-                'compile',selected,seconds=30,limit=4096)
-            require(listing.decode('utf-8').splitlines()==[
-                LIVE_FIXTURE_TEST+': test','','1 test, 0 benchmarks'], 'compile','artifact_profile')
+            selectors=tuple(D.CASES.values())+D.SAFE_TESTS if I.profile()==D.PROFILE else (LIVE_FIXTURE_TEST,)
+            for selector in selectors:
+                listing=build_command(name,[str(inputs/name),'--list','--exact',selector],
+                    'compile',selected,seconds=30,limit=4096)
+                require(listing.decode('utf-8').splitlines()==[
+                    selector+': test','','1 test, 0 benchmarks'], 'compile','artifact_profile')
+        if I.profile()==D.PROFILE:
+            for selector in D.SAFE_TESTS:
+                result=build_command(name,[str(inputs/name),'--exact',selector,'--nocapture',
+                    '--test-threads=1','--color=never'],'compile',selected,seconds=30,limit=D.MAX_OUTPUT)
+                try:D.safe_test_passed(selector,result)
+                except D.Rejected:raise Failure('compile','artifact_profile') from None
+            emit('DURABLE_BUILD_TESTS',dict(profile=D.PROFILE,source=sha,exact_safe_tests=len(D.SAFE_TESTS),
+                lifecycle_selectors_listed=len(D.CASES),native_lifecycle_executed=False,passed=True))
         emit('ARTIFACT',dict(artifact=name,source=sha,**pin(inputs/name),observed=name=='coordinator-observed',pre_credential=True))
-    require(pin(inputs/'coordinator-production')['sha256'] != pin(inputs/'coordinator-observed')['sha256'],
-            'compile','artifact_profile')
+    if I.profile()!=D.PROFILE:
+        require(pin(inputs/'coordinator-production')['sha256'] != pin(inputs/'coordinator-observed')['sha256'],
+                'compile','artifact_profile')
     exact_source(sha)
     bundle_pin=export_compiled_artifacts(inputs,sha)
     if bundle_only:return bundle_pin
@@ -634,7 +670,7 @@ def build_inputs(root, sha, *, bundle_only=False):
 def stage_image_context(root, inputs, sha):
     build_context=root/'context'
     args=[sys.executable,'-I','-B',str(HERE/'ci-financial-image.py'),'--output',str(build_context),'--source-commit',sha]
-    for name in I.ARTIFACT_FILES:args+=['--'+name,str(inputs/name)]
+    for name in I.artifact_files():args+=['--'+name,str(inputs/name)]
     checked(args,'packages',seconds=900,limit=1024*1024,env={'PATH':os.environ['PATH'],'HOME':'/nonexistent'})
     exact_source(sha);return build_context
 
@@ -677,7 +713,7 @@ def same_job_inputs(root, sha):
         inputs=root/'artifacts';inputs.mkdir(mode=0o700)
         # Headers, fixed names, bounds and digests were checked above. Never extractall.
         with tarfile.open(bundle,'r:') as archive:
-            for name in A.NAMES:
+            for name in A.bundle_names(I.profile()):
                 with archive.extractfile(name) as source,(inputs/name).open('xb') as destination:
                     shutil.copyfileobj(source,destination)
                 (inputs/name).chmod(0o555)
@@ -697,6 +733,10 @@ def docker_env():
 
 
 def docker(args, stage, **kwargs):
+    if _DURABLE_DOCKER_DEADLINE is not None:
+        left=_DURABLE_DOCKER_DEADLINE-time.monotonic()
+        require(left>0,stage,'client_deadline')
+        kwargs['seconds']=min(kwargs.get('seconds',20),left)
     return checked(['docker'] + args, stage, env=docker_env(), **kwargs)
 
 
@@ -707,7 +747,7 @@ def names(token):
         values = raw.decode('ascii').splitlines()
     except UnicodeError:
         raise Failure('cleanup', 'container_identity') from None
-    expected = {'wp-financial-' + token + '-' + mode for mode in MODES}
+    expected = {'wp-financial-' + token + '-' + mode for mode in runtime_modes()}
     require(len(values) <= 2 and len(values) == len(set(values)) and set(values) <= expected,
             'cleanup', 'container_identity')
     return values
@@ -753,6 +793,7 @@ def runtime_cpu_limit():
     # The semantic observer shares CPU with the native actors and compositor.
     # Keep a fixed bound; the separately callable pixel-only gate retains two.
     profile = I.profile()
+    if profile==D.PROFILE:return 4
     require(profile in (P.C.EXTERNAL_PROFILE, P.C.SEMANTIC_PROFILE), 'container', 'artifact_profile')
     return 4 if profile == P.C.SEMANTIC_PROFILE else 2
 
@@ -788,7 +829,7 @@ def inspect_isolation(name, token, mode, image_id, sha):
         'restart_policy': host.get('RestartPolicy') == {'Name': 'no', 'MaximumRetryCount': 0},
         'auto_remove': host.get('AutoRemove') is False,
         'entrypoint': cfg.get('Entrypoint') == ['/usr/local/bin/python3', '-I', '-B', '/opt/ci-financial/ci-financial-container.py'],
-        'command': cfg.get('Cmd') in (None, []),
+        'command': cfg.get('Cmd')==[mode] if I.profile()==D.PROFILE else cfg.get('Cmd') in (None, []),
     }
     for check, ok in checks.items():
         isolation(mode, check, ok, 'exact_contract', 'exact_contract' if ok else 'different_or_invalid')
@@ -968,9 +1009,21 @@ class RuntimeRecords:
         return self.result
 
 
+class DurableRuntimeRecords(D.RuntimeRecords):
+    @property
+    def first_failure(self):return self.failure
+    def __call__(self,line):
+        try:super().__call__(line)
+        except D.Rejected:raise Failure('projection','result_schema') from None
+        if self.failure is not None:emit('DURABLE_FAILURE',self.failure)
+    def finish(self,status):
+        try:return super().finish(status)
+        except D.Rejected:raise Failure('runtime','result_records') from None
+
 def run_case(mode, image_id, token, sha):
     name = 'wp-financial-' + token + '-' + mode
-    records = RuntimeRecords(mode,I.profile())
+    durable=I.profile()==D.PROFILE
+    records = DurableRuntimeRecords(mode,sha) if durable else RuntimeRecords(mode,I.profile())
     removed, create_pending, result, first = False, False, None, None
     try:
         require(name not in names(token), 'container', 'container_identity')
@@ -983,11 +1036,11 @@ def run_case(mode, image_id, token, sha):
             '--log-driver', 'none', '--restart', 'no']
         for path, options in TMPFS.items():
             args += ['--tmpfs', path + ':' + options]
-        docker(args + [image_id], 'container', limit=4096)
+        docker(args + [image_id] + ([mode] if durable else []), 'container', limit=4096)
         create_pending = False
         inspect_isolation(name, token, mode, image_id, sha)
         status, _ = command(['docker', 'start', '--attach', name], 'runtime', env=docker_env(),
-            seconds=1830, limit=16384, on_line=records)
+            seconds=min(1830,_DURABLE_DOCKER_DEADLINE-time.monotonic()) if durable else 1830, limit=16384, on_line=records)
         result = records.finish(status)
     except Failure as error:
         first = error
@@ -1005,7 +1058,7 @@ def run_case(mode, image_id, token, sha):
             if first is None and records.first_failure is None:
                 emit('FAILURE', dict(mode=mode, **failure_record(error), cleanup_pending=True))
             first = first or error
-    return result, bool(result and result.get('native_oracle_verified') is True and removed and first is None)
+    return result, bool(result and (durable or result.get('native_oracle_verified') is True) and removed and first is None)
 
 
 def image_failure(raw):
@@ -1120,7 +1173,7 @@ def cache_empty(raw):
 def cleanup(token, tag):
     containers_absent, image_absent, cache_absent = True, True, True
     # Always reconcile both deterministic owned names, including uncertain creates.
-    for mode in MODES:
+    for mode in runtime_modes():
         try:
             remove_container('wp-financial-' + token + '-' + mode, token)
         except Failure:
@@ -1166,6 +1219,8 @@ def cleanup(token, tag):
 
 
 def main():
+    global _DURABLE_DOCKER_DEADLINE
+    _DURABLE_DOCKER_DEADLINE=None
     sha,token=context()
     require(len(sys.argv)==2 and sys.argv[1] in ('run','build','run-built','cleanup'),'preflight','arguments')
     cleanup_only=sys.argv[1]=='cleanup';tag='wholepact-financial:'+token
@@ -1173,15 +1228,24 @@ def main():
     root=pathlib.Path(tempfile.mkdtemp(prefix='wholepact-financial-',dir=os.environ['RUNNER_TEMP']))
     (root/'docker').mkdir();os.environ['FINANCIAL_DOCKER_CONFIG']=str(root/'docker')
     passed,first=cleanup_only,None
+    durable=I.profile()==D.PROFILE;durable_cases={case:'not_run' for case in D.CASES};durable_cleanup_deadline=None
     try:
         if not cleanup_only:
             exact_source(sha)
-            emit('SOURCE',dict(source=sha,profile=I.profile(),
-                semantic_assisted_host_observation=I.profile()==P.C.SEMANTIC_PROFILE,toolchain='1.99.0',container_base=BASE,
-                cargo_lock_sha256=hashlib.sha256((REPO/'Cargo.lock').read_bytes()).hexdigest(),
-                financial_session_seconds=1800,original_fixture_ceiling_seconds=900,
-                active_financial_witnesses=7,retained_inert_witnesses=6,external_native_witness=True,
-                public_chain_verified=False,dispatch_requested=False))
+            if durable:
+                emit('DURABLE_SOURCE',dict(source=sha,profile=D.PROFILE,toolchain='1.99.0',container_base=BASE,
+                    cargo_lock_sha256=hashlib.sha256((REPO/'Cargo.lock').read_bytes()).hexdigest(),
+                    artifact_role=D.ROLE,selective_optimization_correctness=True,signer_opt_level=0,engine_opt_level=0,
+                    host_opt_level=3,native_case_seconds=D.NATIVE_SECONDS,attach_suite_seconds=D.ATTACH_SUITE_SECONDS,
+                    runtime_suite_seconds=D.RUNTIME_SUITE_SECONDS,runtime_and_cleanup_seconds=D.RUNTIME_AND_CLEANUP_SECONDS,
+                    rendered_ui_verified=False,production_coordinator_executed=False,public_chain_verified=False,live_funds=False))
+            else:
+                emit('SOURCE',dict(source=sha,profile=I.profile(),
+                    semantic_assisted_host_observation=I.profile()==P.C.SEMANTIC_PROFILE,toolchain='1.99.0',container_base=BASE,
+                    cargo_lock_sha256=hashlib.sha256((REPO/'Cargo.lock').read_bytes()).hexdigest(),
+                    financial_session_seconds=1800,original_fixture_ceiling_seconds=900,
+                    active_financial_witnesses=7,retained_inert_witnesses=6,external_native_witness=True,
+                    public_chain_verified=False,dispatch_requested=False))
             if not runtime_only:
                 with PipelineStage('build') as stage:
                     built=build_inputs(root,sha,bundle_only=build_only)
@@ -1200,7 +1264,18 @@ def main():
                     image_id=final_image(build_context,tag,foundation_tag,token,sha,foundation)
                     stage.passed=True
                 with PipelineStage('fixture-runtime') as stage:
-                    exact_source(sha);result,passed=run_case('external',image_id,token,sha)
+                    if durable:
+                        started=time.monotonic();_DURABLE_DOCKER_DEADLINE=started+D.RUNTIME_SUITE_SECONDS
+                        durable_cleanup_deadline=started+D.RUNTIME_AND_CLEANUP_SECONDS
+                        passed=True
+                        for case in D.CASES:
+                            exact_source(sha);result,case_passed=run_case(case,image_id,token,sha)
+                            durable_cases[case]='passed' if case_passed else 'failed'
+                            passed=passed and case_passed and time.monotonic()<_DURABLE_DOCKER_DEADLINE
+                            if not passed:break
+                        passed=passed and all(value=='passed' for value in durable_cases.values())
+                    else:
+                        exact_source(sha);result,passed=run_case('external',image_id,token,sha)
                     stage.passed=passed
     except Failure as error:
         first=failure_record(error)
@@ -1208,6 +1283,7 @@ def main():
     except Exception:
         first=failure_record(Failure('supervisor','internal'));emit('FAILURE',dict(**first,cleanup_pending=True))
     finally:
+        if durable:_DURABLE_DOCKER_DEADLINE=durable_cleanup_deadline
         try:clean=cleanup(token,tag)
         except Exception:clean=False
         try:shutil.rmtree(root)
@@ -1217,6 +1293,11 @@ def main():
             if passed:publish_compiled_bundle(bundle_pin)
             emit('BUILD_RESULT',dict(passed=passed,source=sha,profile=I.profile(),
                 private_build_root_removed=not root.exists(),pre_credential=True,fullflow=False))
+        elif durable:emit('DURABLE_RESULT',dict(schema=1,passed=passed,cleanup_only=cleanup_only,source=sha,profile=D.PROFILE,
+            cases=durable_cases,selective_optimization_correctness=True,rendered_ui_verified=False,
+            production_coordinator_executed=False,native_v3_durable_lifecycle_verified=passed and not cleanup_only,
+            coordinated_legacy_runtime_verified=False,containers_and_image_removed=clean,public_chain_verified=False,
+            live_funds=False,deployment_verified=False))
         else:emit('RESULT',dict(passed=passed,cleanup_only=cleanup_only,source=sha,profile=I.profile(),
             semantic_assisted_host_observation=I.profile()==P.C.SEMANTIC_PROFILE,
             pixel_only_ui_verified=passed and not cleanup_only and I.profile()==P.C.EXTERNAL_PROFILE,

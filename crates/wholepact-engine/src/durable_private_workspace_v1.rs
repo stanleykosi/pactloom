@@ -23,6 +23,12 @@ pub use delivery_admission_v2::financial_v1::{
     PrivateDurableFinancialCoordinatorV1, PrivateDurableFinancialInspectionV1,
     RetainedPrivateDispatchIntentV1, VerifiedPrivateDurableSubmissionV1,
 };
+pub use delivery_admission_v2::financial_v2::{
+    PreparedPrivateFinancialV2, PrivateDurableFinancialCoordinatorV2,
+    PrivateDurableFinancialInspectionV2, RetainedPrivateDispatchIntentV2,
+    VerifiedPrivateDurableSubmissionV2,
+    PreparedPrivateDurableFinancialDeliveryV2, ClosedPrivateDurableFinancialReviewV2,
+};
 mod exact_fixed_v2;
 pub use delivery_admission_v2::{
     ClosedPrivateDurableAdmissionReviewV3, LocalPrivateDurableAdmissionConsentV2,
@@ -1133,6 +1139,7 @@ enum OriginalMetadataProfileV2 {
     Precursor,
     Admission,
     Financial,
+    FinancialDurableV2,
 }
 impl OriginalMetadataProfileV2 {
     fn accepts_revision(self, revision: i64) -> bool {
@@ -1140,6 +1147,7 @@ impl OriginalMetadataProfileV2 {
             Self::Precursor => (0..=8).contains(&revision),
             Self::Admission => (8..=16).contains(&revision),
             Self::Financial => (8..=404).contains(&revision),
+            Self::FinancialDurableV2 => (8..=405).contains(&revision),
         }
     }
 }

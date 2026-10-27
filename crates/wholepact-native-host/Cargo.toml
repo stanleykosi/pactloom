@@ -14,7 +14,7 @@ coordinated-financial-workflow-v1 = ["durable-proposal", "wholepact-engine/coord
 # Explicit new-profile opt-in; default/legacy V3 activation is unchanged.
 durable-proposal = ["manual-admission", "wholepact-engine/durable-proposal", "wholepact-signer/durable-proposal"]
 manual-admission = ["wholepact-signer/manual-inventory-client", "wholepact-authority/pending-birth-foundation", "financial-runtime", "wholepact-engine/manual-admission", "dep:wholepact-signer-origin", "dep:hpke", "dep:rand", "dep:base64", "dep:chrono", "dep:rusqlite", "dep:pczt", "wholepact-transport/offline-admission-export"]
-synthetic-born-joined-qualification = ["manual-admission", "wholepact-signer/synthetic-born-joined-qualification", "wholepact-wallet/synthetic-qualification"]
+synthetic-born-joined-qualification = ["manual-admission", "wholepact-signer/synthetic-born-joined-qualification", "wholepact-wallet/synthetic-qualification", "wholepact-engine/synthetic-qualification"]
 financial-runtime = ["wholepact-engine/wallet-sync", "wholepact-engine/submission-handoff", "wholepact-engine/signer-authority-bridge", "wholepact-engine/candidate-construction", "wholepact-service/signer-release", "wholepact-service/proposal-review", "dep:wholepact-signer", "dep:wholepact-signer-release", "dep:wholepact-authority", "dep:wholepact-protocol", "dep:wholepact-wallet", "dep:wholepact-proof-jobs", "dep:rustls-pki-types"]
 
 [dependencies]

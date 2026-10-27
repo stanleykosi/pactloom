@@ -14,6 +14,11 @@ use wholepact_wallet::wallet::protected_sync::{
     },
 };
 use zeroize::Zeroizing;
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[path = "financial_signing_v1/durable_fail_stop_v2.rs"]
+mod durable_fail_stop_v2;
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub(crate) use durable_fail_stop_v2::arm_durable_financial_started_fail_stop_v2;
 #[derive(Serialize)]
 struct Payload<'a> {
     schema_version: u16,
@@ -96,6 +101,12 @@ impl ReservedFinancialAuthorizationV1<'_> {
                 .map_err(|_| BridgeError::Permission)?,
             &self.approved,
             &self.permit,
+        )?;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        durable_fail_stop_v2::after_started_commit(
+            &self.request.reservation.account_id,
+            &self.request.reservation.authorization_id,
+            self.source.original_deadline(),
         )?;
         // There is deliberately no branch that reconstructs this fence from an
         // existing Started row. Any error here preserves exposure and uncertainty.

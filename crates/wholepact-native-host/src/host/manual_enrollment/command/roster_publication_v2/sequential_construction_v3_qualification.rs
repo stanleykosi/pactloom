@@ -813,6 +813,17 @@ fn synthetic_foreground_child() {
         .expect("inherited zero core limit and read-only collector classification");
     let stage = std::env::var(CHILD_ENV).expect("bounded synthetic parent stage");
     #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    if stage == "durable-result-v2-peer" {
+        durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::hold_distinct_peer_child().unwrap();
+        return;
+    }
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    if stage == "durable-result-v2-started-reader" {
+        let terminal = crate::terminal::Terminal::open().expect("actual Started-only audit TTY");
+        durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::read_started_original_child(terminal).unwrap();
+        return;
+    }
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
     if stage == "coordinator-pristine-source-v1" {
         // Deliberately before provider TLS setup: this stage does no provider
         // work and creates only the exact original Witness TLS credential set.
@@ -856,6 +867,26 @@ fn synthetic_foreground_child() {
     ))]
     if stage == "durable-delivery-native-admission-v2" {
         durable_proposal_v1::private_fixed_v2::produce_delivery_child(terminal).unwrap();
+        return;
+    }
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    if stage == "durable-result-v2-producer" {
+        durable_proposal_v1::private_fixed_v2::produce_durable_result_child(terminal).unwrap();
+        return;
+    }
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    if stage == "durable-result-v2-started-producer" {
+        durable_proposal_v1::private_fixed_v2::produce_durable_result_started_child(terminal).unwrap();
+        return;
+    }
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    if stage == "durable-result-v2-reader" {
+        durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::read_original_partial_child(terminal).unwrap();
+        return;
+    }
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    if stage == "durable-result-v2-intake" {
+        durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::read_original_partial_intake_child(terminal).unwrap();
         return;
     }
     #[cfg(all(
@@ -1232,6 +1263,11 @@ enum PrivateWorkspaceStageV1 {
     DeliveryReader,
     FinancialProducer,
     FinancialReader,
+    DurableResultProducer,
+    DurableResultIntake,
+    DurableResultReader,
+    DurableResultStartedProducer,
+    DurableResultStartedReader,
 }
 #[cfg(all(
     feature = "durable-proposal",
@@ -1249,12 +1285,17 @@ impl PrivateWorkspaceStageV1 {
             Self::DeliveryReader => "durable-delivery-native-history-v2",
             Self::FinancialProducer => "durable-financial-produce-v1",
             Self::FinancialReader => "durable-financial-dispatch-v1",
+            Self::DurableResultProducer => "durable-result-v2-producer",
+            Self::DurableResultIntake => "durable-result-v2-intake",
+            Self::DurableResultReader => "durable-result-v2-reader",
+            Self::DurableResultStartedProducer => "durable-result-v2-started-producer",
+            Self::DurableResultStartedReader => "durable-result-v2-started-reader",
         }
     }
     fn producer(self) -> bool {
         matches!(
             self,
-            Self::Producer | Self::DeliveryProducer | Self::FinancialProducer | Self::CoordinatedFixture | Self::CoordinatedLiveFixture
+            Self::Producer | Self::DeliveryProducer | Self::FinancialProducer | Self::DurableResultProducer | Self::DurableResultIntake | Self::DurableResultStartedProducer | Self::CoordinatedFixture | Self::CoordinatedLiveFixture
         )
     }
     fn marker(self, tail: &str, complete: bool, terminal: bool) -> std::io::Result<bool> {
@@ -1269,6 +1310,15 @@ impl PrivateWorkspaceStageV1 {
                     complete,
                     terminal,
                 )
+            }
+            Self::DurableResultProducer | Self::DurableResultReader => {
+                durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::death_marker_v2(tail, self.producer(), complete, terminal)
+            }
+            Self::DurableResultIntake => {
+                durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::intake_death_marker_v2(tail, complete, terminal)
+            }
+            Self::DurableResultStartedProducer | Self::DurableResultStartedReader => {
+                durable_proposal_v1::delivery_admission_v2::durable_result_lifecycle_v2::started_death_marker_v2(tail, self.producer(), complete, terminal)
             }
             Self::FinancialProducer | Self::FinancialReader => {
                 durable_proposal_v1::delivery_admission_v2::durable_financial_dispatch_v1::death_marker_financial_v1(tail,self.producer(),complete,terminal)
@@ -1339,7 +1389,7 @@ fn private_workspace_stage_v1(
     monotonic_cutoff_ns: u64,
 ) -> std::io::Result<PrivateWorkspaceStageResultV1> {
     let needs_original_tls =
-        stage.producer() || matches!(stage, PrivateWorkspaceStageV1::FinancialReader);
+        stage.producer() || matches!(stage, PrivateWorkspaceStageV1::FinancialReader | PrivateWorkspaceStageV1::DurableResultReader);
     if needs_original_tls != tls_material.is_some() {
         let _ = root.keep();
         return Err(std::io::Error::other(
@@ -1416,6 +1466,7 @@ fn private_workspace_stage_v1(
         if matches!(
             stage,
             PrivateWorkspaceStageV1::FinancialProducer | PrivateWorkspaceStageV1::FinancialReader
+                | PrivateWorkspaceStageV1::DurableResultProducer | PrivateWorkspaceStageV1::DurableResultIntake | PrivateWorkspaceStageV1::DurableResultReader | PrivateWorkspaceStageV1::DurableResultStartedProducer | PrivateWorkspaceStageV1::DurableResultStartedReader
         ) {
             command.env(
                 "WHOLEPACT_TEST_ONLY_FINANCIAL_PROFILE",

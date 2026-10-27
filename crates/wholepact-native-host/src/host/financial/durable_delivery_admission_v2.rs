@@ -2,6 +2,7 @@
 //! from the fixed-workspace stage/compound permissions and never grants spend.
 mod closed_review_v3;
 pub(in crate::host) use closed_review_v3::{OriginalDeliveryExportV3, validate_admission_result_v3, admit_original_v3, admit_original_borrowed_v3, read_original_status_v3};
+pub(in crate::host) use closed_review_v3::admit_original_financial_borrowed_v2;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 pub(in crate::host::financial) use closed_review_v3::{
     begin_original_borrowed_fork_v3, RetainedCoordinatedAdmissionV1, RetainedOwnerWorkflowWaitV1,

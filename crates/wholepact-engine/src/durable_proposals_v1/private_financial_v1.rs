@@ -995,6 +995,12 @@ pub struct FinancialRetentionContextsV1 {
     union_context: SignedCandidateContext,
 }
 impl FinancialRetentionContextsV1 {
+    /// Inert metadata from the separate V2 kernel after exact-two validation.
+    /// This constructor creates no verification result or retention permission.
+    pub(crate) fn from_exact_contexts_v2(
+        source_contexts: [SignedCandidateContext; 2],
+        union_context: SignedCandidateContext,
+    ) -> Self { Self { source_contexts, union_context } }
     pub fn source_contexts(&self) -> &[SignedCandidateContext; 2] {
         &self.source_contexts
     }

@@ -42,6 +42,7 @@ impl TlsFixtureProfileV1 {
 
 #[path = "ephemeral_fixture_v1/durable_delivery_admission_v2.rs"]
 mod durable_delivery_admission_v2;
+pub use durable_delivery_admission_v2::EphemeralPartialFinancialWitnessV2;
 #[path = "ephemeral_fixture_v1/durable_payment_v1.rs"]
 mod durable_payment_v1;
 #[path = "ephemeral_fixture_v1/financial_continuation_v1.rs"]

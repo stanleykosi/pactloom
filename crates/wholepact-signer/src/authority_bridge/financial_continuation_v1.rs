@@ -250,12 +250,18 @@ impl FinancialKeyUseFenceV1<'_> {
 mod result_ipc;
 #[path = "financial_signing_v1.rs"]
 mod signing;
-pub(crate) use result_ipc::{ApprovedFinancialReturnV1, PreparedFinancialReturnV1};
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub(crate) use signing::arm_durable_financial_started_fail_stop_v2;
+pub(crate) use result_ipc::{ApprovedFinancialReturnV1, PreparedFinancialReturnV1,
+    audited_signature_set_digest_v2, PreparedDurableFinancialReturnV2};
 #[cfg(feature="coordinated-financial-workflow-v1")]
 pub(crate) use result_ipc::PreparedCoordinatedFinancialReturnV1;
 #[cfg(feature="coordinated-financial-workflow-v1")]
 pub use result_ipc::PreparedCoordinatedFinancialResultReceiverV1;
 pub use result_ipc::{
+    DurableFinancialResultRequestV2, DURABLE_RESULT_REQUEST_MAX_BYTES_V2,
+    PreparedDurableFinancialResultReceiverV2, AuthenticatedDurableFinancialResultLeaseV2,
+    AuthenticatedFinancialResultEvidenceV2,
     AuthenticatedFinancialResultLeaseV1, AuthenticatedFinancialResultPreviewV1,
     FinancialResultRequestV1, PreparedFinancialResultReceiverV1, FinancialResultRestrictionV1,
 };

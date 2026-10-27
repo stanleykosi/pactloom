@@ -17,6 +17,9 @@ CLOSURE={path:'c'*64 for path in S.A.BUILD_SCRIPTS}
 
 class PipelineTests(unittest.TestCase):
     def setUp(self):
+        # These exact three-role handoff assertions remain legacy-profile tests.
+        selected=patch.object(S.I,'profile',return_value=S.A.SEMANTIC_PROFILE)
+        selected.start();self.addCleanup(selected.stop)
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=pathlib.Path(self.tmp.name)
 

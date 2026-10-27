@@ -1,6 +1,11 @@
 //! Actual original custody for explicit financial continuation. No B1 active
 //! owner or historical receipt can be converted into this source.
 use super::*;
+mod completed_result_v2;
+pub(crate) use completed_result_v2::{
+    AuditedFinancialResultSnapshotV2, RecoveredFinancialResultSourceV2,
+    RecipientBoundFinancialResultV2,
+};
 #[cfg(feature="coordinated-financial-workflow-v1")]
 mod coordinated_return_v1;
 #[cfg(feature="coordinated-financial-workflow-v1")]

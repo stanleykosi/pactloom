@@ -3,10 +3,15 @@ import importlib.util
 import pathlib
 import sys
 import unittest
+from unittest.mock import patch
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location('financial_image_tested',ROOT/'ci-financial-image.py')
 M=importlib.util.module_from_spec(spec);sys.modules[spec.name]=M;spec.loader.exec_module(M)
 class FinancialImageTests(unittest.TestCase):
+    def setUp(self):
+        # Preserve the three-role legacy image oracle; V2 has separate owners.
+        selected=patch.object(M,'profile',return_value='coordinated-financial-rendered-host-semantic-v1')
+        selected.start();self.addCleanup(selected.stop)
     def test_exact_pinned_base_and_stages(self):
         text=M.dockerfile()
         self.assertEqual(text.count('FROM --platform=linux/amd64 '+M.BASE_IMAGE),2)

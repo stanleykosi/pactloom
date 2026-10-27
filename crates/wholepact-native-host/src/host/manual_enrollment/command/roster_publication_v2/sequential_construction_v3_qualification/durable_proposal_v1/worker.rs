@@ -332,6 +332,15 @@ pub(super) struct JoinedSignerPeerV1 {
     pub deadline: Instant,
 }
 pub(super) enum JoinedSignerCommandV1 {
+    CaptureAndArmStartedV2(usize, Instant),
+    ProbeDurableResultGrantV2(usize, wholepact_signer::native_ui::synthetic_born_joined_qualification::DurableResultGrantProbeV2, Option<std::os::unix::net::UnixStream>, Arc<AtomicBool>),
+    BeginReopenedFinancialContinuationV2(usize, String, EphemeralWitnessOriginV1, Arc<wholepact_signer::native_ui::synthetic_born_joined_qualification::PreservedDurablePairV2>),
+    PreserveReopenedFinancialContinuationV2(usize),
+    OpenDurableResultInPairV2(usize, DeliveryReopenV2, Arc<wholepact_signer::native_ui::synthetic_born_joined_qualification::PreservedDurablePairV2>),
+    OpenDurableResultV2(usize, DeliveryReopenV2),
+    ReadDurableResultPeerV2(usize),
+    ServeDurableResultV2(usize, Arc<AtomicBool>),
+    PreserveDurableResultV2(usize),
     BeginFinancialContinuation(usize, String),
     PollFinancialContinuation(usize),
     ApproveFinancialContinuation(usize),
@@ -414,6 +423,9 @@ pub(super) enum JoinedSignerCommandV1 {
 }
 pub(super) use wholepact_signer::native_ui::synthetic_born_joined_qualification::DurableDeliveryReopenSelectorV2 as DeliveryReopenV2;
 pub(super) enum JoinedSignerReplyV1 {
+    FinancialStartedCustodyV2 { index: usize, custody: wholepact_signer::native_ui::synthetic_born_joined_qualification::StartedFinancialCustodyV2 },
+    DurableResultGrantProbeV2 { index: usize, outcome: wholepact_signer::native_ui::synthetic_born_joined_qualification::DurableResultGrantProbeOutcomeV2 },
+    DurableResultPeerV2 { index: usize, peer: JoinedSignerPeerV1, request: wholepact_signer::authority_bridge::financial_continuation_v1::DurableFinancialResultRequestV2 },
     DeliverySourceMetadata { index: usize, json: String },
     FinancialPhase { index: usize, phase: wholepact_signer::native_ui::synthetic_born_joined_qualification::FinancialQualificationPhaseV1 },
     FinancialRequest { index: usize, request: Option<OwnerControlRequest> },
@@ -482,6 +494,8 @@ struct OriginalPublic {
     recipient_scope_digest: String,
 }
 enum State {
+    DurableResultReopenV2(DeliveryReopenV2),
+    DurableResultV2(Box<wholepact_signer::native_ui::synthetic_born_joined_qualification::EphemeralDurableResultNativeV2>),
     Pending(EphemeralPendingBornV1),
     ExportedBirth(EphemeralExportedBirthV1),
     Acknowledged(EphemeralAcknowledgedBornV1),
@@ -672,6 +686,77 @@ impl JoinedSignerWorkerV1 {
             cancelled,
             join: Some(join),
         })
+    }
+    /// Closed qualification routing over exact preserved original selectors.
+    /// Version20 is completed data; version2 is genuinely unexported pre-export
+    /// source. A selected opener failure never falls back to another profile.
+    /// This thread worker alone does not prove an OS-process restart.
+    pub fn reopen_result_v2(originals: [Option<DeliveryReopenV2>; 2]) -> Result<Self> {
+        // The enclosing PartialReady control must validate both selectors
+        // under its actually owned root before this qualification constructor.
+        // Exactly the last drained Arc<TempDir> owner marked preservation;
+        // earlier false flags are retained verbatim, not upgraded to authority.
+        let [Some(a), Some(b)] = &originals else { return Err("durable V2 complete container selectors"); };
+        if originals.iter().flatten().any(|s| !matches!(s.version, 2 | 20)
+                || !s.root.is_absolute() || s.root.as_os_str().len() > 4096
+                || !s.root.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_))))
+            || originals.iter().flatten().filter(|s| s.original_directory_preserved).count() != 1
+            || a.account_id == b.account_id || a.root == b.root
+        { return Err("durable V2 exact mixed selectors"); }
+        let a_root = std::fs::canonicalize(&a.root).map_err(|_| "durable V2 original root")?;
+        let b_root = std::fs::canonicalize(&b.root).map_err(|_| "durable V2 original root")?;
+        let parent = a_root.parent().ok_or("durable V2 original container")?;
+        if a_root != a.root || b_root != b.root || parent.parent().is_none()
+            || b_root.parent() != Some(parent)
+        { return Err("durable V2 shared original container"); }
+        let (commands, incoming) = mpsc::channel();
+        let (outgoing, replies) = mpsc::channel();
+        let (started, startup) = mpsc::sync_channel(1);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let join = thread::Builder::new()
+            .name("synthetic-durable-result-v2-reader".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let opened = (|| -> Result<[Option<State>; 3]> {
+                    let mut states: [Option<State>; 3] = std::array::from_fn(|_| None);
+                    for (slot, original) in originals.into_iter().enumerate() {
+                        states[slot + 1] = match original {
+                            None => None,
+                            Some(original) => Some(match original.version {
+                                20 => State::DurableResultReopenV2(original),
+                                2 => State::Delivery(Box::new(
+                                    EphemeralDurableDeliveryNativeV2::reopen_original_selector(original)
+                                        .map_err(durable_entry_error)?)),
+                                _ => return Err("durable V2 unsupported source version"),
+                            }),
+                        };
+                    }
+                    Ok(states)
+                })();
+                let mut states = match opened {
+                    Ok(states) => states,
+                    Err(error) => { let _ = started.send(Err(error)); return; }
+                };
+                if started.send(Ok(())).is_err() { return; }
+                while !flag.load(Ordering::Acquire) {
+                    let command = match incoming.recv_timeout(Duration::from_millis(20)) {
+                        Ok(command) => command,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(_) => break,
+                    };
+                    let reply = execute(command, &mut states, None, &flag);
+                    let failed = reply.is_err();
+                    if outgoing.send(reply).is_err() || failed { break; }
+                }
+                drop(states);
+            }).map_err(|_| "durable V2 reader thread")?;
+        let mut worker = Self { commands: Some(commands), replies, cancelled, join: Some(join) };
+        match startup.recv() {
+            Ok(Ok(())) => Ok(worker),
+            Ok(Err(error)) => { worker.stop_and_join()?; Err(error) },
+            Err(_) => { worker.stop_and_join()?; Err("durable V2 reader startup disconnected") },
+        }
     }
     pub fn send(&self, command: JoinedSignerCommandV1) -> Result<()> {
         if self.cancelled.load(Ordering::Acquire) {
@@ -894,7 +979,16 @@ fn command_index(command: &JoinedSignerCommandV1) -> usize {
     use JoinedSignerCommandV1 as C;
     match command {
         C::ServeOriginalEvidence(_) => 0,
-        C::BeginFinancialContinuation(i, _)
+        C::CaptureAndArmStartedV2(i, _)
+        | C::ProbeDurableResultGrantV2(i, _, _, _)
+        | C::BeginReopenedFinancialContinuationV2(i, _, _, _)
+        | C::PreserveReopenedFinancialContinuationV2(i)
+        | C::OpenDurableResultInPairV2(i, _, _)
+        | C::OpenDurableResultV2(i, _)
+        | C::ReadDurableResultPeerV2(i)
+        | C::ServeDurableResultV2(i, _)
+        | C::PreserveDurableResultV2(i)
+        | C::BeginFinancialContinuation(i, _)
         | C::PollFinancialContinuation(i)
         | C::ApproveFinancialContinuation(i)
         | C::SendFinancialContinuation(i)
@@ -1342,6 +1436,102 @@ fn execute(
                 State::ClosedDelivery(entry),
                 R::ClosedDeliveryStatus { index, status },
             )
+        }
+        (C::CaptureAndArmStartedV2(_, outer_deadline), State::FinancialContinuation(mut entry, reporter)) => {
+            let custody = entry.capture_and_arm_started_v2(outer_deadline).map_err(|e| signer_error(e, "actual pre-Sign Started custody and one-shot arm"))?;
+            (State::FinancialContinuation(entry, reporter), R::FinancialStartedCustodyV2 { index, custody })
+        }
+        (C::ProbeDurableResultGrantV2(_, probe, other_stream, stop), State::DurableResultV2(mut entry)) => {
+            use wholepact_signer::native_ui::synthetic_born_joined_qualification::{DurableResultGrantProbeV2 as Probe, DurableResultQualificationPhaseV2 as Phase};
+            let deadline = entry.deadline().map_err(|e| signer_error(e, "grant probe original bound"))?;
+            let read_probe = matches!(probe, Probe::WrongRequestRead | Probe::WrongRecipientRead | Probe::RevokedRead);
+            loop {
+                if cancelled.load(Ordering::Acquire) || stop.load(Ordering::Acquire) || Instant::now() >= deadline {
+                    return Err("grant probe cancelled or original bound expired");
+                }
+                let phase = entry.poll().map_err(|e| signer_error(e, "grant probe actual native poll"))?;
+                if phase == if read_probe { Phase::ReadReview } else { Phase::ReturnReview } { break; }
+                match phase {
+                    Phase::ReadReview if !read_probe => entry.approve_current_review().map_err(|e| signer_error(e, "grant probe genuine preview Read"))?,
+                    Phase::AwaitingRequest | Phase::Preparing => (),
+                    _ => return Err("grant probe unexpected native phase"),
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            let outcome = entry.probe_grant(probe, other_stream, &stop).map_err(|e| signer_error(e, "actual native grant denial probe"))?;
+            // Already failed closed; preserve only after the actual source drain.
+            let _original = entry.close_preserving_originals().map_err(|e| signer_error(e, "grant probe source drain"))?;
+            (State::PreservedDelivery, R::DurableResultGrantProbeV2 { index, outcome })
+        }
+        (C::BeginReopenedFinancialContinuationV2(_, wallet, origin, pair), State::ClosedDelivery(entry)) => {
+            let entry = entry.into_financial_continuation_reopened_v2(wallet, origin, pair)
+                .map_err(|e| signer_error(e, "cold V2 actual financial entry"))?;
+            let reporter = FinancialProgressReporter::start(index, &entry);
+            (State::FinancialContinuation(Box::new(entry), reporter), R::Done { index })
+        }
+        (C::PreserveReopenedFinancialContinuationV2(_), State::FinancialContinuation(entry, reporter)) => {
+            drop(reporter);
+            let original = entry.close_preserving_reopened_v2().map_err(|e| signer_error(e, "cold V2 actual financial drain"))?;
+            (State::PreservedDelivery, R::DeliveryPreserved { index, original })
+        }
+        (C::OpenDurableResultInPairV2(_, selector, pair), State::PreservedDelivery) => {
+            let entry = wholepact_signer::native_ui::synthetic_born_joined_qualification::EphemeralDurableResultNativeV2::open_existing_in_pair(selector, pair)
+                .map_err(|e| signer_error(e, "paired V2 actual result reopen"))?;
+            (State::DurableResultV2(Box::new(entry)), R::Done { index })
+        }
+        (C::OpenDurableResultV2(_, selector), State::DurableResultReopenV2(expected)) => {
+            if serde_json::to_vec(&selector).map_err(|_| "durable V2 selector encode")?
+                != serde_json::to_vec(&expected).map_err(|_| "durable V2 retained selector encode")?
+            { return Err("durable V2 selector replacement"); }
+            let entry = wholepact_signer::native_ui::synthetic_born_joined_qualification::EphemeralDurableResultNativeV2::open_existing(selector)
+                .map_err(|e| signer_error(e, "durable V2 actual cold native reopen"))?;
+            (State::DurableResultV2(Box::new(entry)), R::Done { index })
+        }
+        (C::OpenDurableResultV2(_, selector), State::PreservedDelivery) => {
+            let entry = wholepact_signer::native_ui::synthetic_born_joined_qualification::EphemeralDurableResultNativeV2::open_existing(selector)
+                .map_err(|e| signer_error(e, "durable V2 actual native reopen"))?;
+            (State::DurableResultV2(Box::new(entry)), R::Done { index })
+        }
+        (C::ReadDurableResultPeerV2(_), State::DurableResultV2(entry)) => {
+            let peer = JoinedSignerPeerV1 {
+                provider: entry.provider().map_err(|e| signer_error(e, "durable V2 actual provider"))?,
+                endpoint: entry.endpoint().map_err(|e| signer_error(e, "durable V2 protected endpoint"))?,
+                deadline: entry.deadline().map_err(|e| signer_error(e, "durable V2 original ceiling"))?,
+            };
+            let request = entry.result_request().map_err(|e| signer_error(e, "durable V2 audited selector"))?;
+            (State::DurableResultV2(entry), R::DurableResultPeerV2 { index, peer, request })
+        }
+        (C::ServeDurableResultV2(_, stop), State::DurableResultV2(mut entry)) => {
+            use wholepact_signer::native_ui::synthetic_born_joined_qualification::DurableResultQualificationPhaseV2 as P;
+            let deadline = entry.deadline().map_err(|e| signer_error(e, "durable V2 original ceiling"))?;
+            let mut stopping_since = None;
+            loop {
+                if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                    return Err("durable V2 cancelled or original ceiling expired");
+                }
+                let phase = entry.poll().map_err(|e| signer_error(e, "durable V2 actual native poll"))?;
+                if stop.load(Ordering::Acquire) {
+                    if phase == P::Complete { break; }
+                    let since = stopping_since.get_or_insert_with(Instant::now);
+                    if !matches!(phase, P::Preparing | P::Returning) || since.elapsed() >= Duration::from_secs(2) {
+                        return Err("durable V2 stopped without exact completion");
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                match phase {
+                    P::ReadReview | P::ReturnReview => entry.approve_current_review().map_err(|e| signer_error(e, "durable V2 actual read/return click"))?,
+                    P::AwaitingRequest | P::Preparing | P::Returning => (),
+                    P::Complete => break,
+                    _ => return Err("durable V2 unexpected native purpose"),
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            (State::DurableResultV2(entry), R::Done { index })
+        }
+        (C::PreserveDurableResultV2(_), State::DurableResultV2(entry)) => {
+            let original = entry.close_preserving_originals().map_err(|e| signer_error(e, "durable V2 actual source drain"))?;
+            (State::PreservedDelivery, R::DeliveryPreserved { index, original })
         }
         (C::BeginFinancialContinuation(_, wallet), State::ClosedDelivery(entry)) => {
             let entry = entry.into_financial_continuation_v1(wallet).map_err(|e| {
@@ -2215,6 +2405,19 @@ fn execute(
 #[cfg(test)]
 mod admission_diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn durable_v2_command_indices_and_empty_reopen_are_data_only() {
+        for index in 0..=3 {
+            for command in [
+                JoinedSignerCommandV1::ReadDurableResultPeerV2(index),
+                JoinedSignerCommandV1::ServeDurableResultV2(index, Arc::new(AtomicBool::new(false))),
+                JoinedSignerCommandV1::PreserveDurableResultV2(index),
+            ] { assert_eq!(command_index(&command), index); }
+        }
+        // Rejects before creating a thread, source owner, provider or IPC.
+        assert!(JoinedSignerWorkerV1::reopen_result_v2([None, None]).is_err());
+    }
 
     #[test]
     fn pure_acquire_reply_loss_command_indices_preserve_existing_routes() {
