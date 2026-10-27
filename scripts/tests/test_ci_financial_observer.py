@@ -4546,7 +4546,7 @@ class WriterReceiptClockDiagnosticsTests(unittest.TestCase):
                     with self.assertRaises(O.C.Rejected):O.C.validate_actor_failure_facts(bad,role)
         base=ROOT.parent/'crates/wholepact-financial-coordinator-origin/src'
         enum=(base/'financial_ci_actor_diagnostics.rs').read_text().split('codes!(DriverStage {',1)[1].split('});',1)[0].split(',')
-        self.assertEqual(enum[-3:],list(stages));self.assertEqual(set(enum),O.C.ACTOR_DRIVER_STAGES)
+        self.assertEqual(enum[172:175],list(stages));self.assertEqual(set(enum),O.C.ACTOR_DRIVER_STAGES)
         self.assertLess(len(enum),256)
         acquire=(base/'signer_writer_read_acquire_origin.rs').read_text()
         wrapper=acquire.split('fn received_writer_session_deadlines(',1)[1].split('// The inherited epoch',1)[0]

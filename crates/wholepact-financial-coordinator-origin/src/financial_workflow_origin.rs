@@ -78,6 +78,31 @@ pub use admit::{SignerAdmitArmV1,SignerAdmitFinalV1,SignerAdmitReviewTicketV1,Si
     SignerAdmitArmOutboundV1,SignerAdmitFinalOutboundV1};
 use admit::{SAdmit,CAdmit,HAdmit};
 
+// Observation of the first failed returned operation, not its initiating cause.
+// A nested check may already have revoked/closed before it returns here.
+// Production expands to the original expression: no extra clock, IO or guard.
+#[cfg(wholepact_financial_rendered_host_semantic_ci)]
+macro_rules! restriction_observed {
+    ($stage:ident, $operation:expr) => {
+        ($operation).inspect_err(|error| {
+            use crate::financial_ci_actor_diagnostics as d;
+            d::driver_detail(d::DriverStage::$stage,d::classify_io(error.kind()));
+        })
+    };
+    ($owner:expr, $one:ident, $two:ident, $operation:expr) => {
+        ($operation).inspect_err(|error| {
+            use crate::financial_ci_actor_diagnostics as d;
+            let stage=match $owner {0=>d::DriverStage::$one,1=>d::DriverStage::$two,_=>return};
+            d::driver_detail(stage,d::classify_io(error.kind()));
+        })
+    };
+}
+#[cfg(not(wholepact_financial_rendered_host_semantic_ci))]
+macro_rules! restriction_observed {
+    ($stage:ident, $operation:expr) => {$operation};
+    ($owner:expr, $one:ident, $two:ident, $operation:expr) => {$operation};
+}
+
 pub enum SignerFinancialWorkflowRequestV1 {
     NormalClose{action:SignerNormalCloseV1},
     V3Enrollment{final_action:SignerV3EnrollmentFinalV1},
@@ -571,36 +596,39 @@ impl CoordinatorFinancialEndpointV1 {
     /// Completed stages retain source clocks, never an expired prior action cap.
     pub fn observe_restrictions(&self)->Result<()>{
         let result=(||{
-            self.core.check()?;crate::channel::require_time(self.clocks.supervision())?;
-            if self.core.phase.revoked(){return Err(rejected("workflow permanently restricted"));}
-            for (i,slot) in self.v3_entries.iter().enumerate(){slot.observe_active(self.core.phase.phase(i),self.clocks)?;}
+            restriction_observed!(RestrictionCore, self.core.check())?;restriction_observed!(RestrictionSession, crate::channel::require_time(self.clocks.supervision()))?;
+            if self.core.phase.revoked(){return restriction_observed!(RestrictionAlreadyRevoked, Err(rejected("workflow permanently restricted")));}
+            for (i,slot) in self.v3_entries.iter().enumerate(){restriction_observed!(i, RestrictionOwner1V3Active, RestrictionOwner2V3Active, slot.observe_active(self.core.phase.phase(i),self.clocks))?;}
             for (i,slot) in self.slots.iter().enumerate(){
                 let Some(slot)=slot else{continue};let phase=self.core.phase.phase(i);
                 if phase==ENTRY_PREPARING {
-                    self.clocks.restrict_received(PROFILE,slot.start.native_ceiling_ms,self.clocks.supervision(),Instant::now())?;
+                    restriction_observed!(i, RestrictionOwner1EntryPreparing, RestrictionOwner2EntryPreparing, self.clocks.restrict_received(PROFILE,slot.start.native_ceiling_ms,self.clocks.supervision(),Instant::now()))?;
                 }
                 if let Some(entry)=&slot.entry {
-                    entry.check_custody()?;
-                    if matches!(phase,ENTRY_REVIEW|ENTRY_ADMITTED){entry.check_action()?;}
+                    restriction_observed!(i, RestrictionOwner1EntryCustody, RestrictionOwner2EntryCustody, entry.check_custody())?;
+                    if matches!(phase,ENTRY_REVIEW|ENTRY_ADMITTED){restriction_observed!(i, RestrictionOwner1EntryAction, RestrictionOwner2EntryAction, entry.check_action())?;}
                 }
                 if phase==CONT_PREPARING{
-                    let c=slot.continuation.as_ref().ok_or_else(||rejected("Continue context missing"))?;
-                    self.clocks.restrict_received(PROFILE,c.context.native_ceiling_ms,self.clocks.supervision(),Instant::now())?;
+                    let c=restriction_observed!(i, RestrictionOwner1ContinueMissing, RestrictionOwner2ContinueMissing, slot.continuation.as_ref().ok_or_else(||rejected("Continue context missing")))?;
+                    restriction_observed!(i, RestrictionOwner1ContinuePreparing, RestrictionOwner2ContinuePreparing, self.clocks.restrict_received(PROFILE,c.context.native_ceiling_ms,self.clocks.supervision(),Instant::now()))?;
                 }
                 if matches!(phase,CONT_REVIEW|CONT_ARMED|CONT_READY|CONT_ADMITTED){
-                    slot.continuation.as_ref().and_then(|c|c.binding.as_ref()).ok_or_else(||rejected("active Continue binding missing"))?.check(false)?;
+                    restriction_observed!(i, RestrictionOwner1ContinueBinding, RestrictionOwner2ContinueBinding, restriction_observed!(i, RestrictionOwner1ContinueBindingMissing, RestrictionOwner2ContinueBindingMissing, slot.continuation.as_ref().and_then(|c|c.binding.as_ref()).ok_or_else(||rejected("active Continue binding missing")))?.check(false))?;
                 }
                 if matches!(phase,READ_REVIEW|READ_ADMITTED){
-                    slot.read.as_ref().ok_or_else(||rejected("active Read binding missing"))?.check()?;
+                    restriction_observed!(i, RestrictionOwner1ReadCurrent, RestrictionOwner2ReadCurrent, restriction_observed!(i, RestrictionOwner1ReadBindingMissing, RestrictionOwner2ReadBindingMissing, slot.read.as_ref().ok_or_else(||rejected("active Read binding missing")))?.check())?;
                 }
-                slot.admission.observe_active(phase)?;slot.writer_acquire.observe_active(phase)?;slot.activate.observe_active(phase)?;
+                restriction_observed!(i, RestrictionOwner1AdmitActive, RestrictionOwner2AdmitActive, slot.admission.observe_active(phase))?;restriction_observed!(i, RestrictionOwner1WriterActive, RestrictionOwner2WriterActive, slot.writer_acquire.observe_active(phase))?;restriction_observed!(i, RestrictionOwner1ActivateActive, RestrictionOwner2ActivateActive, slot.activate.observe_active(phase))?;
             }
-            for (i,w) in self.witnesses.iter().enumerate(){w.observe_active(&self.core,i)?;}
-            for(i,h)in self.histories.iter().enumerate(){h.observe_active(&self.core,i)?;}
-            for(i,g)in self.signing_services.iter().enumerate(){g.observe_active(&self.core,i)?;}
-            self.pair_service.observe_active(&self.core)?;
+            for (i,w) in self.witnesses.iter().enumerate(){restriction_observed!(i, RestrictionOwner1WitnessActive, RestrictionOwner2WitnessActive, w.observe_active(&self.core,i))?;}
+            for(i,h)in self.histories.iter().enumerate(){restriction_observed!(i, RestrictionOwner1HistoryActive, RestrictionOwner2HistoryActive, h.observe_active(&self.core,i))?;}
+            for(i,g)in self.signing_services.iter().enumerate(){restriction_observed!(i, RestrictionOwner1SigningActive, RestrictionOwner2SigningActive, g.observe_active(&self.core,i))?;}
+            restriction_observed!(RestrictionPairService, self.pair_service.observe_active(&self.core))?;
             Ok(())
-        })();if result.is_err(){self.core.phase.revoke();}result
+        })();
+        #[cfg(wholepact_financial_rendered_host_semantic_ci)]
+        if result.is_err(){crate::financial_ci_actor_diagnostics::mark_failed();}
+        if result.is_err(){self.core.phase.revoke();}result
     }
     fn transport_check(&self)->Result<()>{crate::channel::require_time(self.cleanup.unwrap_or(self.clocks.hard_cleanup()))?;self.core.check()}
     fn send(&self,packet:&Packet)->Result<()>{self.transport_check()?;let r=self.tree.as_ref().ok_or_else(||rejected("workflow tree consumed"))?.continue_host()?.workflow_send(packet);if r.is_err(){self.core.close();}r}
