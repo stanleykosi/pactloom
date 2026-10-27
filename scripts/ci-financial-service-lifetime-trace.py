@@ -53,9 +53,31 @@ def run(args,path,timeout):
     return result.stdout
 
 
+# P93 adds only these public reexports; they do not alter the historical service.
+# Current input is an exact raw-byte file, never a permissive historical variant.
+P93_REEXPORTS = {
+    'ephemeral_fixture_v1.rs': (
+        '7ddd379bb73b18adbe2bad5edee6ee9be118b6dab983c7398ced8dc135df8f0f',
+        'pub use durable_delivery_admission_v2::EphemeralPartialFinancialWitnessV2;\n',
+        '0a1593eeec2b13e8caaf3ca9248aeb7a912f7e7f82caaeadeaef8d6899a4f21b'),
+    'ephemeral_fixture_v1/durable_delivery_admission_v2.rs': (
+        '8ba62e0a553b8b844a7ffb9fe8c35f7aff12a4b3ea89026062c15a8252273e71',
+        'pub use coordinated_pre_v3_preserve_v1::EphemeralPartialFinancialWitnessV2;\n',
+        '9d4227df2c384159579ec173c9fab9b18aec83a9d58e13b3698bc724ae996c6f'),
+}
+
+def restore_p93_reexport(text, name):
+    current, inserted, historical = P93_REEXPORTS[name]
+    assert digest(text) == current, 'P93 whole source drift: ' + name
+    assert text.count(inserted) == 1, 'P93 reexport count: ' + name
+    restored = text.replace(inserted, '', 1)
+    assert digest(restored) == historical, 'P92 whole source restoration: ' + name
+    return restored
+
+
 def source_parity(root):
     base='crates/wholepact-authority/src/native_witness_owner/'
-    source=(root/(base+'window/ephemeral_fixture_v1.rs')).read_text()
+    source=restore_p93_reexport((root/(base+'window/ephemeral_fixture_v1.rs')).read_bytes().decode('utf-8'), 'ephemeral_fixture_v1.rs')
     norm=source.replace('#[path = "ephemeral_fixture_v1/coordinated_history_lifetime_v1.rs"]\nmod coordinated_history_lifetime_v1;\npub use coordinated_history_lifetime_v1::EphemeralCoordinatedHistoryLifetimeV1;\nuse coordinated_history_lifetime_v1::ScopedHistoryClockV1;\n','')
     a=norm.index('    /// Passive synthetic service restriction, not an action or journal grant.')
     z=norm.index('        // Keep the original bound endpoint',a)
@@ -66,7 +88,7 @@ def source_parity(root):
     norm=norm.replace('    /// Uses the actual constructor start for either serving horizon; no server\n    /// lifetime, socket, source check or gate is touched.','    /// The start is derived from the same original 120-second constructor\n    /// interval; no server lifetime, socket, source check or gate is touched.')
     norm=norm.replace('        let age_us = Some(observed.saturating_duration_since(self.started).as_micros());','        let age_us = self\n            .deadline\n            .checked_sub(Duration::from_secs(120))\n            .map(|started| observed.saturating_duration_since(started).as_micros());')
     assert digest(norm)==BASELINES['fixture'], 'default server/ownership drift'
-    delivery=(root/(base+'window/ephemeral_fixture_v1/durable_delivery_admission_v2.rs')).read_text()
+    delivery=restore_p93_reexport((root/(base+'window/ephemeral_fixture_v1/durable_delivery_admission_v2.rs')).read_bytes().decode('utf-8'), 'ephemeral_fixture_v1/durable_delivery_admission_v2.rs')
     for name,arg in [('serve_committed_durable_delivery_history_v2','admission_operation_id'),('serve_original_delivery_bootstrap_history_v2','account_id')]:
         start=delivery.index('    pub fn '+name+'(');inner=block(delivery,'    fn '+name+'_inner(')
         finish=delivery.index(inner)+len(inner)
