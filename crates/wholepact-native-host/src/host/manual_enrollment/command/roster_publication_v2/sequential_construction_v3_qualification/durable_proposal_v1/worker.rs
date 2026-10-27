@@ -1142,6 +1142,8 @@ fn execute(
         execute_open_roster_intent(command, states)
     } else if matches!(&command, JoinedSignerCommandV1::OpenRosterPublication(..)) {
         execute_open_roster_publication(command, states)
+    } else if matches!(&command, JoinedSignerCommandV1::OpenDelivery(..)) {
+        execute_open_delivery(command, states)
     } else {
         execute_other(command, states, public, cancelled)
     }
@@ -1215,6 +1217,31 @@ fn execute_open_roster_publication(
     Ok(reply)
 }
 
+// Keep original delivery reopen off the unrelated-command frame as well.
+// The native owner and all current permission checks remain unchanged.
+#[inline(never)]
+fn execute_open_delivery(
+    command: JoinedSignerCommandV1,
+    states: &mut [Option<State>; 3],
+) -> Result<JoinedSignerReplyV1> {
+    use JoinedSignerCommandV1 as C;
+    let index = command_index(&command);
+    let slot = states.get_mut(index).ok_or("durable account index")?;
+    let state = slot.take().ok_or("durable retained state missing")?;
+    let (next, reply) = match (command, state) {
+        (C::OpenDelivery(_, proposal), State::Acknowledged(account)) if index > 0 => {
+            let entry = (*account)
+                .open_fresh_durable_delivery_v2(proposal, 1_000_000)
+                .map_err(durable_entry_error)?;
+            let reply = delivery_peer(index, &entry)?;
+            (State::Delivery(Box::new(entry)), reply)
+        }
+        _ => return Err("durable finite native transition mismatch"),
+    };
+    *slot = Some(next);
+    Ok(reply)
+}
+
 #[inline(never)]
 fn execute_other(
     command: JoinedSignerCommandV1,
@@ -1263,13 +1290,6 @@ fn execute_other(
         (C::DropUnselectedAnchor(_), State::Acknowledged(account)) if index == 0 => {
             drop(account);
             (State::PreservedDelivery, R::Done { index })
-        }
-        (C::OpenDelivery(_, proposal), State::Acknowledged(account)) if index > 0 => {
-            let entry = (*account)
-                .open_fresh_durable_delivery_v2(proposal, 1_000_000)
-                .map_err(durable_entry_error)?;
-            let reply = delivery_peer(index, &entry)?;
-            (State::Delivery(Box::new(entry)), reply)
         }
         (C::ReadDeliverySourceMetadata(_), State::Delivery(entry)) => {
             let json = entry.coordinated_pre_v3_metadata().map_err(|error| signer_error(error, "original source metadata"))?;
@@ -2603,6 +2623,45 @@ mod admission_diagnostic_tests {
             let routed_error = execute(JoinedSignerCommandV1::OpenRosterPublication(index, publication.clone()),
                 &mut routed, None, &cancelled).err();
             let original_error = execute_other(JoinedSignerCommandV1::OpenRosterPublication(index, publication.clone()),
+                &mut original, None, &cancelled).err();
+            let expected = match index {
+                3 => "durable account index",
+                1 => "durable retained state missing",
+                _ => "durable finite native transition mismatch",
+            };
+            assert_eq!(routed_error, Some(expected));
+            assert_eq!(original_error, Some(expected));
+            for (left, right) in routed.iter().zip(&original) {
+                assert_eq!(left.is_some(), right.is_some());
+                if left.is_some() { assert!(matches!(left, Some(State::PreservedDelivery))); }
+                if right.is_some() { assert!(matches!(right, Some(State::PreservedDelivery))); }
+            }
+            assert_eq!(routed[index.min(2)].is_some(), index == 3);
+        }
+
+        // Untrusted invalid proposal metadata only. No account, transport,
+        // native signer, current receipt or financial authority is constructed.
+        let proposal: wholepact_core::ProposalInput = serde_json::from_value(serde_json::json!({
+            "proposal_id": "", "previous_proposal_id": null,
+            "manifest": {
+                "agreement": { "schema_version": 0, "agreement_id": "", "obligation_id": "",
+                    "revision": 0, "purpose": "", "organizer_identity": "", "network_profile_id": "",
+                    "recipients": [], "funding_policy": { "kind": "exact", "target": "0" },
+                    "fee_policy": { "kind": "pro_rata" },
+                    "privacy_profile": { "mode": "local_only", "proving_operator": null, "dedicated_accounts_required": true },
+                    "coordination_deadline": null, "confirmation_policy": { "required_confirmations": 0 }, "extensions": [] },
+                "participants": [], "inputs": [], "outputs": [], "transaction_fee": "0", "expiry_height": 0
+            },
+            "artifact_digest": null, "effects_commitment": null, "created_at": ""
+        })).expect("inert delivery metadata must decode without authority");
+        assert!(wholepact_core::Proposal::validate(proposal.clone()).is_err());
+        for index in 0..=3 {
+            let empty = || [Some(State::PreservedDelivery), None, Some(State::PreservedDelivery)];
+            let mut routed = empty();
+            let mut original = empty();
+            let routed_error = execute(JoinedSignerCommandV1::OpenDelivery(index, proposal.clone()),
+                &mut routed, None, &cancelled).err();
+            let original_error = execute_other(JoinedSignerCommandV1::OpenDelivery(index, proposal.clone()),
                 &mut original, None, &cancelled).err();
             let expected = match index {
                 3 => "durable account index",
