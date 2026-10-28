@@ -10,6 +10,10 @@ pub(super) struct FixtureFinancialPhaseV1 {
     committed: std::collections::BTreeMap<String, OwnerControlRequest>,
 }
 impl FixtureFinancialPhaseV1 {
+    // Inert state eligibility only; native preparation repeats these checks.
+    pub(super) fn allows_new_exact_continuation_v1(&self, account:&str)->bool {
+        self.pending.is_none() && !self.committed.contains_key(account) && self.committed.len()<2
+    }
     pub(super) fn is_idle_for_original_transport_v1(&self) -> bool {
         self.pending.is_none() && self.committed.is_empty()
     }

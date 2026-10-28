@@ -139,6 +139,21 @@ pub struct EphemeralPartialFinancialWitnessV2 {
     admission_pending: bool,
     continuation_pending: bool,
 }
+// Inert eligibility comparison, not a native owner or permission issuer.
+fn require_unfinished_financial_entry_v2(completed:&str, unfinished:&str,
+    account:&str, request_account:&str, state:[bool;4])->Result<()> {
+    if completed==unfinished || account!=unfinished || request_account!=account
+        || state!=[true,false,false,true]
+    {return Err(AuthorityError::Permission);}
+    Ok(())
+}
+// Private lexical form scope. The only caller below has just reaudited the
+// original exact delivery; native PREPARE and final consent remain unchanged.
+// Drop restores historical-only on normal return, refusal and unwinding.
+struct UnfinishedFinancialFormV2<'a> { inner:&'a mut EphemeralNativeWitnessV1 }
+impl Drop for UnfinishedFinancialFormV2<'_> {
+    fn drop(&mut self) {self.inner.durable_delivery.historical_only=true;}
+}
 impl EphemeralPartialFinancialWitnessV2 {
     /// Same installed credential custody, not a writer grant. Only the exact
     /// still-pristine second account may receive this test-only origin handle.
@@ -189,8 +204,40 @@ impl EphemeralPartialFinancialWitnessV2 {
     }
     pub fn start_exact_financial_continuation_v1(&mut self, account: &str, request: &OwnerControlRequest) -> Result<()> {
         self.unfinished(account)?;
-        if request.account_id != account { return Err(AuthorityError::Permission); }
-        let result = self.inner.start_exact_financial_continuation_v1(account, request);
+        require_unfinished_financial_entry_v2(&self.completed.account_id,
+            &self.unfinished_account,account,&request.account_id,
+            [self.inner.durable_delivery.historical_only,self.admission_pending,
+             self.continuation_pending,self.inner.financial_continuation.allows_new_exact_continuation_v1(account)])?;
+        let original=self.inner.durable_delivery.committed.get(account)
+            .ok_or(AuthorityError::Permission)?.clone();
+        let OwnerControl::AdmitFinancialContinuationV1 {record}=&request.control else {
+            return Err(AuthorityError::Permission);
+        };
+        record.validate_request(request,&record.terms.scope.witness)?;
+        if record.terms.original_delivery_operation_id!=original.operation_id
+            || record.terms.original_delivery_request_digest
+                !=crate::durable_financial_continuation_v1::original_delivery_request_digest_v1(&original)?
+        {return Err(AuthorityError::Conflict);}
+        // This is delivery-complete, not pristine and not already financial.
+        // Reopen/authenticate the same original namespace; inert retained data
+        // cannot substitute for the current journal's exact selected admission.
+        let journal=crate::witness_locator::open_born_history(
+            self.inner.original_namespace_input(account)?)?;
+        journal.require_born_read_current()?;
+        {
+            let connection=journal.connection.lock().map_err(|_|AuthorityError::Storage)?;
+            let ledger=crate::journal::load(connection.connection())?;
+            if ledger.snapshot.account_id!=account || ledger.snapshot.head!=request.expected_head
+                || ledger.selected_durable_delivery_admission_v2()?!=Some(&original)
+                || ledger.selected_financial_continuation_v1()?.is_some()
+            {return Err(AuthorityError::CorruptHistory);}
+        }
+        journal.require_born_read_current()?;
+        drop(journal);
+        self.inner.durable_delivery.historical_only=false;
+        let form=UnfinishedFinancialFormV2 {inner:&mut self.inner};
+        let result = form.inner.start_exact_financial_continuation_v1(account, request);
+        drop(form);
         self.continuation_pending = result.is_ok();
         result
     }
@@ -239,5 +286,29 @@ mod tests {
         assert!(role_ids(&a, &"f".repeat(64), &rows).is_err());
         assert!(require_drained(1,false).is_err());
         assert!(require_drained(0,true).is_err());
+        // Inert role/state matrix. Only the exact unfinished account in the
+        // historical-only idle state can reach the native form scope.
+        for bits in 0..16 {
+            let state=std::array::from_fn(|i|bits&(1<<i)!=0);
+            assert_eq!(require_unfinished_financial_entry_v2(&a,&b,&b,&b,state).is_ok(),bits==9);
+            assert!(require_unfinished_financial_entry_v2(&a,&b,&a,&a,state).is_err());
+            assert!(require_unfinished_financial_entry_v2(&a,&b,&b,&a,state).is_err());
+            assert!(require_unfinished_financial_entry_v2(&a,&a,&a,&a,state).is_err());
+        }
+        // Cross-layer source contract, not execution of a native authority.
+        let source=include_str!("partial_financial_preserve_v2.rs");
+        let start=source.split("pub fn start_exact_financial_continuation_v1(").nth(1).unwrap()
+            .split("pub fn finish_exact_financial_continuation_v1").next().unwrap();
+        let audit=start.find("ledger.selected_durable_delivery_admission_v2()").unwrap();
+        let close=start.find("drop(journal);").unwrap();
+        let enable=start.find("self.inner.durable_delivery.historical_only=false;").unwrap();
+        let call=start.find("form.inner.start_exact_financial_continuation_v1(account, request)").unwrap();
+        let restore=start.find("drop(form);").unwrap();
+        assert!(audit<close && close<enable && enable<call && call<restore);
+        assert!(source.contains("fn drop(&mut self) {self.inner.durable_delivery.historical_only=true;}"));
+        let fixture=include_str!("../ephemeral_fixture_v1.rs");
+        assert!(fixture.contains("if self.durable_delivery.historical_only"));
+        assert!(fixture.contains("![ENROLL, CONTINUE, UNDERSTOOD, AUTHORIZE].contains(&label)"));
+
     }
 }
