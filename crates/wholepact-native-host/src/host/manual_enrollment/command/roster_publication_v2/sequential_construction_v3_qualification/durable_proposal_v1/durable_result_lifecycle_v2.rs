@@ -1666,6 +1666,109 @@ fn durable_failure_v2_preserves_first_failure_through_all_cleanup_modes(){
 #[test]
 fn durable_failure_v2_covers_all_final_boundaries_and_diagnostic_states(){
     use crate::host::financial_diagnostics_v1 as fd;
+    // Inert records only: no provider, socket, source owner or native grant.
+    use wholepact_signer::authority_bridge::financial_continuation_v1::{
+        FinancialResultDiagnosticV1 as Detail, FinancialResultStageV1 as Stage,
+        FinancialResultErrorClassV1 as Class, FinancialResultCurrentTimingV1 as Timing,
+    };
+    use wholepact_signer_origin::framing::FrameReadCause as Frame;
+    use fd::{FinancialStageV1 as FS,FinancialErrorClassV1 as FC,FinancialCommitStateV1 as CS};
+    let stages=[
+        (Stage::InstalledProviderVerification,FS::ResultInstalledProviderVerification),
+        (Stage::HostPreparedWrite,FS::ResultHostPreparedWrite),
+        (Stage::ReadyWait,FS::ResultReadyWait),
+        (Stage::ReadyMatch,FS::ResultReadyMatch),
+        (Stage::FetchWrite,FS::ResultFetchWrite),
+        (Stage::HeldRead,FS::ResultHeldRead),
+        (Stage::EvidenceValidation,FS::ResultEvidenceValidation),
+        (Stage::PreviewMatch,FS::ResultPreviewMatch),
+        (Stage::HeldMatch,FS::ResultHeldMatch),
+        (Stage::CurrentLock,FS::ResultCurrentLock),
+        (Stage::CurrentPeer,FS::ResultCurrentPeer),
+        (Stage::CurrentProviderVerification,FS::ResultCurrentProviderVerification),
+        (Stage::CurrentWrite,FS::ResultCurrentWrite),
+        (Stage::CurrentRead,FS::ResultCurrentRead),
+        (Stage::CurrentMatch,FS::ResultCurrentMatch),
+        (Stage::FinishWrite,FS::ResultFinishWrite),
+        (Stage::FinishRead,FS::ResultFinishRead),
+        (Stage::FinishMatch,FS::ResultFinishMatch),
+    ];
+    let causes=[(None,FC::Ipc),
+        (Some(Frame::Unclassified),FC::FrameUnclassified),
+        (Some(Frame::Deadline),FC::FrameDeadline),
+        (Some(Frame::Eof),FC::FrameEof),
+        (Some(Frame::CredentialsMissing),FC::FrameCredentialsMissing),
+        (Some(Frame::CredentialsMismatch),FC::FrameCredentialsMismatch),
+        (Some(Frame::AncillaryRejected),FC::FrameAncillaryRejected),
+        (Some(Frame::Truncated),FC::FrameTruncated),
+        (Some(Frame::PeerNotLive),FC::FramePeerNotLive),
+        (Some(Frame::CurrentCheck),FC::FrameCurrentCheck),
+        (Some(Frame::Io),FC::FrameIo),
+        (Some(Frame::FrameLimit),FC::FrameLimit),
+        (Some(Frame::InvalidFrame),FC::FrameInvalid),
+        (Some(Frame::InvalidBudget),FC::FrameInvalidBudget),
+    ];
+    for (stage,expected_stage) in stages {
+        for (frame_cause,expected_class) in causes {
+            fd::reset_operation();
+            fd::signer_result(Detail{stage,error_class:Class::Ipc,frame_cause,current_timing:None},CS::NotEstablished);
+            // This is the real outer generic mapping, which must not replace first detail.
+            fd::bridge(FS::ResultReceive,CS::NotEstablished,
+                &wholepact_signer::authority_bridge::BridgeError::Ipc);
+            let captured=fd::take_operation_failure().unwrap();
+            assert_eq!(captured.stage,expected_stage);assert_eq!(captured.error_class,expected_class);
+            assert_eq!(captured.component,fd::FinancialComponentV1::SignerBridge);
+            let finite=finite_result_failure_v2(Some(captured),true,&AtomicBool::new(false)).unwrap();
+            assert!(finite.current_timing.is_none() && finite.authority_call.is_none());
+            let mut observed=failure_test_stage_v2(23,std::process::ExitStatus::from_raw(101<<8));
+            observed.financial_diagnostic=Some(finite);
+            let value=serde_json::to_value(failure_stage_v2(&observed,ExpectedProcessV2::Sigkill)).unwrap();
+            let projection=&value["financial_first_failure"];
+            assert_eq!(projection.as_object().unwrap().len(),4);
+            assert_eq!(projection["stage"],serde_json::to_value(expected_stage).unwrap());
+            assert_eq!(projection["error_class"],serde_json::to_value(expected_class).unwrap());
+            assert_eq!(projection["component"],"SignerBridge");
+            assert_eq!(projection["commit_state"],"NotEstablished");
+        }
+    }
+    for (error_class,expected_class) in [
+        (Class::Binding,FC::Binding),
+        (Class::Conflict,FC::Conflict),
+        (Class::Missing,FC::Missing),
+        (Class::Uncertain,FC::Uncertain),
+        (Class::Limit,FC::ResourceLimit),
+        (Class::Permission,FC::Permission),
+        (Class::RecoveryRequired,FC::RecoveryRequired),
+        (Class::CompleteOriginRecoveryUnavailable,FC::RecoveryRequired),
+        (Class::Verification,FC::Verification),
+        (Class::SignerOriginUnavailable,FC::SignerOriginUnavailable),
+        (Class::Journal,FC::Journal),
+        (Class::Authority,FC::Authority),
+        (Class::Wallet,FC::Wallet),
+        (Class::Ipc,FC::Ipc),
+    ] {
+        fd::reset_operation();
+        fd::signer_result(Detail{stage:Stage::InstalledProviderVerification,error_class,frame_cause:None,current_timing:None},CS::NotEstablished);
+        fd::bridge(FS::ResultReceive,CS::NotEstablished,&wholepact_signer::authority_bridge::BridgeError::Ipc);
+        let finite=finite_result_failure_v2(fd::take_operation_failure(),true,&AtomicBool::new(false)).unwrap();
+        assert_eq!(finite.stage,FS::ResultInstalledProviderVerification);
+        assert_eq!(finite.error_class,expected_class);
+        let mut observed=failure_test_stage_v2(23,std::process::ExitStatus::from_raw(101<<8));
+        observed.financial_diagnostic=Some(finite);
+        let value=serde_json::to_value(failure_stage_v2(&observed,ExpectedProcessV2::Sigkill)).unwrap();
+        let projection=&value["financial_first_failure"];
+        assert_eq!(projection.as_object().unwrap().len(),4);
+        assert_eq!(projection["error_class"],serde_json::to_value(expected_class).unwrap());
+    }
+    fd::reset_operation();
+    fd::signer_result(Detail{stage:Stage::CurrentRead,error_class:Class::Ipc,frame_cause:Some(Frame::Deadline),
+        current_timing:Some(Timing{budget_ms:1000,provider_elapsed_ms:Some(1),remaining_before_write_ms:Some(999),
+            remaining_before_read_ms:Some(998),roundtrip_elapsed_ms:2})},CS::NotEstablished);
+    let captured=fd::take_operation_failure().unwrap();assert!(captured.current_timing.is_some());
+    let stripped=finite_result_failure_v2(Some(captured),true,&AtomicBool::new(false)).unwrap();
+    assert_eq!(stripped.stage,FS::ResultCurrentRead);assert_eq!(stripped.error_class,FC::FrameDeadline);
+    assert!(stripped.current_timing.is_none() && stripped.authority_call.is_none());
+    fd::reset_operation();
     let first=fd::FinancialDiagnosticV1{schema:1,stage:fd::FinancialStageV1::AuthenticatedIntake,
         component:fd::FinancialComponentV1::Engine,error_class:fd::FinancialErrorClassV1::Permission,
         commit_state:fd::FinancialCommitStateV1::OutcomeUncertain,current_timing:None,authority_call:None};

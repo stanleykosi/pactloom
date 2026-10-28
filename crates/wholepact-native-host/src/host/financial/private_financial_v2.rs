@@ -404,7 +404,17 @@ impl Host {
             // Only now may the independently approved Signer ReturnExact begin.
             // All later gates are closed; no Host human wait consumes its lease.
             financial_step!(ResultReceive, NotEstablished);
-            let delivery = receiver.receive().map_err(|error| {
+            #[cfg(all(test, feature = "synthetic-born-joined-qualification", feature = "durable-proposal"))]
+            let received = receiver.receive_observed_v2().map_err(|observed| {
+                if let Some(detail) = observed.diagnostic {
+                    crate::host::financial_diagnostics_v1::signer_result(detail,
+                        crate::host::financial_diagnostics_v1::FinancialCommitStateV1::NotEstablished);
+                }
+                observed.error
+            });
+            #[cfg(not(all(test, feature = "synthetic-born-joined-qualification", feature = "durable-proposal")))]
+            let received = receiver.receive();
+            let delivery = received.map_err(|error| {
                 financial_record!(bridge, ResultReceive, NotEstablished, &error);
                 financial_failure("RESULT_RECEIVE")
             })?;

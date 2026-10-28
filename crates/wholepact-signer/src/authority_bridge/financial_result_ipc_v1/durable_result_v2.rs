@@ -141,6 +141,12 @@ impl PreparedDurableFinancialResultReceiverV2 {
         // a missing independent intake owner still denies before HostPrepared.
         Ok(AuthenticatedDurableFinancialResultLeaseV2(self.0.receive()?))
     }
+    /// Qualification observes the same single receive kernel; no extra I/O or retry.
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub fn receive_observed_v2(self) -> std::result::Result<AuthenticatedDurableFinancialResultLeaseV2, FinancialResultObservedErrorV1> {
+        self.0.receive_observed_v1().map(AuthenticatedDurableFinancialResultLeaseV2)
+    }
+
 }
 
 /// A fresh V2 native Return-backed authenticated result, not a V1 conversion.
