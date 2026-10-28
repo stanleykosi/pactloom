@@ -5135,44 +5135,72 @@ impl FinancialNativeFixtureV1 {
 }
 /// Composed exact selection-kernel rejection through a genuine original20
 /// native reopen. Not an end-to-end V2 UI opener or successful Return claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartedAuditStageV2 { Custody, Open, Audit, Drain, FinalCustody }
+fn observe_started_result_v2<T>(result: Result<T>, stage: StartedAuditStageV2,
+    detail: Option<super::financial_v1::diagnostics::FinancialNativeDiagnosticV1>,
+    observe: &mut impl FnMut(StartedAuditStageV2, &Error, Option<super::financial_v1::diagnostics::FinancialNativeDiagnosticV1>),
+) -> Result<T> {
+    if let Err(error) = &result { observe(stage, error, detail); }
+    result
+}
 pub fn audit_started_after_restart_v2(custody: StartedFinancialCustodyV2, outer_deadline: Instant) -> Result<String> {
-    custody.check()?;
-    if Instant::now() >= outer_deadline { return Err(Error::Locked); }
+    audit_started_after_restart_observed_v2(custody, outer_deadline, |_, _, _| {})
+}
+/// Finite qualification observation only; callback cannot supply an outcome or authority.
+pub fn audit_started_after_restart_observed_v2(custody: StartedFinancialCustodyV2, outer_deadline: Instant,
+    mut observe: impl FnMut(StartedAuditStageV2, &Error, Option<super::financial_v1::diagnostics::FinancialNativeDiagnosticV1>),
+) -> Result<String> {
+    use StartedAuditStageV2 as S;
+    observe_started_result_v2(custody.check(), S::Custody, None, &mut observe)?;
+    if Instant::now() >= outer_deadline {
+        return observe_started_result_v2(Err(Error::Locked), S::Open, None, &mut observe);
+    }
     let mut runtime = NativeRuntime::new(None);
-    runtime.root = custody.root.to_str().ok_or(Error::InvalidData)?.to_owned();
+    runtime.root = observe_started_result_v2(custody.root.to_str().ok_or(Error::InvalidData), S::Custody, None, &mut observe)?.to_owned();
     runtime.password = Zeroizing::new(crate::native_ui::birth_workspace::born_roster_v3::SYNTHETIC_PENDING_PASSWORD.into());
     runtime.owner_witness_setup = Zeroizing::new(custody.owner_setup_json.clone());
     let mut close_deadline = outer_deadline.min(Instant::now() + Duration::from_secs(120));
     let result = (|| {
-        runtime.begin_financial_result_reopen_v1(true, EPOCH)?;
+        let begin = runtime.begin_financial_result_reopen_v1(true, EPOCH);
+        observe_started_result_v2(begin, S::Open, runtime.financial_diagnostic_v1(), &mut observe)?;
         let opening_deadline = outer_deadline.min(Instant::now() + Duration::from_secs(120));
         loop {
-            if Instant::now() >= opening_deadline { return Err(Error::Locked); }
+            if Instant::now() >= opening_deadline {
+                return observe_started_result_v2(Err(Error::Locked), S::Open, runtime.financial_diagnostic_v1(), &mut observe);
+            }
             runtime.poll(EPOCH);
-            if let Some(error) = runtime.take_financial_failure_v1() { return Err(error); }
+            if let Some(error) = runtime.take_financial_failure_v1() {
+                return observe_started_result_v2(Err(error), S::Open, runtime.financial_diagnostic_v1(), &mut observe);
+            }
             match runtime.financial_phase_v1() {
                 Some(super::financial_v1::FinancialPhaseV1::Opening) => std::thread::sleep(Duration::from_millis(2)),
                 Some(super::financial_v1::FinancialPhaseV1::AwaitingReturn) => break,
-                _ => return Err(Error::ReviewMismatch),
+                _ => return observe_started_result_v2(Err(Error::ReviewMismatch), S::Open, runtime.financial_diagnostic_v1(), &mut observe),
             }
         }
-        let (audit, original_deadline) = runtime.audit_started_after_reopen_for_qualification_v2(
+        let audit = runtime.audit_started_after_reopen_for_qualification_v2(
             &custody.account_id, &custody.authorization_id, &custody.continuation_terms_digest,
-        )?;
+        );
+        let (audit, original_deadline) = observe_started_result_v2(audit, S::Audit, None, &mut observe)?;
         close_deadline = outer_deadline.min(original_deadline);
-        custody.check()?;
+        observe_started_result_v2(custody.check(), S::Custody, None, &mut observe)?;
         Ok(audit)
     })();
+    // The callback already captured the actual operation error before lock/drain.
+    // Retain the original API's cleanup-error precedence in the returned Result.
     runtime.lock();
     while !runtime.closing_accounts.is_empty() {
-        if Instant::now() >= close_deadline { return Err(Error::Uncertain); }
+        if Instant::now() >= close_deadline {
+            return observe_started_result_v2(Err(Error::Uncertain), S::Drain, None, &mut observe);
+        }
         runtime.closing_accounts.retain(|done| !done.load(Ordering::Acquire));
         std::thread::sleep(Duration::from_millis(2));
     }
     if runtime.financial_phase_v1().is_some() || runtime.durable_result_phase_for_qualification_v2().is_some()
         || runtime.open.is_some() || runtime.pending.is_some()
-    { return Err(Error::Uncertain); }
-    custody.check()?;
+    { return observe_started_result_v2(Err(Error::Uncertain), S::Drain, None, &mut observe); }
+    observe_started_result_v2(custody.check(), S::FinalCustody, None, &mut observe)?;
     result
 }
 
@@ -5198,6 +5226,33 @@ mod started_custody_inventory_v2_tests {
     }
     #[test]
     fn started_custody_inventory_allows_only_exact_sqlite_sidecar_lifecycle() {
+        // Inert error observations only: no account, source or native authority.
+        use super::{observe_started_result_v2, StartedAuditStageV2 as S};
+        let mut observed = Vec::new();
+        let mut first = None;
+        let mut observer = |stage, error: &crate::Error, detail| {
+            observed.push((stage, matches!(error, crate::Error::Locked), detail));
+            if first.is_none() { first = Some(stage); }
+        };
+        assert_eq!(observe_started_result_v2(Ok(7), S::Open, None, &mut observer).unwrap(), 7);
+        for stage in [S::Custody, S::Open, S::Audit, S::Drain, S::FinalCustody] {
+            assert!(matches!(observe_started_result_v2::<()>(Err(crate::Error::Locked), stage, None, &mut observer), Err(crate::Error::Locked)));
+        }
+        assert!(matches!(observe_started_result_v2::<()>(Err(crate::Error::Uncertain), S::Drain, None, &mut observer), Err(crate::Error::Uncertain)));
+        drop(observer);
+        assert_eq!(first, Some(S::Custody));
+        assert_eq!(observed.len(), 6);
+        assert!(observed[..5].iter().all(|(_, locked, detail)| *locked && detail.is_none()));
+        assert!(!observed[5].1);
+        use super::super::financial_v1::diagnostics::{FinancialNativeDiagnosticV1 as D, FinancialNativeStageV1 as NS, FinancialNativeComponentV1 as NC, FinancialNativeErrorClassV1 as NE};
+        let detail = D { stage:NS::SourceOpen, component:NC::Signer, error_class:NE::Locked, authority_call:None };
+        let mut got = None;
+        assert!(matches!(observe_started_result_v2::<()>(Err(crate::Error::Locked), S::Open, Some(detail), &mut |stage, _, value| {got=Some((stage,value));}), Err(crate::Error::Locked)));
+        assert_eq!(got, Some((S::Open,Some(detail))));
+        let source = include_str!("durable_proposal_v1.rs");
+        let body = source.split("pub fn audit_started_after_restart_observed_v2(").nth(1).unwrap().split("// Qualification custody correlation").next().unwrap();
+        assert!(body.find("let result = (||").unwrap() < body.find("runtime.lock();").unwrap());
+        for guard in ["runtime.take_financial_failure_v1()", "runtime.financial_diagnostic_v1()", "S::FinalCustody", "S::Drain", "S::Audit", "S::Custody"] { assert!(body.contains(guard)); }
         for before in 0..4 { for after in 0..4 {
             assert!(started_inventory_lifecycle_v2(&names(before), &names(after)));
         }}

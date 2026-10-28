@@ -625,7 +625,7 @@ impl EphemeralDurableResultNativeV2 {
     }
 }
 
-pub use crate::native_ui::runtime::durable_proposal_qualification_v1::{StartedFinancialCustodyV2, audit_started_after_restart_v2};
+pub use crate::native_ui::runtime::durable_proposal_qualification_v1::{StartedFinancialCustodyV2, StartedAuditStageV2, audit_started_after_restart_v2, audit_started_after_restart_observed_v2};
 impl EphemeralFinancialContinuationNativeV1 {
     pub fn capture_and_arm_started_v2(&mut self, outer_deadline: std::time::Instant) -> Result<StartedFinancialCustodyV2> {
         self.inner.capture_and_arm_started_v2(outer_deadline)

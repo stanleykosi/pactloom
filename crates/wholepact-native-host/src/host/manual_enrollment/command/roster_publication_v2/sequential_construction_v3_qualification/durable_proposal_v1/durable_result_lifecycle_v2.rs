@@ -1489,18 +1489,43 @@ impl StartedAuditV2 {
 struct StartedCompletionV2 {version:u16,original_ready_digest:String,audit:StartedAuditV2}
 pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification)
 fn read_started_original_child(terminal:crate::terminal::Terminal)->Result<()> {
-    let root=scenario_root()?;
-    let ready:StartedReadyV2=read_record(&root,STARTED_READY)?;ready.validate(&root)?;
-    let audit=wholepact_signer::native_ui::synthetic_born_joined_qualification::audit_started_after_restart_v2(
-        ready.custody.clone(),private_fixed_v2::child_original_cutoff()?).map_err(|_|Error::Authentication)?;
-    if audit.is_empty() || audit.len()>64*1024{return Err(Error::Invalid);}
-    let audit:StartedAuditV2=serde_json::from_str(&audit)?;audit.validate(&ready)?;
+    use crate::host::financial_diagnostics_v1 as fd;
+    use fd::FinancialStageV1 as S;
+    fd::reset_operation();
+    let root=observe_started_host_step_v2(S::InputValidation,scenario_root())?;
+    let ready:StartedReadyV2=observe_started_host_step_v2(S::InputValidation,read_record(&root,STARTED_READY).map_err(Error::from))?;
+    observe_started_host_step_v2(S::OriginalSource,ready.validate(&root).map_err(Error::from))?;
+    let cutoff=observe_started_host_step_v2(S::Currentness,private_fixed_v2::child_original_cutoff())?;
+    let audit=wholepact_signer::native_ui::synthetic_born_joined_qualification::audit_started_after_restart_observed_v2(
+        ready.custody.clone(),cutoff,observe_started_native_failure_v2).map_err(|_|Error::Authentication)?;
+    observe_started_host_step_v2(S::AuditSummary,if audit.is_empty() || audit.len()>64*1024{Err(Error::Invalid)}else{Ok(())})?;
+    let audit:StartedAuditV2=observe_started_host_step_v2(S::AuditSummary,serde_json::from_str(&audit).map_err(Error::from))?;
+    observe_started_host_step_v2(S::CompletedVerification,audit.validate(&ready))?;
     // The actual native reopen/source helper itself checks exact Uncertain
     // selection and identical protected rows before/after that failed read.
-    let finished=StartedCompletionV2{version:2,original_ready_digest:digest(&ready)?,audit};
-    write_record(&root,STARTED_FINISHED,&finished)?;
-    terminal.message("SYNTHETIC_DURABLE_STARTED_UNCERTAIN_REOPEN_V2=1\n")
+    let original_ready_digest=observe_started_host_step_v2(S::AuditSummary,digest(&ready))?;
+    let finished=StartedCompletionV2{version:2,original_ready_digest,audit};
+    observe_started_host_step_v2(S::AuditSummary,write_record(&root,STARTED_FINISHED,&finished).map_err(Error::from))?;
+    observe_started_host_step_v2(S::LifecycleHarness,terminal.message("SYNTHETIC_DURABLE_STARTED_UNCERTAIN_REOPEN_V2=1\n"))
 }
+fn observe_started_host_step_v2<T>(stage:crate::host::financial_diagnostics_v1::FinancialStageV1,result:Result<T>)->Result<T>{
+    use crate::host::financial_diagnostics_v1 as fd;
+    if let Err(error)=&result {fd::host(stage,fd::FinancialCommitStateV1::NotEstablished,error);}
+    promote_result_failure_v2(&result);result
+}
+fn observe_started_native_failure_v2(stage:wholepact_signer::native_ui::synthetic_born_joined_qualification::StartedAuditStageV2,
+    error:&wholepact_signer::Error,
+    detail:Option<wholepact_signer::native_ui::synthetic_born_joined_qualification::FinancialNativeDiagnosticV1>) {
+    use crate::host::financial_diagnostics_v1 as fd;
+    use wholepact_signer::native_ui::synthetic_born_joined_qualification::StartedAuditStageV2 as S;
+    if let Some(detail)=detail {fd::native_job(detail);}
+    let stage=match stage {S::Custody=>fd::FinancialStageV1::OriginalSource,S::Open=>fd::FinancialStageV1::WorkerSourceOpen,
+        S::Audit=>fd::FinancialStageV1::AuditSummary,S::Drain=>fd::FinancialStageV1::WorkerDrain,
+        S::FinalCustody=>fd::FinancialStageV1::CompletedVerification};
+    fd::signer(stage,fd::FinancialCommitStateV1::NotEstablished,error);
+    promote_result_failure_v2(&Err::<(),_>(Error::Authentication));
+}
+
 pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification)
 fn started_death_marker_v2(tail:&str,producer:bool,complete:bool,terminal:bool)->io::Result<bool>{
     if tail.lines().any(|line|matches!(line.trim_end_matches('\r'),
@@ -2055,6 +2080,16 @@ fn durable_failure_v2_covers_all_final_boundaries_and_diagnostic_states(){
 
 #[test]
 fn durable_failure_v2_fatal_observations_all_stages_keep_error_order_and_withhold() {
+    // Source-contract coverage, not a native Started recovery claim.
+    let source=include_str!("durable_result_lifecycle_v2.rs");
+    let reader=source.split("fn read_started_original_child(").nth(1).unwrap().split("fn observe_started_host_step_v2").next().unwrap();
+    for bound in ["S::InputValidation,scenario_root()", "S::InputValidation,read_record", "S::OriginalSource,ready.validate",
+        "S::Currentness,private_fixed_v2::child_original_cutoff()", "audit_started_after_restart_observed_v2",
+        "S::AuditSummary,serde_json::from_str", "S::CompletedVerification,audit.validate", "S::AuditSummary,digest",
+        "S::AuditSummary,write_record", "S::LifecycleHarness,terminal.message"] {assert!(reader.contains(bound), "{bound}");}
+    let native=source.split("fn observe_started_native_failure_v2(").nth(1).unwrap().split("pub(in crate::host").next().unwrap();
+    assert!(native.find("fd::native_job(detail)").unwrap()<native.find("fd::signer(stage").unwrap());
+    assert!(native.contains("promote_result_failure_v2"));
     use std::os::unix::process::ExitStatusExt;
     let cases=[(FailureCaseV2::DurableResume,FailureSiteV2::A0Producer,ExpectedProcessV2::Sigkill,127),
         (FailureCaseV2::DurableResume,FailureSiteV2::A1Intake,ExpectedProcessV2::Sigkill,23),
