@@ -87,6 +87,26 @@ impl RecoveredFinancialResultSourceV2 {
         if self.revoked.load(Ordering::Acquire) { return Err(Error::Locked); }
         Ok(())
     }
+    // Only an already fully audited exact-result snapshot owns this private pin.
+    // Preserve every nonjournal custody guard; use the same live nonrefreshing
+    // journal revision/identity check instead of replaying semantic history on
+    // every Return I/O callback. This is continuity, never fresh permission.
+    fn check_return_custody_v2(&self, pin: &FinancialReturnJournalPinV1) -> Result<()> {
+        if self.revoked.load(Ordering::Acquire) { return Err(Error::Locked); }
+        self.original.check_immutable_original_v1()?;
+        self.original.lifetime.check_connected()?;
+        self.original.retained.check()?;
+        if immutable(&self.original.retained)? != self.original.immutable
+            || publication::read_commit(&self.original.retained)? != self.original.original_commit
+        { return Err(Error::ReviewMismatch); }
+        self.original.financial_journal()?.check_financial_return_pin_v1(
+            &*self.original.financial_binding()?, pin,
+        )?;
+        self.original.lifetime.check_connected()?;
+        self.original.check_immutable_original_v1()?;
+        if self.revoked.load(Ordering::Acquire) { return Err(Error::Locked); }
+        Ok(())
+    }
     /// An inert exact selector, not a result, recipient approval or saved grant.
     pub(crate) fn selection_v2(&self) -> Result<DurableFinancialResultRequestV2> {
         self.check_custody()?;
@@ -141,7 +161,7 @@ impl AuditedFinancialResultSnapshotV2 {
     pub(crate) fn peer(&self) -> &PeerProcess { &self.peer }
     pub(crate) fn signature_set_digest(&self) -> &str { &self.signature_set_digest }
     pub(crate) fn check_custody_v2(&self) -> Result<()> {
-        self.source.check_custody()?;
+        self.source.check_return_custody_v2(&self.rows.pin)?;
         self.peer.check_alive()?;
         self.source.original.financial_journal()?.check_financial_return_pin_v1(
             &*self.source.original.financial_binding()?, &self.rows.pin,
@@ -151,7 +171,7 @@ impl AuditedFinancialResultSnapshotV2 {
             || self.rows.pin.result_digest() != self.rows.selection.result_digest
         { return Err(Error::ReviewMismatch); }
         self.peer.check_alive()?;
-        self.source.check_custody()
+        self.source.check_return_custody_v2(&self.rows.pin)
     }
     /// Private bridge interpretation only, with the genuine fresh Read still
     /// held. The network may receive its reviewed preview, never exact outbox.
