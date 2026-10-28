@@ -1640,7 +1640,7 @@ fn execute_other(
         }
         (C::PreserveReopenedFinancialContinuationV2(_), State::FinancialContinuation(entry, reporter)) => {
             drop(reporter);
-            let original = entry.close_preserving_reopened_v2().map_err(|e| signer_error(e, "cold V2 actual financial drain"))?;
+            let original = entry.close_preserving_reopened_v2().map_err(|e| financial_signer_error(e, "cold V2 actual financial drain", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerDrain, None))?;
             (State::PreservedDelivery, R::DeliveryPreserved { index, original })
         }
         (C::OpenDurableResultInPairV2(_, selector, pair), State::PreservedDelivery) => {

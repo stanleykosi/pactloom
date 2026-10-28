@@ -4999,11 +4999,16 @@ impl FinancialNativeFixtureV1 {
         let custody = self.reopened.take().ok_or(Error::Unavailable)?;
         custody.pair.check()?;
         if self.inner.original.is_some() || self.inner.root != custody.selector.root
-            || original_inventory(&self.inner.root)? != self.inner.original_inventory
         { return Err(Error::ReviewMismatch); }
+        if self.poll()? != FinancialQualificationPhaseV1::AwaitingReturn { return Err(Error::ReviewMismatch); }
+        self.inner.runtime.check_completed_custody_for_preservation_v2(&custody.selector.account_id)?;
+        let before_drain = original_inventory(&self.inner.root)?;
+        if !cold_financial_live_inventory_v2(&self.inner.original_inventory, &before_drain) {
+            return Err(Error::ReviewMismatch);
+        }
         self.inner.drain_close()?;
         if self.inner.runtime.financial_phase_v1().is_some()
-            || original_inventory(&self.inner.root)? != self.inner.original_inventory
+            || !durable_result_postdrain_inventory_v2(&before_drain, &original_inventory(&self.inner.root)?)
         { return Err(Error::Uncertain); }
         let mut selector = custody.selector.clone();
         selector.version = 20;
@@ -5213,6 +5218,16 @@ mod started_custody_inventory_v2_tests {
     }
 }
 
+// Only the genuine completed cold financial owner reaches this live comparison.
+// Keep every captured name; exact SQLite WAL/SHM may be created during reopening.
+// Owned drain then uses the stricter removal-only check against this live set.
+fn cold_financial_live_inventory_v2(before: &BTreeSet<OsString>, after: &BTreeSet<OsString>) -> bool {
+    let stable = |name: &&OsString| *name != &OsString::from("authority.sqlite-wal")
+        && *name != &OsString::from("authority.sqlite-shm");
+    let authority = OsString::from("authority.sqlite");
+    before.contains(&authority) && after.contains(&authority)
+        && before.iter().filter(stable).eq(after.iter().filter(stable))
+}
 // Qualification-only comparison AFTER the authenticated V2 result opener and
 // owned account drain. Keep the full original inventory: only removal of these
 // exact SQLite sidecars is expected when the last connection checkpoints/closes.
@@ -5230,7 +5245,7 @@ fn durable_result_postdrain_inventory_v2(
 }
 #[cfg(test)]
 mod durable_result_postdrain_inventory_v2_tests {
-    use super::{durable_result_postdrain_inventory_v2, BTreeSet, OsString};
+    use super::{cold_financial_live_inventory_v2, durable_result_postdrain_inventory_v2, BTreeSet, OsString};
     #[test]
     fn durable_result_postdrain_rejects_every_addition_and_non_sidecar_removal() {
         let names = ["authority.sqlite", "authority.sqlite-wal", "authority.sqlite-shm",
@@ -5247,6 +5262,9 @@ mod durable_result_postdrain_inventory_v2_tests {
                 && after & !before == 0 && (before ^ after) & !6 == 0;
             assert_eq!(durable_result_postdrain_inventory_v2(&inventory(before), &inventory(after)),
                 expected, "before={before} after={after}");
+            let live_expected = before & 1 != 0 && after & 1 != 0 && (before ^ after) & !6 == 0;
+            assert_eq!(cold_financial_live_inventory_v2(&inventory(before), &inventory(after)),
+                live_expected, "live before={before} after={after}");
         }}
         // OsString comparison must not silently normalize non-UTF8 lookalikes.
         use std::os::unix::ffi::OsStringExt;
@@ -5256,5 +5274,26 @@ mod durable_result_postdrain_inventory_v2_tests {
         assert!(!durable_result_postdrain_inventory_v2(&base, &unknown));
         assert!(!durable_result_postdrain_inventory_v2(&unknown, &base));
         assert!(durable_result_postdrain_inventory_v2(&unknown, &unknown));
+        assert!(!cold_financial_live_inventory_v2(&base, &unknown));
+        assert!(!cold_financial_live_inventory_v2(&unknown, &base));
+        assert!(cold_financial_live_inventory_v2(&unknown, &unknown));
+        let source = include_str!("durable_proposal_v1.rs");
+        let close = source.split("pub(in crate::native_ui) fn close_preserving_reopened_v2(mut self)").nth(1).unwrap()
+            .split("impl DurableResultNativeFixtureV2").next().unwrap();
+        let positions = ["custody.pair.check()?", "self.poll()?", "check_completed_custody_for_preservation_v2",
+            "let before_drain", "cold_financial_live_inventory_v2", "self.inner.drain_close()?",
+            "durable_result_postdrain_inventory_v2", "custody.pair.check_progression"]
+            .map(|part| close.find(part).unwrap());
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        // Source-contract check only: no result owner or native grant is fabricated.
+        let runtime = include_str!("../runtime/financial_v1.rs");
+        let check = runtime.split("fn check_completed_custody_for_preservation_v2(").nth(1).unwrap()
+            .split("fn capture_started_identity_for_qualification_v2(").next().unwrap();
+        for guard in ["state.phase != FinancialPhaseV1::AwaitingReturn", "state.job.is_some()",
+            "self.pending.is_some()", "context.next != Next::Return", "request.account_id != account",
+            "request.account_id != context.terms.scope.authorization.identity.account_id",
+            "request.authorization_id != context.terms.scope.authorization.authorization_id",
+            "request.validate()"] { assert!(check.contains(guard), "missing guard {guard}"); }
+        assert_eq!(check.matches("context.source.check_custody()").count(), 2);
     }
 }

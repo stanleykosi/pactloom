@@ -653,6 +653,20 @@ pub(crate) use coordinated_admit::coordinated_writer_read::coordinated_financial
 
 #[cfg(feature = "synthetic-born-joined-qualification")]
 impl NativeRuntime {
+    pub(in crate::native_ui) fn check_completed_custody_for_preservation_v2(&self, account: &str) -> Result<()> {
+        let state = self.financial_v1.as_ref().ok_or(Error::Unavailable)?;
+        let context = state.context.as_ref().ok_or(Error::Unavailable)?;
+        let request = context.result_request.as_ref().ok_or(Error::Unavailable)?;
+        if state.phase != FinancialPhaseV1::AwaitingReturn || state.job.is_some()
+            || self.pending.is_some() || context.next != Next::Return
+            || request.account_id != account
+            || request.account_id != context.terms.scope.authorization.identity.account_id
+            || request.authorization_id != context.terms.scope.authorization.authorization_id
+        { return Err(Error::ReviewMismatch); }
+        context.source.check_custody()?;
+        request.validate().map_err(|_| Error::ReviewMismatch)?;
+        context.source.check_custody()
+    }
     pub(in crate::native_ui) fn capture_started_identity_for_qualification_v2(
         &self,
     ) -> Result<(String, String, String, Instant)> {

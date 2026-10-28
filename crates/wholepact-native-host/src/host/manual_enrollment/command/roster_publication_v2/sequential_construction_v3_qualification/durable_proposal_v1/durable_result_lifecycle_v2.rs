@@ -524,11 +524,18 @@ fn select_without_intake(signers:&worker::JoinedSignerWorkerV1,index:usize,
     Ok((preserved(signers,index)?,request))
 }
 
+// Preserve the existing finite first error before local service/owner cleanup.
+fn observe_signing_step_v2<T>(result:Result<T>)->Result<T> {
+    promote_result_failure_v2(&result);
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sign_and_intake(host:&Host,workspace:&Path,signers:&worker::JoinedSignerWorkerV1,
     witness:&mut impl Witness,index:usize,admission:&DurableDeliveryAdmissionStatusV3,wallet_setup:&str,
     cold:Option<(EphemeralWitnessOriginV1,Arc<PreservedDurablePairV2>)>,intake_now:bool,
     started_checkpoint:Option<(&Path,&FixedProposalIdentityV1)>)->Result<RetainedOwnerV2>{
+    crate::host::financial_diagnostics_v1::reset_operation();
     let pair=cold.as_ref().map(|(_,pair)|pair.clone());
     let history=witness.delivery_history(&admission.request.operation_id).map_err(authority)?;
     let begin=match cold {Some((origin,pair))=>C::BeginReopenedFinancialContinuationV2(index,wallet_setup.into(),origin,pair),
@@ -555,12 +562,12 @@ fn sign_and_intake(host:&Host,workspace:&Path,signers:&worker::JoinedSignerWorke
     let before=with_completed_history_read_v2(witness,&request.operation_id,||
         host.read_original_financial_history_v2(workspace,&request.account_id,&request.operation_id))?;
     if before.continuation_request()!=&request || before.reservation().map_err(authority)?.is_some(){return Err(Error::Authentication);}
-    host.bind_original_financial_owner_v2(workspace,&format!("durable-v2-bind-{index}"),&before)?;
+    observe_signing_step_v2(host.bind_original_financial_owner_v2(workspace,&format!("durable-v2-bind-{index}"),&before))?;
     drop(before);
-    let signing=witness.signing(&request.operation_id).map_err(authority)?;
+    let signing=observe_signing_step_v2(witness.signing(&request.operation_id).map_err(authority))?;
     for phase in [Phase::ReadReview,Phase::AcquireReview,Phase::ReadReview,Phase::ActivateReview,
-        Phase::WalletReview,Phase::ReadReview]{wait_phase(signers,index,phase)?;approve(signers,index)?;}
-    wait_phase(signers,index,Phase::SignReview)?;
+        Phase::WalletReview,Phase::ReadReview]{observe_signing_step_v2(wait_phase(signers,index,phase))?;observe_signing_step_v2(approve(signers,index))?;}
+    observe_signing_step_v2(wait_phase(signers,index,Phase::SignReview))?;
     if let Some((scenario,fixed))=started_checkpoint {
         if intake_now || pair.is_some(){return Err(Error::Authentication);}
         signers.send(C::CaptureAndArmStartedV2(index,private_fixed_v2::child_original_cutoff()?)).map_err(worker_error)?;
@@ -572,15 +579,15 @@ fn sign_and_intake(host:&Host,workspace:&Path,signers:&worker::JoinedSignerWorke
         ready.validate(scenario)?;write_record(scenario,STARTED_READY,&ready)?;
         // Only this unchanged native click starts key use. The source hook parks
         // after durable Started, before the fence/key operation; parent kills it.
-        approve(signers,index)?;
-        wait_phase(signers,index,Phase::AwaitingReturn)?;
+        observe_signing_step_v2(approve(signers,index))?;
+        observe_signing_step_v2(wait_phase(signers,index,Phase::AwaitingReturn))?;
         return Err(Error::Authentication);
     }
-    approve(signers,index)?;
-    wait_phase(signers,index,Phase::AwaitingReturn)?;
+    observe_signing_step_v2(approve(signers,index))?;
+    observe_signing_step_v2(wait_phase(signers,index,Phase::AwaitingReturn))?;
     drop(signing);
-    signers.send(if pair.is_some(){C::PreserveReopenedFinancialContinuationV2(index)}else{C::PreserveFinancialContinuation(index)}).map_err(worker_error)?;
-    let original=preserved(signers,index)?;
+    observe_signing_step_v2(signers.send(if pair.is_some(){C::PreserveReopenedFinancialContinuationV2(index)}else{C::PreserveFinancialContinuation(index)}).map_err(worker_error))?;
+    let original=observe_signing_step_v2(preserved(signers,index))?;
     let history=with_completed_history_read_v2(witness,&request.operation_id,||
         host.read_original_financial_history_v2(workspace,&request.account_id,&request.operation_id))?;
     let (original_writer_expiry_ms,reservation_digest)=writer_evidence(&history)?;
@@ -1765,6 +1772,18 @@ fn durable_failure_v2_covers_all_final_boundaries_and_diagnostic_states(){
         .split("struct PartialReadyV2").next().unwrap();
     assert_eq!(sign.matches("with_completed_history_read_v2(").count(),3);
     assert!(!sign.contains("let history_server="));
+    assert!(sign.find("reset_operation();").unwrap() < sign.find("let pair=").unwrap());
+    for step in ["observe_signing_step_v2(host.bind_original_financial_owner_v2",
+        "observe_signing_step_v2(witness.signing", "observe_signing_step_v2(wait_phase(signers,index,phase))",
+        "observe_signing_step_v2(approve(signers,index))", "observe_signing_step_v2(wait_phase(signers,index,Phase::SignReview))",
+        "observe_signing_step_v2(wait_phase(signers,index,Phase::AwaitingReturn))",
+        "observe_signing_step_v2(signers.send(if pair.is_some()", "observe_signing_step_v2(preserved(signers,index))"] {
+        assert!(sign.contains(step), "unobserved signing boundary {step}");
+    }
+    let observe=lifecycle.split("fn observe_signing_step_v2<T>(").nth(1).unwrap()
+        .split("#[allow(clippy::too_many_arguments)]").next().unwrap();
+    assert!(observe.find("promote_result_failure_v2(&result);").unwrap() < observe.find("    result").unwrap());
+    assert_eq!(observe_signing_step_v2(Ok(73)).unwrap(),73);
     let a1=lifecycle.split("fn read_original_partial_intake_child(").nth(1).unwrap()
         .split("struct CompletionV2").next().unwrap();
     assert_eq!(a1.matches("with_completed_history_read_v2(").count(),1);
