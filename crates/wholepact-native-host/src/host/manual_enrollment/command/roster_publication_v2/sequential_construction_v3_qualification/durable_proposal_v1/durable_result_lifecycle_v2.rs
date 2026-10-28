@@ -237,13 +237,17 @@ fn export_owner(terminal:&crate::terminal::Terminal, host:&Host, signers:&worker
                         _ => return Err(Error::Authentication),
                     };
                     drop(history);
-                    // Signer review is conditional and completes before Witness
-                    // arms its unchanged native/CAS action. No request/intent has
-                    // been sent. Only connection-refused discovery may wait.
+                    // Start the independently approved exact Witness service
+                    // before the Signer may connect. Dropping the history handle
+                    // alone leaves its old listener bound but unserved; starting
+                    // first completes that listener's close/rebind handoff.
+                    // This arms no Signer action and commits no Witness mutation:
+                    // the actual Signer conditional decision, authenticated READY,
+                    // retained intent and same-stream exact send remain required.
+                    at(B::DeliveryNativeAdmission, || witness.start_delivery(&account_id, &request).map_err(|error| witness_error(B::DeliveryNativeAdmission, error)))?;
                     signers.send(C::ApproveClosedDelivery(index)).map_err(worker_error)?;
                     done(signers, index)?;
                     signers.send(C::AwaitClosedDeliveryResponse(index, response_complete)).map_err(worker_error)?;
-                    at(B::DeliveryNativeAdmission, || witness.start_delivery(&account_id, &request).map_err(|error| witness_error(B::DeliveryNativeAdmission, error)))?;
                     at(B::DeliveryNativeAdmission, || witness.finish_delivery().map_err(|error| witness_error(B::DeliveryNativeAdmission, error)))?;
                     let native_pending = match signers.receive().map_err(worker_error)? {
                         R::ClosedDeliveryStatus { index: actual, status } if actual == index => status,
@@ -1714,6 +1718,43 @@ fn durable_failure_v2_covers_all_final_boundaries_and_diagnostic_states(){
     // full fresh action120, strictly later than any earlier service120. No
     // runtime/permission authority is exercised by these source assertions.
     let lifecycle=include_str!("durable_result_lifecycle_v2.rs");
+    // Deterministic source-schedule regression, not a socket/native test: both
+    // fresh and recovered owners use this same handoff. The actual service must
+    // own the original endpoint before conditional approval can start a client.
+    let export=lifecycle.split("fn export_owner(").nth(1).unwrap()
+        .split("fn wait_phase(").next().unwrap();
+    let sequence=["drop(history);", "witness.start_delivery(&account_id, &request)",
+        "C::ApproveClosedDelivery(index)", "done(signers, index)?;",
+        "C::AwaitClosedDeliveryResponse(index, response_complete)", "witness.finish_delivery()"];
+    let handoff=&export[export.find(sequence[0]).unwrap()..];
+    let positions:Vec<_>=sequence.iter().map(|item|handoff.find(item).unwrap()).collect();
+    assert!(positions.windows(2).all(|pair|pair[0]<pair[1]));
+    assert_eq!(export.matches(sequence[1]).count(),1);
+    assert_eq!(export.matches(sequence[2]).count(),1);
+    let owner=include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../wholepact-authority/src/durable_delivery_admission_owner_v2.rs"));
+    let arm=owner.split("pub(crate) fn arm_durable_delivery_admission_v2(").nth(1).unwrap()
+        .split("impl NativeDurableDeliveryAdmissionSourceV2").next().unwrap();
+    assert!(arm.contains("committed: None"));
+    assert!(!arm.contains("record_committed("));
+    let transport=include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../wholepact-authority/src/transport/durable_delivery_admission_v3.rs"));
+    let serve=transport.split("pub(super) fn serve_durable_delivery_admission_v3(").nth(1).unwrap()
+        .split("fn require_durable_delivery_preparation_v3").next().unwrap();
+    let prepare=serve.find("self.require_durable_delivery_preparation_v3(peer,&preparation)?;").unwrap();
+    let ready=serve.find("WireResponse::DurableDeliveryAdmissionReadyV3").unwrap();
+    let receive=serve.find("let request: WireRequest = read_frame_checked_v3").unwrap();
+    let exact=serve.find("AuthorityMutation::OwnerControl(request) => preparation.matches(request)?").unwrap();
+    let mutate=serve.find("self.serve_durable_delivery_admission_v2(peer,request)").unwrap();
+    assert!(prepare<ready && ready<receive && receive<exact && exact<mutate);
+    assert!(serve[receive..mutate].contains("_ => return Err(AuthorityError::Permission)"));
+    // A refused Signer sends no exact mutation; arming/READY alone cannot append.
+    let fixture=include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../wholepact-authority/src/native_witness_owner/window/ephemeral_fixture_v1.rs"));
+    let drop_owner=fixture.split("impl Drop for EphemeralNativeWitnessV1").nth(1).unwrap()
+        .split("struct SyntheticServerStopped").next().unwrap();
+    assert!(drop_owner.find("self.window.discard();").unwrap()
+        < drop_owner.find("while self.window.job.is_some()").unwrap());
     let helper=lifecycle.split("fn with_completed_history_read_v2<T>(").nth(1).unwrap()
         .split("fn delivery_peer_command").next().unwrap();
     assert!(helper.find("let server=witness.completed(operation)").unwrap()
