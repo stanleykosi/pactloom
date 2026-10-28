@@ -58,6 +58,18 @@ impl Witness for EphemeralNativeWitnessV1 {
 }
 fn authority(e:wholepact_authority::AuthorityError)->Error {witness_error(B::DeliveryHistoricalRead,e)}
 
+// A retained authenticated history value is owned evidence, not a live server
+// or renewed permission. Each actual read gets the unchanged bounded service;
+// close/join it before local preparation, result transfer or expiry probes.
+fn with_completed_history_read_v2<T>(
+    witness:&mut impl Witness, operation:&str, read:impl FnOnce()->Result<T>,
+)->Result<T> {
+    let server=witness.completed(operation).map_err(authority)?;
+    let result=read();
+    drop(server);
+    result
+}
+
 fn delivery_peer_command(index:usize,proposal:&wholepact_core::ProposalInput,already_open:bool)->C {
     if already_open {C::DeliveryPeer(index)} else {C::OpenDelivery(index,proposal.clone())}
 }
@@ -536,11 +548,11 @@ fn sign_and_intake(host:&Host,workspace:&Path,signers:&worker::JoinedSignerWorke
     witness.finish_financial().map_err(authority)?;
     // Persist the authentic continuation BEFORE starting the first key-use flow.
     // The next result wait cannot turn a lost bind ACK into a new admission.
-    let history_server=witness.completed(&request.operation_id).map_err(authority)?;
-    let before=host.read_original_financial_history_v2(workspace,&request.account_id,&request.operation_id)?;
+    let before=with_completed_history_read_v2(witness,&request.operation_id,||
+        host.read_original_financial_history_v2(workspace,&request.account_id,&request.operation_id))?;
     if before.continuation_request()!=&request || before.reservation().map_err(authority)?.is_some(){return Err(Error::Authentication);}
     host.bind_original_financial_owner_v2(workspace,&format!("durable-v2-bind-{index}"),&before)?;
-    drop(before);drop(history_server);
+    drop(before);
     let signing=witness.signing(&request.operation_id).map_err(authority)?;
     for phase in [Phase::ReadReview,Phase::AcquireReview,Phase::ReadReview,Phase::ActivateReview,
         Phase::WalletReview,Phase::ReadReview]{wait_phase(signers,index,phase)?;approve(signers,index)?;}
@@ -565,8 +577,8 @@ fn sign_and_intake(host:&Host,workspace:&Path,signers:&worker::JoinedSignerWorke
     drop(signing);
     signers.send(if pair.is_some(){C::PreserveReopenedFinancialContinuationV2(index)}else{C::PreserveFinancialContinuation(index)}).map_err(worker_error)?;
     let original=preserved(signers,index)?;
-    let history_server=witness.completed(&request.operation_id).map_err(authority)?;
-    let history=host.read_original_financial_history_v2(workspace,&request.account_id,&request.operation_id)?;
+    let history=with_completed_history_read_v2(witness,&request.operation_id,||
+        host.read_original_financial_history_v2(workspace,&request.account_id,&request.operation_id))?;
     let (original_writer_expiry_ms,reservation_digest)=writer_evidence(&history)?;
     let authenticated_history_digest=history.history_digest().to_owned();
     let (original,result)=if intake_now {
@@ -577,11 +589,12 @@ fn sign_and_intake(host:&Host,workspace:&Path,signers:&worker::JoinedSignerWorke
     };
     // Same actual authoritative reservation after result/return, no release,
     // new key use or exposure reset is inferred from transport completion.
-    let after=host.read_original_financial_history_v2(workspace,&request.account_id,&request.operation_id)?;
+    let after=with_completed_history_read_v2(witness,&request.operation_id,||
+        host.read_original_financial_history_v2(workspace,&request.account_id,&request.operation_id))?;
     // Compare without claiming that a fresh read reissued the old writer.
     if writer_evidence(&after)?!=(original_writer_expiry_ms,reservation_digest.clone()){return Err(Error::Authentication);}
     if after.history_digest()!=authenticated_history_digest{return Err(Error::Authentication);}
-    drop(after);drop(history);drop(history_server);
+    drop(after);drop(history);
     Ok(RetainedOwnerV2{continuation:request,original,result,original_writer_expiry_ms,reservation_digest,authenticated_history_digest})
 }
 
@@ -811,8 +824,8 @@ fn read_original_partial_intake_child(terminal:crate::terminal::Terminal)->Resul
     {return Err(Error::Authentication);}
     if host.qualification_original_financial_history_commitment_v2(&ready.workspace)?
         !=(ready.preintake_revision,ready.preintake_history_digest.clone()) {return Err(Error::Authentication);}
-    let _server=witness.serve_completed_owner_history_v2().map_err(authority)?;
-    let history=host.read_original_financial_history_v2(&ready.workspace,first_account,&ready.first.continuation.operation_id)?;
+    let history=with_completed_history_read_v2(&mut witness,&ready.first.continuation.operation_id,||
+        host.read_original_financial_history_v2(&ready.workspace,first_account,&ready.first.continuation.operation_id))?;
     if history.continuation_request()!=&ready.first.continuation
         || history.history_digest()!=ready.first.authenticated_history_digest
         || writer_evidence(&history)?!=(ready.first.original_writer_expiry_ms,ready.first.reservation_digest.clone())
@@ -879,8 +892,8 @@ fn read_original_partial_child(terminal:crate::terminal::Terminal)->Result<()> {
     {return Err(Error::Authentication);}
     let unchanged=host.inspect_original_financial_progress_v2(&ready.workspace)?;
     if unchanged.revision!=revision || unchanged.intaken_accounts!=progress.intaken_accounts{return Err(Error::Authentication);}
-    let server=witness.serve_completed_owner_history_v2().map_err(authority)?;
-    let history=host.read_original_financial_history_v2(&ready.workspace,first_account,&ready.first.continuation.operation_id)?;
+    let history=with_completed_history_read_v2(&mut witness,&ready.first.continuation.operation_id,||
+        host.read_original_financial_history_v2(&ready.workspace,first_account,&ready.first.continuation.operation_id))?;
     if history.continuation_request()!=&ready.first.continuation
         || history.history_digest()!=ready.first.authenticated_history_digest
         || writer_evidence(&history)?!=(ready.first.original_writer_expiry_ms,ready.first.reservation_digest.clone())
@@ -893,11 +906,12 @@ fn read_original_partial_child(terminal:crate::terminal::Terminal)->Result<()> {
         || host.qualification_original_financial_history_commitment_v2(&ready.workspace)?!=committed_history
     {return Err(Error::Authentication);}
     probe_result_grants(&host,&ready.workspace,&signers,&first_selector,&history,&first_again)?;
-    let audited_after_probes=host.read_original_financial_history_v2(&ready.workspace,first_account,&ready.first.continuation.operation_id)?;
+    let audited_after_probes=with_completed_history_read_v2(&mut witness,&ready.first.continuation.operation_id,||
+        host.read_original_financial_history_v2(&ready.workspace,first_account,&ready.first.continuation.operation_id))?;
     if audited_after_probes.history_digest()!=ready.first.authenticated_history_digest
         || writer_evidence(&audited_after_probes)?!=(ready.first.original_writer_expiry_ms,ready.first.reservation_digest.clone())
     {return Err(Error::Authentication);}
-    drop(audited_after_probes);drop(history);drop(server);
+    drop(audited_after_probes);drop(history);
     let second_account=&ready.second_original.account_id;
     let admission=export_owner(&terminal,&host,&signers,&mut witness,&ready.workspace,&ready.proposal,
         &ready.disclosures,&ready.identity,&ready.choices,2,second_account,true)?;
@@ -1696,6 +1710,40 @@ fn durable_failure_v2_preserves_first_failure_through_all_cleanup_modes(){
 }
 #[test]
 fn durable_failure_v2_covers_all_final_boundaries_and_diagnostic_states(){
+    // Source-backed chronology regression: the actual expiry probe consumes a
+    // full fresh action120, strictly later than any earlier service120. No
+    // runtime/permission authority is exercised by these source assertions.
+    let lifecycle=include_str!("durable_result_lifecycle_v2.rs");
+    let helper=lifecycle.split("fn with_completed_history_read_v2<T>(").nth(1).unwrap()
+        .split("fn delivery_peer_command").next().unwrap();
+    assert!(helper.find("let server=witness.completed(operation)").unwrap()
+        < helper.find("let result=read();").unwrap());
+    assert!(helper.find("let result=read();").unwrap() < helper.find("drop(server);").unwrap());
+    assert!(helper.ends_with("    result\n}\n\n"));
+    let sign=lifecycle.split("fn sign_and_intake(").nth(1).unwrap()
+        .split("struct PartialReadyV2").next().unwrap();
+    assert_eq!(sign.matches("with_completed_history_read_v2(").count(),3);
+    assert!(!sign.contains("let history_server="));
+    let a1=lifecycle.split("fn read_original_partial_intake_child(").nth(1).unwrap()
+        .split("struct CompletionV2").next().unwrap();
+    assert_eq!(a1.matches("with_completed_history_read_v2(").count(),1);
+    let a2=lifecycle.split("fn read_original_partial_child(").nth(1).unwrap()
+        .split("fn owner_inputs").next().unwrap();
+    assert_eq!(a2.matches("with_completed_history_read_v2(").count(),2);
+    assert!(!a2.contains("let server="));
+    assert!(a2.find("probe_result_grants(").unwrap()
+        < a2.find("let audited_after_probes=with_completed_history_read_v2(").unwrap());
+    let service=include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../wholepact-authority/src/native_witness_owner/window/ephemeral_fixture_v1.rs"));
+    assert!(service.contains("started + Duration::from_secs(120)"));
+    let action=include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../wholepact-signer/src/native_ui/financial_authority_v1.rs"));
+    assert!(action.contains("(decision.consumed_at() + Duration::from_secs(120)).min(self.original_deadline)"));
+    let probe=include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../wholepact-signer/src/native_ui/runtime/durable_result_v2.rs"));
+    assert!(probe.contains("actual_grant_deadline >= source.original_deadline()"));
+    assert!(probe.contains("while Instant::now() < actual_grant_deadline"));
+
     use crate::host::financial_diagnostics_v1 as fd;
     // Inert records only: no provider, socket, source owner or native grant.
     use wholepact_signer::authority_bridge::financial_continuation_v1::{

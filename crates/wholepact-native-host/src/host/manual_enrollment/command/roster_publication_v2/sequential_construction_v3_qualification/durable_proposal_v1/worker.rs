@@ -493,7 +493,44 @@ struct OriginalPublic {
     network_profile_id: String,
     recipient_scope_digest: String,
 }
+// Inert path correlation only, never a grant or authenticated source owner.
+// The actual opener still validates all original cryptographic/source bindings.
+struct DeferredDeliverySelectorV2 {
+    selector: DeliveryReopenV2,
+    root_identity: (u64,u64),
+    parent_identity: (u64,u64),
+}
+impl DeferredDeliverySelectorV2 {
+    fn identities(selector:&DeliveryReopenV2)->Result<((u64,u64),(u64,u64))> {
+        use std::os::unix::fs::MetadataExt;
+        if selector.version!=2 || !selector.root.is_absolute()
+            || !selector.root.components().all(|c|matches!(c,std::path::Component::RootDir|std::path::Component::Normal(_)))
+        {return Err("durable V2 deferred selector");}
+        let parent=selector.root.parent().ok_or("durable V2 deferred container")?;
+        if parent.parent().is_none()
+            || std::fs::canonicalize(&selector.root).map_err(|_|"durable V2 deferred root")?!=selector.root
+            || std::fs::canonicalize(parent).map_err(|_|"durable V2 deferred container")?!=parent
+        {return Err("durable V2 deferred identity");}
+        let root=std::fs::symlink_metadata(&selector.root).map_err(|_|"durable V2 deferred root")?;
+        let parent=std::fs::symlink_metadata(parent).map_err(|_|"durable V2 deferred container")?;
+        if !root.is_dir() || !parent.is_dir(){return Err("durable V2 deferred identity");}
+        Ok(((root.dev(),root.ino()),(parent.dev(),parent.ino())))
+    }
+    fn capture(selector:DeliveryReopenV2)->Result<Self> {
+        let (root_identity,parent_identity)=Self::identities(&selector)?;
+        Ok(Self{selector,root_identity,parent_identity})
+    }
+    fn check(&self)->Result<()> {
+        if Self::identities(&self.selector)?!=(self.root_identity,self.parent_identity) {
+            return Err("durable V2 deferred identity");
+        }
+        Ok(())
+    }
+}
+
 enum State {
+    // Inert version2 selector only: startup does not claim a live native owner.
+    DeferredDeliveryV2(Box<DeferredDeliverySelectorV2>),
     DurableResultReopenV2(DeliveryReopenV2),
     DurableResultV2(Box<wholepact_signer::native_ui::synthetic_born_joined_qualification::EphemeralDurableResultNativeV2>),
     Pending(Box<EphemeralPendingBornV1>),
@@ -690,6 +727,8 @@ impl JoinedSignerWorkerV1 {
     /// Closed qualification routing over exact preserved original selectors.
     /// Version20 is completed data; version2 is genuinely unexported pre-export
     /// source. A selected opener failure never falls back to another profile.
+    /// Startup registers inert selectors only. Version2 is freshly opened by
+    /// the explicit DeliveryPeer command, never granted a long-lived idle owner.
     /// This thread worker alone does not prove an OS-process restart.
     pub fn reopen_result_v2(originals: [Option<DeliveryReopenV2>; 2]) -> Result<Self> {
         // The enclosing PartialReady control must validate both selectors
@@ -725,9 +764,7 @@ impl JoinedSignerWorkerV1 {
                             None => None,
                             Some(original) => Some(match original.version {
                                 20 => State::DurableResultReopenV2(original),
-                                2 => State::Delivery(Box::new(
-                                    EphemeralDurableDeliveryNativeV2::reopen_original_selector(original)
-                                        .map_err(durable_entry_error)?)),
+                                2 => State::DeferredDeliveryV2(Box::new(DeferredDeliverySelectorV2::capture(original)?)),
                                 _ => return Err("durable V2 unsupported source version"),
                             }),
                         };
@@ -1144,6 +1181,8 @@ fn execute(
         execute_open_roster_publication(command, states)
     } else if matches!(&command, JoinedSignerCommandV1::OpenDelivery(..)) {
         execute_open_delivery(command, states)
+    } else if matches!(&command, JoinedSignerCommandV1::DeliveryPeer(..)) {
+        execute_delivery_peer(command, states)
     } else {
         execute_other(command, states, public, cancelled)
     }
@@ -1242,6 +1281,33 @@ fn execute_open_delivery(
     Ok(reply)
 }
 
+// Keep the genuine fresh native opener off the unrelated-command frame.
+// No stored owner/grant is refreshed; the exact inert selector is consumed once.
+#[inline(never)]
+fn execute_delivery_peer(
+    command: JoinedSignerCommandV1,
+    states: &mut [Option<State>; 3],
+) -> Result<JoinedSignerReplyV1> {
+    use JoinedSignerCommandV1 as C;
+    let index = command_index(&command);
+    let slot = states.get_mut(index).ok_or("durable account index")?;
+    let state = slot.take().ok_or("durable retained state missing")?;
+    let entry = match (command, state) {
+        (C::DeliveryPeer(_), State::DeferredDeliveryV2(original)) if index > 0 => {
+            original.check()?;
+            let entry=EphemeralDurableDeliveryNativeV2::reopen_original_selector(original.selector.clone())
+                .map_err(durable_entry_error)?;
+            original.check()?;
+            Box::new(entry)
+        }
+        (C::DeliveryPeer(_), State::Delivery(entry)) => entry,
+        _ => return Err("durable finite native transition mismatch"),
+    };
+    let reply = delivery_peer(index, &entry)?;
+    *slot = Some(State::Delivery(entry));
+    Ok(reply)
+}
+
 #[inline(never)]
 fn execute_other(
     command: JoinedSignerCommandV1,
@@ -1294,10 +1360,6 @@ fn execute_other(
         (C::ReadDeliverySourceMetadata(_), State::Delivery(entry)) => {
             let json = entry.coordinated_pre_v3_metadata().map_err(|error| signer_error(error, "original source metadata"))?;
             (State::Delivery(entry), R::DeliverySourceMetadata { index, json })
-        }
-        (C::DeliveryPeer(_), State::Delivery(entry)) => {
-            let reply = delivery_peer(index, &entry)?;
-            (State::Delivery(entry), reply)
         }
         (C::PollDeliveryPair(_), State::Delivery(mut entry)) => {
             poll_until(
@@ -2677,6 +2739,57 @@ mod admission_diagnostic_tests {
             }
             assert_eq!(routed[index.min(2)].is_some(), index == 3);
         }
+
+
+        // Deferred startup retains only inert bytes and filesystem correlation.
+        // No native opener/provider/socket is invoked by these rejection tests.
+        let temporary=tempfile::tempdir().unwrap();
+        let container=temporary.path().join("container");std::fs::create_dir(&container).unwrap();
+        let root=container.join("root");std::fs::create_dir(&root).unwrap();
+        let selector=DeliveryReopenV2{version:2,root:root.clone(),proposal:proposal.clone(),
+            aggregate_budget_zatoshis:1,account_id:"inert".into(),owner_setup_json:"inert".into(),original_directory_preserved:false};
+        let deferred=||DeferredDeliverySelectorV2::capture(selector.clone()).unwrap();
+        assert!(deferred().check().is_ok());
+        assert_eq!(serde_json::to_vec(&deferred().selector).unwrap(),serde_json::to_vec(&selector).unwrap());
+        let mut invalid=selector.clone();invalid.version=20;
+        assert!(DeferredDeliverySelectorV2::capture(invalid).is_err());
+        let mut invalid=selector.clone();invalid.root=PathBuf::from("relative");
+        assert!(DeferredDeliverySelectorV2::capture(invalid).is_err());
+        for command in [JoinedSignerCommandV1::PreserveDelivery(1),
+            JoinedSignerCommandV1::ReadDeliverySourceMetadata(1),JoinedSignerCommandV1::PollDeliveryPair(1),
+            JoinedSignerCommandV1::AcceptDelivery(1),JoinedSignerCommandV1::ConfigureDeliveryWitness(1),
+            JoinedSignerCommandV1::OpenDelivery(1,proposal.clone()),
+            JoinedSignerCommandV1::OpenDurableResultV2(1,selector.clone())] {
+            let mut states=[None,Some(State::DeferredDeliveryV2(Box::new(deferred()))),None];
+            assert_eq!(execute(command,&mut states,None,&cancelled).err(),Some("durable finite native transition mismatch"));
+            assert!(states[1].is_none());
+        }
+        let mut states=[Some(State::DeferredDeliveryV2(Box::new(deferred()))),None,None];
+        assert_eq!(execute(JoinedSignerCommandV1::DeliveryPeer(3),&mut states,None,&cancelled).err(),Some("durable account index"));
+        assert!(states[0].is_some());
+        assert_eq!(execute(JoinedSignerCommandV1::DeliveryPeer(1),&mut states,None,&cancelled).err(),Some("durable retained state missing"));
+        assert_eq!(execute(JoinedSignerCommandV1::DeliveryPeer(0),&mut states,None,&cancelled).err(),Some("durable finite native transition mismatch"));
+        assert!(states[0].is_none());
+        let original=deferred();let held=container.join("held");
+        std::fs::rename(&root,&held).unwrap();std::fs::create_dir(&root).unwrap();
+        assert!(original.check().is_err());std::fs::remove_dir(&root).unwrap();
+        std::os::unix::fs::symlink(&held,&root).unwrap();assert!(original.check().is_err());
+        std::fs::remove_file(&root).unwrap();std::fs::rename(&held,&root).unwrap();assert!(original.check().is_ok());
+        let saved=temporary.path().join("saved");std::fs::rename(&container,&saved).unwrap();
+        std::fs::create_dir(&container).unwrap();std::fs::rename(saved.join("root"),&root).unwrap();
+        // Exact root inode retained, but replacement parent still fails closed.
+        assert!(original.check().is_err());
+        let source=include_str!("worker.rs").split("#[cfg(test)]").next().unwrap();
+        let startup=source.split("pub fn reopen_result_v2").nth(1).unwrap().split("pub fn").next().unwrap();
+        assert!(startup.contains("State::DeferredDeliveryV2"));
+        assert!(!startup.contains("reopen_original_selector"));
+        let peer=source.split("fn execute_delivery_peer(").nth(1).unwrap().split("fn execute_other(").next().unwrap();
+        let before=peer.find("original.check()?").unwrap();
+        let open=peer.find("reopen_original_selector(original.selector.clone())").unwrap();
+        let after=peer[open..].find("original.check()?").unwrap()+open;
+        let reply=peer.find("let reply = delivery_peer").unwrap();
+        assert!(before<open && open<after && after<reply);
+        assert!(peer.contains("*slot = Some(State::Delivery(entry))"));
 
             })
             .expect("inert worker-order test thread must start")
