@@ -1616,7 +1616,7 @@ fn execute_other(
                 if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
                     return Err("durable V2 cancelled or original ceiling expired");
                 }
-                let phase = entry.poll().map_err(|e| signer_error(e, "durable V2 actual native poll"))?;
+                let phase = entry.poll().map_err(|e| financial_signer_error(e, "durable V2 actual native poll", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerReturn, None))?;
                 if stop.load(Ordering::Acquire) {
                     if phase == P::Complete { break; }
                     let since = stopping_since.get_or_insert_with(Instant::now);
@@ -1637,7 +1637,7 @@ fn execute_other(
             (State::DurableResultV2(entry), R::Done { index })
         }
         (C::PreserveDurableResultV2(_), State::DurableResultV2(entry)) => {
-            let original = entry.close_preserving_originals().map_err(|e| signer_error(e, "durable V2 actual source drain"))?;
+            let original = entry.close_preserving_originals().map_err(|e| financial_signer_error(e, "durable V2 actual source drain", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerDrain, None))?;
             (State::PreservedDelivery, R::DeliveryPreserved { index, original })
         }
         (C::BeginFinancialContinuation(_, wallet), State::ClosedDelivery(entry)) => {

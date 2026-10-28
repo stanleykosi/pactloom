@@ -4834,7 +4834,10 @@ impl DurableResultNativeFixtureV2 {
         if self.runtime.durable_result_phase_for_qualification_v2().is_some() || self.runtime.pending.is_some()
             || self.runtime.open.is_some() || self.runtime.financial_phase_v1().is_some()
         { return Err(Error::Uncertain); }
-        if original_inventory(&self.selector.root)? != self.inventory { return Err(Error::ReviewMismatch); }
+        let drained_inventory = original_inventory(&self.selector.root)?;
+        if !durable_result_postdrain_inventory_v2(&self.inventory, &drained_inventory) {
+            return Err(Error::ReviewMismatch);
+        }
         if let Some(pair) = &self.preserved_pair { pair.check_progression(&self.selector, true)?; }
         Ok(())
     }
@@ -5207,5 +5210,51 @@ mod started_custody_inventory_v2_tests {
         let mut duplicate = base.clone(); duplicate.push("authority.sqlite-wal".into()); duplicate.sort();
         assert!(!started_inventory_lifecycle_v2(&duplicate, &base));
         assert!(!started_inventory_lifecycle_v2(&base, &duplicate));
+    }
+}
+
+// Qualification-only comparison AFTER the authenticated V2 result opener and
+// owned account drain. Keep the full original inventory: only removal of these
+// exact SQLite sidecars is expected when the last connection checkpoints/closes.
+// No additions, other removals, directory cleanup or logical-journal authority.
+fn durable_result_postdrain_inventory_v2(
+    before: &BTreeSet<OsString>, after: &BTreeSet<OsString>,
+) -> bool {
+    let authority = OsString::from("authority.sqlite");
+    before.contains(&authority) && after.contains(&authority)
+        && after.is_subset(before)
+        && before.difference(after).all(|name| {
+            name == &OsString::from("authority.sqlite-wal")
+                || name == &OsString::from("authority.sqlite-shm")
+        })
+}
+#[cfg(test)]
+mod durable_result_postdrain_inventory_v2_tests {
+    use super::{durable_result_postdrain_inventory_v2, BTreeSet, OsString};
+    #[test]
+    fn durable_result_postdrain_rejects_every_addition_and_non_sidecar_removal() {
+        let names = ["authority.sqlite", "authority.sqlite-wal", "authority.sqlite-shm",
+            "original-record.json", "signer.lock", "authority.sqlite-journal",
+            "authority.sqlite-wal-extra", "authority.sqlite-shm-extra"];
+        let inventory = |mask: usize| -> BTreeSet<OsString> {
+            names.iter().enumerate().filter(|(index, _)| mask & (1 << index) != 0)
+                .map(|(_, name)| OsString::from(*name)).collect()
+        };
+        // Exhaustive inert name-set matrix: all stable names must be identical;
+        // sidecars may be retained or removed, never newly appear after drain.
+        for before in 0usize..256 { for after in 0usize..256 {
+            let expected = before & 1 != 0 && after & 1 != 0
+                && after & !before == 0 && (before ^ after) & !6 == 0;
+            assert_eq!(durable_result_postdrain_inventory_v2(&inventory(before), &inventory(after)),
+                expected, "before={before} after={after}");
+        }}
+        // OsString comparison must not silently normalize non-UTF8 lookalikes.
+        use std::os::unix::ffi::OsStringExt;
+        let base = inventory(7);
+        let mut unknown = base.clone();
+        unknown.insert(OsString::from_vec(b"authority.sqlite-wal\xff".to_vec()));
+        assert!(!durable_result_postdrain_inventory_v2(&base, &unknown));
+        assert!(!durable_result_postdrain_inventory_v2(&unknown, &base));
+        assert!(durable_result_postdrain_inventory_v2(&unknown, &unknown));
     }
 }

@@ -359,16 +359,27 @@ fn finite_result_failure_v2(record:Option<crate::host::financial_diagnostics_v1:
     record.current_timing=None;record.authority_call=None;
     Some(record)
 }
+fn take_result_failure_v2<T>(result:&Result<T>,stage:crate::host::financial_diagnostics_v1::FinancialStageV1,
+    commit:crate::host::financial_diagnostics_v1::FinancialCommitStateV1)->Option<crate::host::financial_diagnostics_v1::FinancialDiagnosticV1> {
+    use crate::host::financial_diagnostics_v1 as fd;
+    let Err(error)=result else{return None;};
+    // A successful Host result must not consume an asynchronous worker failure.
+    fd::take_operation_failure().or_else(|| {
+        fd::host(stage,commit,error);
+        fd::take_operation_failure()
+    })
+}
 fn promote_result_failure_v2<T>(result:&Result<T>) {
     use crate::host::financial_diagnostics_v1 as fd;
-    let captured=fd::take_operation_failure();
-    if let Err(error)=result {
-        let captured=captured.or_else(|| {
-            fd::host(fd::FinancialStageV1::LifecycleHarness,fd::FinancialCommitStateV1::NotEstablished,error);
-            fd::take_operation_failure()
-        });
-        if let Some(record)=finite_result_failure_v2(captured,true,&RESULT_FAILURE_EMITTED_V2){fd::emit(record);}
-    }
+    let captured=take_result_failure_v2(result,fd::FinancialStageV1::LifecycleHarness,fd::FinancialCommitStateV1::NotEstablished);
+    if let Some(record)=finite_result_failure_v2(captured,result.is_err(),&RESULT_FAILURE_EMITTED_V2){fd::emit(record);}
+}
+// A successful Host intake/Finish can still be followed by a worker refusal.
+// Preserve the worker's real first error; fallback identifies only this tail.
+fn promote_result_tail_failure_v2<T>(result:&Result<T>,stage:crate::host::financial_diagnostics_v1::FinancialStageV1) {
+    use crate::host::financial_diagnostics_v1 as fd;
+    let captured=take_result_failure_v2(result,stage,fd::FinancialCommitStateV1::IntakeCommitted);
+    if let Some(record)=finite_result_failure_v2(captured,result.is_err(),&RESULT_FAILURE_EMITTED_V2){fd::emit(record);}
 }
 
 fn return_exact(host:&Host,workspace:&Path,signers:&worker::JoinedSignerWorkerV1,index:usize,
@@ -396,9 +407,31 @@ fn return_exact(host:&Host,workspace:&Path,signers:&worker::JoinedSignerWorkerV1
     })();
     promote_result_failure_v2(&result);
     stop.store(true,Ordering::Release);
-    let returned=done(signers,index);result?;returned?;
-    signers.send(C::PreserveDurableResultV2(index)).map_err(worker_error)?;
-    Ok((preserved(signers,index)?,request))
+    let returned=done(signers,index);result?;
+    promote_result_tail_failure_v2(&returned,crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerReturn);
+    returned?;
+    let preserved=(||{
+        signers.send(C::PreserveDurableResultV2(index)).map_err(worker_error)?;
+        preserved(signers,index)
+    })();
+    promote_result_tail_failure_v2(&preserved,crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerDrain);
+    Ok((preserved?,request))
+}
+
+// Only transport failures before Ready match these deliberate Return refusals.
+// The caller additionally requires the native worker's independent denial and
+// unchanged authenticated progress/history; this predicate alone proves nothing.
+fn expected_return_probe_failure_v2(
+    probe:wholepact_signer::native_ui::synthetic_born_joined_qualification::DurableResultGrantProbeV2,
+    failure:&crate::host::financial_diagnostics_v1::FinancialDiagnosticV1)->bool {
+    use wholepact_signer::native_ui::synthetic_born_joined_qualification::DurableResultGrantProbeV2 as P;
+    use crate::host::financial_diagnostics_v1::{FinancialStageV1 as S,FinancialErrorClassV1 as E,
+        FinancialComponentV1 as C,FinancialCommitStateV1 as K};
+    failure.is_valid_v1() && matches!(probe,P::WrongSignatureSetReturn|P::RevokedReturn|P::ExpiredReturn)
+        && failure.component==C::SignerBridge && failure.commit_state==K::NotEstablished
+        && (matches!((failure.stage,failure.error_class),
+            (S::ResultHostPreparedWrite,E::Ipc)|(S::ResultReadyWait,E::FrameEof|E::FrameIo))
+            || (probe==P::ExpiredReturn && failure.stage==S::ResultReadyWait && failure.error_class==E::FrameDeadline))
 }
 
 // Real click-issued grants are consumed by the production prepare/serve
@@ -440,9 +473,7 @@ fn probe_result_grants(host:&Host,workspace:&Path,signers:&worker::JoinedSignerW
             fd::reset_operation();
             let intake=host.intake_original_financial_result_v2(workspace,"durable-v2-intake-1",receiver,history);
             let failure=fd::take_operation_failure().ok_or(Error::Authentication)?;
-            intake.is_err() && failure.stage==fd::FinancialStageV1::ResultReceive
-                && failure.component==fd::FinancialComponentV1::SignerBridge
-                && failure.commit_state==fd::FinancialCommitStateV1::NotEstablished
+            intake.is_err() && expected_return_probe_failure_v2(probe,&failure)
         };
         let outcome=signers.receive().map_err(worker_error)?;
         stop.store(true,Ordering::Release);
@@ -1772,6 +1803,47 @@ fn durable_failure_v2_covers_all_final_boundaries_and_diagnostic_states(){
     let first=fd::FinancialDiagnosticV1{schema:1,stage:fd::FinancialStageV1::AuthenticatedIntake,
         component:fd::FinancialComponentV1::Engine,error_class:fd::FinancialErrorClassV1::Permission,
         commit_state:fd::FinancialCommitStateV1::OutcomeUncertain,current_timing:None,authority_call:None};
+    // Inert expected-refusal metadata never substitutes for native worker proof.
+    {
+        use wholepact_signer::native_ui::synthetic_born_joined_qualification::DurableResultGrantProbeV2 as P;
+        let probes=[P::WrongRequestRead,P::WrongRecipientRead,P::RevokedRead,
+            P::WrongSignatureSetReturn,P::RevokedReturn,P::ExpiredReturn];
+        let stages=[FS::ResultReceive,FS::ResultInstalledProviderVerification,FS::ResultHostPreparedWrite,
+            FS::ResultReadyWait,FS::ResultReadyMatch,FS::ResultFetchWrite,FS::ResultHeldRead,
+            FS::ResultEvidenceValidation,FS::ResultPreviewMatch,FS::ResultCurrentRead,
+            FS::ResultFinishRead,FS::AuthenticatedIntake,FS::WorkerDrain];
+        let classes=[FC::Ipc,FC::FrameEof,FC::FrameIo,FC::FrameDeadline,FC::Permission,
+            FC::FrameCurrentCheck,FC::FrameCredentialsMismatch,FC::Invalid];
+        for probe in probes {for stage in stages {for error_class in classes {
+            let record=fd::FinancialDiagnosticV1{schema:1,stage,component:fd::FinancialComponentV1::SignerBridge,
+                error_class,commit_state:CS::NotEstablished,current_timing:None,authority_call:None};
+            let return_probe=matches!(probe,P::WrongSignatureSetReturn|P::RevokedReturn|P::ExpiredReturn);
+            let expected=return_probe && ((stage==FS::ResultHostPreparedWrite && error_class==FC::Ipc)
+                || (stage==FS::ResultReadyWait && matches!(error_class,FC::FrameEof|FC::FrameIo))
+                || (probe==P::ExpiredReturn && stage==FS::ResultReadyWait && error_class==FC::FrameDeadline));
+            assert_eq!(expected_return_probe_failure_v2(probe,&record),expected);
+            let mut wrong=record;wrong.component=fd::FinancialComponentV1::Host;
+            assert!(!expected_return_probe_failure_v2(probe,&wrong));
+            let mut wrong=record;wrong.commit_state=CS::IntakeCommitted;
+            assert!(!expected_return_probe_failure_v2(probe,&wrong));
+            let mut wrong=record;wrong.schema=2;
+            assert!(!expected_return_probe_failure_v2(probe,&wrong));
+        }}}
+    }
+    // An already-recorded worker error survives Host success and keeps precedence.
+    fd::capture_first(first);
+    assert!(take_result_failure_v2(&Ok(()),FS::WorkerReturn,CS::IntakeCommitted).is_none());
+    assert_eq!(fd::take_operation_failure(),Some(first));
+    for stage in [FS::WorkerReturn,FS::WorkerDrain] {
+        fd::reset_operation();fd::capture_first(first);
+        let failure:Result<()>=Err(Error::Authentication);
+        assert_eq!(take_result_failure_v2(&failure,stage,CS::IntakeCommitted),Some(first));
+        let fallback=take_result_failure_v2(&failure,stage,CS::IntakeCommitted).unwrap();
+        assert_eq!(fallback.stage,stage);assert_eq!(fallback.commit_state,CS::IntakeCommitted);
+        assert_eq!(fallback.component,fd::FinancialComponentV1::Host);
+        assert!(fallback.is_valid_v1());
+    }
+    fd::reset_operation();
     let emitted=AtomicBool::new(false);
     assert!(finite_result_failure_v2(Some(first),false,&emitted).is_none());
     assert!(!emitted.load(Ordering::SeqCst));
