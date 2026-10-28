@@ -15,7 +15,8 @@ AUDIT = ROOT / 'scripts/ci-financial-downstream-projection-audit.py'
 spec = importlib.util.spec_from_file_location('p93_downstream_inverse', AUDIT)
 A = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(A)
-AUDIT_SHA = '0b13fd4e77525c870dbcc29565016675f402b9893b7e67da03b0073c13da48d1'
+AUDIT_SHA = '3909e6185df28b37fb1ead6032dc8c456b4134035dc4b0008cc6c9c9b4a82a03'
+PRIOR_P93_AUDIT_SHA = '0b13fd4e77525c870dbcc29565016675f402b9893b7e67da03b0073c13da48d1'
 PRIOR_AUDIT_SHA = '6c937179892b412846835bf94763015030ff91fe778fbf7bdea8c127a61cf00e'
 HOOK_PATH = 'crates/wholepact-signer/src/authority_bridge/financial_signing_v1.rs'
 HOOK_SHA = '91aedd1bdf3e07e18a73a60745f75b729b4ccdeaa4658386d2be8933021722e6'
@@ -72,6 +73,8 @@ class FinancialDurableSourceInverseTests(unittest.TestCase):
         old = A.restore_durable_v2_sources(raw)
         for path, pin in A.P93_DURABLE_SOURCE_INVERSES.items():
             current, prior = pin['inverse'][0]
+            if path == A.P93P_RUNTIME_PATH:
+                current, prior = A.P93P_CUSTODY_HELPER, ''
             cases = {
                 'stale_p92': old[path],
                 'missing': raw[path].replace(current, prior, 1),
@@ -101,6 +104,25 @@ class FinancialDurableSourceInverseTests(unittest.TestCase):
             with patch.object(sys, 'argv', [str(AUDIT), '--source', str(root)]):
                 with self.assertRaisesRegex(AssertionError, 'P93 source pin'):
                     A.main()
+
+    def test_p93p_custody_inverse_preserves_whole_prior_runtime_and_audit(self):
+        text = AUDIT.read_bytes().decode('utf-8')
+        start = text.index('# Exact P93P qualification-only custody helper back to the prior pinned runtime.\n')
+        end = text.index('# End exact P93P supplemental inverse.\n\n', start) + len('# End exact P93P supplemental inverse.\n\n')
+        prior = text[:start] + text[end:]
+        self.assertEqual(prior.count(' restored=restore_p93p_runtime_sources(raw)'), 1)
+        prior = prior.replace(' restored=restore_p93p_runtime_sources(raw)', ' restored=dict(raw)', 1)
+        self.assertEqual(digest(prior), PRIOR_P93_AUDIT_SHA)
+        raw = {path: (ROOT / path).read_bytes().decode('utf-8') for path in A.BASELINE_SHA256}
+        restored = A.restore_p93p_runtime_sources(raw)
+        path = A.P93P_RUNTIME_PATH
+        self.assertEqual(digest(restored[path]), A.P93_DURABLE_SOURCE_INVERSES[path]['candidate_sha256'])
+        for other in set(raw) - {path}: self.assertEqual(raw[other], restored[other])
+        helper = A.P93P_CUSTODY_HELPER
+        for mutation in [restored[path], raw[path] + helper, raw[path].replace(helper, helper[:-1], 1),
+                         raw[path] + '\n// unrelated\n', raw[path].replace('request.validate()', 'request.changed()', 1),
+                         raw[path].replace('\n', '\r\n')]:
+            with self.assertRaises(AssertionError): A.restore_durable_v2_sources({**raw, path: mutation})
 
     def test_started_hook_is_exact_postcommit_prekey_remove_only_delta(self):
         text = (ROOT / HOOK_PATH).read_bytes().decode('utf-8')
