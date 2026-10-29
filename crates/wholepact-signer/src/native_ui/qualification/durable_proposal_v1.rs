@@ -5174,7 +5174,7 @@ pub fn audit_started_after_restart_observed_v2(custody: StartedFinancialCustodyV
                 return observe_started_result_v2(Err(error), S::Open, runtime.financial_diagnostic_v1(), &mut observe);
             }
             match runtime.financial_phase_v1() {
-                Some(super::financial_v1::FinancialPhaseV1::Opening) => std::thread::sleep(Duration::from_millis(2)),
+                Some(super::financial_v1::FinancialPhaseV1::Opening | super::financial_v1::FinancialPhaseV1::Working) => std::thread::sleep(Duration::from_millis(2)),
                 Some(super::financial_v1::FinancialPhaseV1::AwaitingReturn) => break,
                 _ => return observe_started_result_v2(Err(Error::ReviewMismatch), S::Open, runtime.financial_diagnostic_v1(), &mut observe),
             }
